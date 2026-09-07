@@ -1,0 +1,11 @@
+# core.autocrlf=true rewrites line endings on checkout. The fixture ratchet
+# in tests/check_fixtures_deterministic.py sha256s these files, so any
+# rewrite makes a fresh clone fail against a baseline recorded elsewhere.
+# -text pins the bytes exactly as committed.
+fixtures/** -text
+tests/baseline.json -text
+
+# Lockfiles are compared verbatim; never normalize them either.
+sidecar/uv.lock -text
+src-tauri/Cargo.lock -text
+package-lock.json -text
