@@ -1,0 +1,70 @@
+{
+  "tategaki_01.png": {
+    "bubbles": [
+      {
+        "aspect": 0.604,
+        "box": [
+          150,
+          190,
+          470,
+          720
+        ],
+        "clean_ring_px_min": 6,
+        "line_art_crosses": false,
+        "on_screentone": true,
+        "text": "こんにちは"
+      },
+      {
+        "aspect": 1.375,
+        "box": [
+          620,
+          240,
+          1060,
+          560
+        ],
+        "clean_ring_px_min": 6,
+        "line_art_crosses": false,
+        "on_screentone": true,
+        "text": "元気ですか"
+      },
+      {
+        "aspect": 0.773,
+        "box": [
+          300,
+          980,
+          640,
+          1420
+        ],
+        "clean_ring_px_min": null,
+        "line_art_crosses": true,
+        "on_screentone": false,
+        "text": "またあした"
+      }
+    ],
+    "notes": "Ring guarantee: bubble 0 sits on screentone with a clean 6-10px band inside its border; line art crosses bubble 2 only.",
+    "panels": [
+      [
+        60,
+        60,
+        1140,
+        800
+      ],
+      [
+        60,
+        850,
+        640,
+        1560
+      ],
+      [
+        700,
+        850,
+        1140,
+        1560
+      ]
+    ],
+    "size": [
+      1200,
+      1700
+    ]
+  }
+}

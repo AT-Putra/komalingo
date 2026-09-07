@@ -1,0 +1,103 @@
+{
+  "rung4.png": {
+    "expect": {
+      "fit_compromised": false,
+      "fit_failed": false,
+      "why": "fits after shrink-to-fit above the font floor"
+    },
+    "forces_rung": 4,
+    "polygon": [
+      30,
+      30,
+      390,
+      270
+    ],
+    "source_ja": "たすけて",
+    "translation_in": "Help me right now please"
+  },
+  "rung5-geometry.png": {
+    "expect": {
+      "fit_compromised": true,
+      "fit_failed": false,
+      "why": "polygon at the raster edge; geometry, not length, forces rung 5"
+    },
+    "forces_rung": 5,
+    "polygon": [
+      6,
+      6,
+      254,
+      454
+    ],
+    "source_ja": "ほそい",
+    "translation_in": "A sentence in a sliver"
+  },
+  "rung5-length.png": {
+    "expect": {
+      "fit_compromised": true,
+      "fit_failed": false,
+      "retranslate": true,
+      "why": "length forces one capped re-translation"
+    },
+    "forces_rung": 5,
+    "polygon": [
+      20,
+      20,
+      280,
+      180
+    ],
+    "source_ja": "せつめい",
+    "translation_in": "This explanation is far too long to ever fit inside this small bubble at any font size above the floor"
+  },
+  "rung5-midtoken.png": {
+    "expect": {
+      "ellipsis": true,
+      "fit_compromised": true,
+      "fit_failed": true,
+      "why": "first token exceeds capacity: mid-token break with an ellipsis"
+    },
+    "forces_rung": 5,
+    "polygon": [
+      8,
+      8,
+      122,
+      102
+    ],
+    "source_ja": "ながい",
+    "translation_in": "Pneumonoultramicroscopicsilicovolcanoconiosis"
+  },
+  "rung5-nowordfits.png": {
+    "expect": {
+      "fit_compromised": true,
+      "fit_failed": true,
+      "rendered_text": "",
+      "why": "no whole word fits: renders empty, fit_failed surfaced"
+    },
+    "forces_rung": 5,
+    "polygon": [
+      8,
+      8,
+      142,
+      112
+    ],
+    "source_ja": "むり",
+    "translation_in": "Incomprehensibilities notwithstanding"
+  },
+  "rung5-success.png": {
+    "expect": {
+      "fit_compromised": true,
+      "fit_failed": false,
+      "rendered_text": "Shortened on retry",
+      "retranslate": true,
+      "why": "the retry's reply MUST be rendered; discarding it must fail"
+    },
+    "forces_rung": 5,
+    "polygon": [
+      20,
+      20,
+      320,
+      220
+    ],
+    "source_ja": "みじかく",
+    "translation_in": "Shortened on retry"
+  }
+}
