@@ -1,0 +1,222 @@
+"""Phase 0 -- the aggregate regression runner (US-013).
+
+Discovers tests/check_*.py, runs them in phase order, prints one table, and
+exits with the WORST result under the shared contract:
+
+    0 pass · 1 fail · 2 inconclusive · 3 skip        precedence 1 > 2 > 3 > 0
+
+Two things here are load-bearing.
+
+**A wrong interpreter must fail loudly, not quietly.** The system Python has no
+PIL. Run under it and every check that opens an image exits 1 with
+ModuleNotFoundError, which reads as a determinism or imaging regression and is
+not one -- Phase 0a lost time to exactly that. So the interpreter is asserted
+BEFORE any check runs, and a miss aborts with its own message rather than
+producing a table of misattributed failures.
+
+**A check that silently went from pass to skip is a regression.** Fixtures
+vanish, an env var gets dropped, and the run still prints green because a skip
+is not a failure. That is why every run appends its per-check status to
+tests/baseline.json and compares against the last comparable record.
+
+Comparison is scoped to the newest prior record with an IDENTICAL `skipped`
+set. Without that scoping a developer's `full` record (real-panel fixtures
+present) and CI's `synthetic` record differ by several legitimately-skipped
+checks, and the ratchet reads that as a pass-to-skip regression. When no
+comparable record exists -- a clean clone, or a new environment class -- this
+exits 3 with the reason `no baseline record for env_class=<x>` and writes the
+first record. A floor that silently never fires is the same cannot-go-red
+defect the store was added to remove.
+
+Run from the repo root:
+    uv run --project sidecar python tests/run_all.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TESTS = os.path.join(ROOT, "tests")
+BASELINE = os.path.join(TESTS, "baseline.json")
+
+PASS, FAIL, INCONCLUSIVE, SKIP = 0, 1, 2, 3
+NAMES = {PASS: "PASS", FAIL: "FAIL", INCONCLUSIVE: "INCONCLUSIVE", SKIP: "SKIP"}
+
+# Worst-first. `max` over this ranking is the exit code: 1 beats 2 beats 3
+# beats 0, which is NOT numeric order -- 1 is the largest by rank, not value.
+RANK = {FAIL: 3, INCONCLUSIVE: 2, SKIP: 1, PASS: 0}
+
+# Phase order, not alphabetical: a foundational failure should be read first.
+# Names not listed here still run, after these, sorted -- a check added later
+# is never silently dropped just because nobody updated this list.
+PHASE_ORDER = [
+    "check_fixtures_deterministic",
+    "check_atomic",
+    "check_imaging",
+    "check_provider",
+    "check_models",
+    "check_pipeline",
+    "check_api",
+    "check_settings",
+    "check_package",
+    "check_ipc",
+    "check_probe",
+]
+
+# Real-panel fixtures are git-ignored. Their presence is what separates a
+# developer's environment from CI's, and it changes which checks can run.
+REAL_PANELS = os.path.join(ROOT, "fixtures", "panels")
+
+
+def env_class() -> str:
+    return "full" if os.path.isdir(REAL_PANELS) and os.listdir(REAL_PANELS) else "synthetic"
+
+
+def assert_interpreter() -> None:
+    """Abort loudly on an interpreter that cannot run the checks.
+
+    This is deliberately not a check result. A missing PIL is not a failing
+    check, it is a runner invoked the wrong way, and reporting it as eleven
+    red checks sends the reader looking in eleven wrong places.
+    """
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        sys.stderr.write(
+            "run_all.py: wrong interpreter -- PIL is not importable.\n"
+            f"  running under: {sys.executable}\n"
+            "  run it as:     uv run --project sidecar python tests/run_all.py\n"
+            "Aborting rather than reporting this as check failures.\n"
+        )
+        raise SystemExit(FAIL)
+
+
+def discover() -> list[str]:
+    """check_*.py in phase order, then anything unlisted, sorted."""
+    found = {
+        f[:-3]
+        for f in os.listdir(TESTS)
+        if f.startswith("check_") and f.endswith(".py")
+    }
+    ordered = [n for n in PHASE_ORDER if n in found]
+    return ordered + sorted(found - set(ordered))
+
+
+def run_check(name: str) -> tuple[int, float]:
+    start = time.time()
+    r = subprocess.run(
+        [sys.executable, os.path.join(TESTS, name + ".py")],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    elapsed = time.time() - start
+    tail = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    print(f"  {name:<32} {NAMES.get(r.returncode, r.returncode):<12} {elapsed:6.1f}s  {tail[0][:70]}")
+    if r.returncode == FAIL:
+        for line in (r.stdout or "").splitlines():
+            if "FAIL" in line:
+                print(f"      {line.strip()}")
+        if r.stderr.strip():
+            print(f"      stderr: {r.stderr.strip()[-300:]}")
+    return r.returncode, elapsed
+
+
+def load_records() -> list[dict]:
+    if not os.path.exists(BASELINE):
+        return []
+    try:
+        with open(BASELINE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        # A corrupt store must not read as "no prior record", which would
+        # silently pass the ratchet. Say so and treat it as a failure.
+        print(f"\nbaseline.json is unreadable ({e}) -- refusing to treat that as no history")
+        raise SystemExit(FAIL)
+    return data if isinstance(data, list) else [data]
+
+
+def append_record(record: dict) -> None:
+    records = load_records() if os.path.exists(BASELINE) else []
+    records.append(record)
+    with open(BASELINE, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(records, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+
+def main() -> int:
+    assert_interpreter()
+
+    checks = discover()
+    print(f"run_all: {len(checks)} checks, env_class={env_class()}, {sys.executable}\n")
+
+    results: dict[str, int] = {}
+    for name in checks:
+        results[name], _ = run_check(name)
+
+    worst = max(results.values(), key=lambda code: RANK.get(code, RANK[FAIL])) if results else PASS
+    skipped = sorted(n for n, code in results.items() if code == SKIP)
+
+    print(f"\n  {'-' * 60}")
+    for code in (FAIL, INCONCLUSIVE, SKIP, PASS):
+        names = sorted(n for n, c in results.items() if c == code)
+        if names:
+            print(f"  {NAMES[code]:<12} {len(names):>2}  {', '.join(names)}")
+    print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
+
+    record = {
+        "phase": "0",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "env_class": env_class(),
+        "skipped": skipped,
+        "checks": {n: NAMES.get(c, str(c)) for n, c in sorted(results.items())},
+        # Phase 0's renderer is a placeholder; these are the floor Phase 2a
+        # ratchets against, and they are written even when unmeasured so the
+        # schema is fixed here rather than invented later.
+        "metrics": {
+            "max_overflow_pct": None,
+            "min_font_px": None,
+            "clipped_glyph_count": None,
+            "fit_compromised_count": None,
+            "fit_failed_count": None,
+            "mean_cer": None,
+            "exact_match": None,
+        },
+    }
+
+    # -- the ratchet ------------------------------------------------------
+    ec = env_class()
+    prior = [r for r in load_records()
+             if r.get("env_class") == ec and sorted(r.get("skipped", [])) == skipped]
+
+    if not prior:
+        append_record(record)
+        print(f"\n  no baseline record for env_class={ec} with this skip set -- wrote the first one")
+        # The ratchet's own verdict is 3, but it must not MASK a red check.
+        # Returning SKIP unconditionally here would report a failing run as
+        # exit 3 on any clean clone -- the first run is exactly when a real
+        # failure is most likely and least excusable to hide.
+        return max(worst, SKIP, key=lambda code: RANK.get(code, RANK[FAIL]))
+
+    last = prior[-1]
+    regressions = []
+    for name, status in record["checks"].items():
+        was = last["checks"].get(name)
+        if was == "PASS" and status != "PASS":
+            regressions.append(f"{name}: PASS -> {status}")
+
+    append_record(record)
+    if regressions:
+        print(f"\n  REGRESSION against {last['timestamp']}:")
+        for r in regressions:
+            print(f"    {r}")
+        return FAIL
+
+    print(f"\n  no regression against {last['timestamp']} ({len(last['checks'])} checks)")
+    return worst
+
+
+sys.exit(main())

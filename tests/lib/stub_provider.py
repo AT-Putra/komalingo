@@ -1,0 +1,165 @@
+"""An OpenAI-compatible provider stub, in-process, no new dependency.
+
+Replays the hand-authored bodies in fixtures/provider/ and counts what the
+client did: peak concurrency and total chat-completion requests. Those two
+counters are what check_provider.py's semaphore and batching asserts read.
+
+The 200ms delay lives HERE, not in the caller. A stub that answers instantly
+may never put more than one request in flight even with the semaphore removed,
+so the concurrency assert would pass against a broken client -- it could not go
+red. Owning the delay in one place also stops a later check from quietly
+lowering it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+FIXTURES = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "fixtures",
+    "provider",
+)
+
+REQUEST_DELAY = 0.2  # seconds. See the module docstring before changing this.
+
+
+class StubProvider:
+    """Usable as a context manager; `.url` is the OpenAI-compatible base URL."""
+
+    def __init__(self, status=200, delay=REQUEST_DELAY):
+        self.status = status  # 200, 401 or 500 -- selects the canned body
+        self.delay = delay
+        self.chat_requests = 0
+        self.peak_concurrency = 0
+        self._in_flight = 0
+        self._lock = threading.Lock()
+        self.last_payload = None
+
+        stub = self
+        fixtures = _load_fixtures()
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format, *args):  # noqa: A002 -- base class signature
+                pass  # the test prints its own asserts; server noise buries them
+
+            def _respond(self, code, body: bytes, ctype):
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path.rstrip("/").endswith("/models"):
+                    self._respond(200, fixtures["models"], "application/json")
+                else:
+                    self._respond(404, b'{"error":"not found"}', "application/json")
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+
+                with stub._lock:
+                    stub.chat_requests += 1
+                    stub._in_flight += 1
+                    stub.peak_concurrency = max(stub.peak_concurrency, stub._in_flight)
+                    try:
+                        stub.last_payload = json.loads(raw or b"{}")
+                    except ValueError:
+                        stub.last_payload = None
+                try:
+                    if stub.delay:
+                        threading.Event().wait(stub.delay)
+                    if stub.status == 401:
+                        self._respond(401, fixtures["401"], "application/json")
+                    elif stub.status == 500:
+                        self._respond(500, fixtures["500"], "text/html")
+                    else:
+                        self._respond(200, _chat_reply(stub.last_payload), "application/json")
+                finally:
+                    with stub._lock:
+                        stub._in_flight -= 1
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def _load_fixtures() -> dict:
+    def read(name, mode="rb"):
+        with open(os.path.join(FIXTURES, name), mode) as fh:
+            return fh.read()
+
+    return {
+        "models": read("models_200.json"),
+        "401": read("error_401.json"),
+        "500": read("error_500.html"),
+    }
+
+
+def _region_ids(payload) -> list:
+    """The ids the request actually asked about, read out of the prompt.
+
+    Parsed from the JSON array after the 'regions ' marker rather than by
+    counting '"id"' in the whole prompt: the reply-format template the client
+    sends also contains an "id", so counting would report one region too many.
+    """
+    texts = []
+    if isinstance(payload, dict):
+        for msg in payload.get("messages", []):
+            content = msg.get("content")
+            if isinstance(content, list):
+                texts += [p.get("text", "") for p in content if p.get("type") == "text"]
+            elif isinstance(content, str):
+                texts.append(content)
+
+    for text in texts:
+        marker = text.rfind("regions ")
+        if marker < 0:
+            continue
+        try:
+            return [r["id"] for r in json.loads(text[marker + len("regions ") :])]
+        except (ValueError, KeyError, TypeError):
+            continue
+    return [0]
+
+
+def _chat_reply(payload) -> bytes:
+    """Echo one translation per region the request asked about.
+
+    The client batches a whole page into one request, so the reply must carry
+    a list -- a stub that always answers with a single string would let a
+    one-request-per-bubble client pass the batching assert. Real ids are echoed
+    back, so a client that mismaps a split batch onto 0..n cannot pass either.
+    """
+    ids = _region_ids(payload)
+    body = json.dumps({"translations": [{"id": i, "text": f"STUB {i}"} for i in ids]})
+    return json.dumps(
+        {
+            "id": "chatcmpl-stub",
+            "object": "chat.completion",
+            "model": "stub",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": body}, "finish_reason": "stop"}
+            ],
+        }
+    ).encode()

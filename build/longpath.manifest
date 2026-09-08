@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Embedded by PyInstaller at build time, via EXE(manifest=...) in
+  build/sidecar.spec. It must NOT be merged in afterwards with mt.exe: a
+  one-file exe is a PE with the PKG archive appended, and rewriting the
+  resource section shifts everything below it, after which the bootloader
+  cannot find the archive and the exe dies on launch.
+
+  Without longPathAware the sidecar
+  cannot open a destination path over 260 characters even though atomic.py
+  already applies the \\?\ prefix. The prefix widens the API call, but the
+  process must ALSO opt in here or Win32 keeps enforcing MAX_PATH.
+
+  Manga output paths reach that length in ordinary use: a series name, a volume,
+  a chapter and a page filename, all of them frequently Japanese, under a user
+  profile directory that is itself ~40 characters before anything else is added.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Writing one
+  here makes mt.exe fail with "Failed to load and parse the manifest", which
+  reads like a manifest structure problem and is actually a prose typo.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="MangaTranslator.Sidecar"
+      version="1.0.0.0"
+      processorArchitecture="amd64"/>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+      <!-- UTF-8 as the process code page. Belt and braces with main.py's
+           stdout.reconfigure: this also covers ANSI Win32 calls made by
+           libraries we do not control. -->
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and 11. longPathAware is ignored without a supportedOS
+           entry covering the running OS. -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>

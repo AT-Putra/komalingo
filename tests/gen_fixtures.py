@@ -220,9 +220,12 @@ def gen_bubbles():
 def write_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     # sort_keys + fixed separators + trailing newline: byte-identical across runs.
+    # newline="\n": write_text defaults to os.linesep (CRLF on Windows), which
+    # would dirty every fixture on each regeneration vs the LF blobs in git.
     path.write_text(
         json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
 

@@ -1,0 +1,150 @@
+[
+  {
+    "phase": "0",
+    "timestamp": "2026-09-07T15:08:39Z",
+    "env_class": "synthetic",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": null,
+      "exact_match": null
+    }
+  },
+  {
+    "phase": "0",
+    "timestamp": "2026-09-07T15:12:24Z",
+    "env_class": "synthetic",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": null,
+      "exact_match": null
+    }
+  },
+  {
+    "phase": "0",
+    "timestamp": "2026-09-07T15:23:56Z",
+    "env_class": "synthetic",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": null,
+      "exact_match": null
+    }
+  },
+  {
+    "phase": "0",
+    "timestamp": "2026-09-08T13:22:38Z",
+    "env_class": "synthetic",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": null,
+      "exact_match": null
+    }
+  },
+  {
+    "phase": "0",
+    "timestamp": "2026-09-08T14:04:23Z",
+    "env_class": "synthetic",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": null,
+      "exact_match": null
+    }
+  }
+]

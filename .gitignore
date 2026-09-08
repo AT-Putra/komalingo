@@ -6,8 +6,14 @@
 __pycache__/
 *.py[cod]
 sidecar/.venv/
-build/
 dist/
+# build/ holds the committed PyInstaller sources (sidecar.spec,
+# longpath.manifest, launch.py) AND runtime output (work/, dist/) that
+# must never be committed. A bare "build/" ignore would swallow the
+# sources too, so both are named.
+build/work/
+build/dist/
+build/*.png
 
 # Node / Tauri
 node_modules/
@@ -17,3 +23,4 @@ src-tauri/target/
 # real-panel sets are licensed source material and stay out of the repo.
 fixtures/tategaki/
 fixtures/real/
+src-tauri/binaries/*.exe
