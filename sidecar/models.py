@@ -29,10 +29,50 @@ HEADROOM = 64 << 20  # keep the volume off zero even if our own maths is exact
 # Pinned by digest, not by "latest". A model that changes under a released
 # build changes the app's output with no version bump to explain it.
 MANIFEST = {
+    # manga-ocr is a DIRECTORY of six files, not one weight blob. transformers
+    # resolves the config, the tokenizer's vocab and the weights by NAME out of
+    # a single directory, so pinning pytorch_model.bin alone would pin the one
+    # file the loader can least do without the other five. Every file therefore
+    # carries its own digest, and `ensure` returns the directory.
+    #
+    # Pinned to a REVISION SHA, not to main -- the same reason the detector is
+    # pinned to a tag rather than a branch. This repo's main has already moved
+    # past this commit (a later one adds model.safetensors), and "the weights
+    # this build was tested against" has to name a fixed point. The digest for
+    # pytorch_model.bin below was computed from the downloaded bytes and
+    # independently agrees with the lfs.oid HuggingFace reports for that path
+    # at this revision, which for an LFS object IS the sha256 of its content.
     "manga-ocr": {
-        "url": "https://huggingface.co/kha-white/manga-ocr-base/resolve/main/pytorch_model.bin",
-        "sha256": "",  # filled at Phase 1 when the real weights are pinned
-        "size": 0,
+        "base_url": (
+            "https://huggingface.co/kha-white/manga-ocr-base/resolve/"
+            "aa6573bd10b0d446cbf622e29c3e084914df9741/"
+        ),
+        "files": {
+            "config.json": {
+                "sha256": "8c0e395de8fa699daaac21aee33a4ba9bd1309cfbff03147813d2a025f39f349",
+                "size": 77546,
+            },
+            "preprocessor_config.json": {
+                "sha256": "af4eb4d79cf61b47010fc0bc9352ee967579c417423b4917188d809b7e048948",
+                "size": 228,
+            },
+            "pytorch_model.bin": {
+                "sha256": "c63e0bb5b3ff798c5991de18a8e0956c7ee6d1563aca6729029815eda6f5c2eb",
+                "size": 444135475,
+            },
+            "special_tokens_map.json": {
+                "sha256": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3",
+                "size": 112,
+            },
+            "tokenizer_config.json": {
+                "sha256": "d775ad1deac162dc56b84e9b8638f95ed8a1f263d0f56f4f40834e26e205e266",
+                "size": 486,
+            },
+            "vocab.txt": {
+                "sha256": "344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d",
+                "size": 24072,
+            },
+        },
     },
     # PP-OCRv3's Chinese detection head, which is a DB model -- the same head
     # cv2.dnn.TextDetectionModel_DB implements. Pinned to opencv_zoo's 4.10.0
@@ -188,16 +228,57 @@ def model_dir() -> str:
     return os.path.join(os.path.expanduser("~"), ".cache", "MangaTranslator", "models")
 
 
+def _shifted(progress, base: int, total: int):
+    """One file's progress callback, reported in the whole SET's coordinates.
+
+    A function rather than a closure defined in the caller's loop: `base` and
+    `total` are bound as arguments to a fresh frame per call, so the offsets
+    cannot be shared or late-bound across iterations. The loop-local version
+    was correct too, but only because of a default-argument trick that a
+    reader has to stop and verify; this shape is correct by construction.
+    """
+    if progress is None:
+        return None
+    return lambda done, _file_total: progress(base + done, total)
+
+
+def _ensure_directory(name: str, entry: dict, progress=None) -> str:
+    """Fetch every file of a multi-file entry into one directory. Returns it.
+
+    Progress is reported across the SET, not per file. Handing the caller a
+    bar that restarts at zero six times says "something is happening" and
+    nothing else; here five of the six files are under 80 KB and one is
+    444 MB, so per-file progress would also spend five of its six resets on
+    files the user cannot perceive downloading at all.
+    """
+    directory = os.path.join(model_dir(), name)
+    total = sum(f["size"] for f in entry["files"].values())
+    fetched = 0
+    for filename, meta in entry["files"].items():
+        fetch(entry["base_url"] + filename,
+              os.path.join(directory, filename),
+              meta["sha256"], meta["size"],
+              _shifted(progress, fetched, total))
+        fetched += meta["size"]
+    return atomic.long_path(directory)
+
+
 def ensure(name: str, progress=None) -> str:
     """Fetch MANIFEST entry `name` if it is not already on disk. Returns its path.
 
-    The filename comes from the URL, so the manifest has one source of truth
-    for it and a renamed upstream file cannot silently collide with a cached
-    older one under a hand-written local name.
+    A FILE for a single-file entry, a DIRECTORY for a multi-file one -- which
+    is what each kind of loader wants to be handed: cv2.dnn reads one .onnx,
+    transformers' from_pretrained reads a directory by name.
+
+    Single-file names come from the URL, so the manifest has one source of
+    truth for them and a renamed upstream file cannot silently collide with a
+    cached older one under a hand-written local name.
     """
     entry = MANIFEST.get(name)
     if entry is None:
         raise FetchError(f"no model named {name!r} in the manifest", "error")
+    if "files" in entry:
+        return _ensure_directory(name, entry, progress)
     dest = os.path.join(model_dir(), os.path.basename(entry["url"].split("?")[0]))
     return fetch(entry["url"], dest, entry["sha256"], entry["size"], progress)
 

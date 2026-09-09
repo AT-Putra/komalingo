@@ -12,6 +12,7 @@ client raises, and the second call resumes from the surviving .part.
 import hashlib
 import os
 import sys
+import types
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -166,6 +167,67 @@ def main():
 
     ep, reason = models.select_provider(force_cpu=True)
     c.check(ep == "CPUExecutionProvider" and bool(reason), "forced CPU still explains itself")
+
+    # --- 8: every manifest entry is actually PINNED -----------------------
+    # A manifest whose whole stated purpose is "pinned by digest, not by
+    # latest" is worth nothing if an entry can carry sha256 "". manga-ocr sat
+    # exactly like that from Phase 0 until US-P1-07, and nothing was red.
+    for name, entry in sorted(models.MANIFEST.items()):
+        parts = entry["files"] if "files" in entry else {name: entry}
+        for filename, meta in sorted(parts.items()):
+            c.check(
+                len(meta.get("sha256", "")) == 64 and meta.get("size", 0) > 0,
+                f"{name}/{filename} is pinned "
+                f"(sha256 {meta.get('sha256', '')[:12]!r}..., size {meta.get('size', 0)})",
+            )
+        url = entry.get("base_url") or entry.get("url", "")
+        c.check(
+            "/resolve/main/" not in url and "/main/" not in url,
+            f"{name} is pinned to a revision, not a moving branch: ...{url[-58:]}",
+        )
+
+    # --- 9: ocr_ja loads from ensure()'s path, never the default repo id ---
+    # The defect this pins is invisible at runtime: MangaOcr's default argument
+    # is the repo id, so reverting to MangaOcr(force_cpu=True) still WORKS on
+    # any machine with a warm HuggingFace cache, and silently downloads
+    # whatever main holds on any machine without one. Neither shows up as a
+    # failing check, so the wiring is asserted directly. No network, no 444 MB
+    # load: ensure and MangaOcr are both stubbed and the argument is captured.
+    import sidecar.ocr_ja as ocr_ja
+
+    captured = {}
+
+    class FakeMangaOcr:
+        def __init__(self, pretrained_model_name_or_path=None, force_cpu=False):
+            captured["path"] = pretrained_model_name_or_path
+            captured["force_cpu"] = force_cpu
+
+        def __call__(self, image):
+            return ""
+
+    fake_module = types.ModuleType("manga_ocr")
+    fake_module.MangaOcr = FakeMangaOcr
+    real_ensure, real_model, real_mod = models.ensure, ocr_ja._MODEL, sys.modules.get("manga_ocr")
+    sentinel = os.path.join("sentinel-dir", "manga-ocr")
+    ensured = []
+    try:
+        models.ensure = lambda name, progress=None: (ensured.append(name), sentinel)[1]
+        sys.modules["manga_ocr"] = fake_module
+        ocr_ja._MODEL = None
+        ocr_ja._get_model()
+    finally:
+        models.ensure, ocr_ja._MODEL = real_ensure, real_model
+        if real_mod is None:
+            sys.modules.pop("manga_ocr", None)
+        else:
+            sys.modules["manga_ocr"] = real_mod
+
+    c.check(ensured == ["manga-ocr"],
+            f"ocr_ja asks models.ensure for the pinned model (asked for {ensured})")
+    c.check(captured.get("path") == sentinel,
+            f"ocr_ja hands MangaOcr that path, not a repo id (got {captured.get('path')!r})")
+    c.check(captured.get("force_cpu") is True,
+            f"ocr_ja still forces CPU (got {captured.get('force_cpu')!r})")
 
     return c.finish()
 

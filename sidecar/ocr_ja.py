@@ -27,9 +27,18 @@ def _get_model():
     if _MODEL is None:
         from manga_ocr import MangaOcr
 
+        from . import models
+
+        # The PINNED directory, never the hub. MangaOcr's default argument is
+        # the repo id, which resolves through the HuggingFace cache and then
+        # the network -- so taking the default leaves the one model the app
+        # cannot run without as the one model nothing pins, and a first launch
+        # on a cold machine downloads whatever main holds that day.
+        path = models.ensure("manga-ocr")
+
         # ponytail: the pipeline is single-threaded, so a lock-free lazy global is
         # sufficient. Upgrade path: add a lock if concurrent OCR is introduced.
-        _MODEL = MangaOcr(force_cpu=True)
+        _MODEL = MangaOcr(pretrained_model_name_or_path=path, force_cpu=True)
     return _MODEL
 
 
