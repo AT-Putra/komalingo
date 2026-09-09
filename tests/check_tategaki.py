@@ -22,6 +22,8 @@ green; the per-panel assert is the one that goes red for it.
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 # CJK output dies on Windows under the ANSI code page (cp1252) without this.
@@ -121,7 +123,66 @@ def main():
         got = ocr_ja.ocr(img)
         c.check(got == "", f"blank {name} crop returns '' (got {got!r:.30})")
 
+    # -- the OFFLINE property, asserted rather than assumed ----------------
+    # US-P1-07 moved manga-ocr onto a pinned local directory so the app cannot
+    # silently fetch from the HuggingFace Hub. That property lives in
+    # transformers' behaviour, not in our code: from_pretrained takes a local
+    # branch only because os.path.isdir() is true of what we hand it. A
+    # dependency bump that changed that branch would regress this in the worst
+    # possible way -- still working on every developer machine with a warm HF
+    # cache, and reaching the network again on cold ones. Nobody would see it.
+    #
+    # A SUBPROCESS because the model is a module-level singleton already loaded
+    # above, and the block has to be in place before the first load.
+    #
+    # HF_HOME is redirected at an empty directory too, and that is the part
+    # that makes this assert able to fail at all. Blocking sockets alone is not
+    # enough: the first version of this check stayed GREEN when ocr_ja was
+    # sabotaged back to MangaOcr(force_cpu=True), because this machine's
+    # HuggingFace cache is warm and the repo id resolved out of it without a
+    # single packet. That is a check that cannot fail on the machine of anyone
+    # who has ever run the app -- which is precisely the regression being
+    # guarded against, wearing the disguise of a passing test. With no network
+    # AND no cache, only the pinned directory can satisfy the load.
+    hf_empty = os.path.join(ROOT, "build", "work", "tategaki-empty-hf")
+    shutil.rmtree(hf_empty, ignore_errors=True)
+    os.makedirs(hf_empty, exist_ok=True)
+    r = subprocess.run(
+        [sys.executable, "-c", OFFLINE_DRIVER, os.path.join(TATEDIR, entries[0]["file"])],
+        cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace",
+        env={**os.environ, "PYTHONPATH": ROOT, "PYTHONIOENCODING": "utf-8",
+             "HF_HOME": hf_empty, "HF_HUB_CACHE": os.path.join(hf_empty, "hub"),
+             "TRANSFORMERS_CACHE": hf_empty},
+    )
+    got = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    c.check(r.returncode == 0 and got[0] == entries[0]["text"],
+            f"OCR loads and reads with every socket refused and the HF cache empty "
+            f"(rc={r.returncode}, got {got[0]!r}, want {entries[0]['text']!r}"
+            f"{'; stderr: ' + (r.stderr or '').strip()[-200:] if r.returncode else ''})")
+
     return c.finish()
+
+
+# Every outbound socket refused -- not HF_HUB_OFFLINE, which asks the library
+# to behave rather than proving it never asks.
+OFFLINE_DRIVER = """
+import socket, sys
+
+def _refuse(*a, **k):
+    raise OSError("offline assert: no network")
+
+socket.socket.connect = _refuse
+socket.socket.connect_ex = _refuse
+socket.create_connection = _refuse
+
+sys.stdout.reconfigure(encoding="utf-8")
+from PIL import Image
+from sidecar import ocr_ja
+
+with Image.open(sys.argv[1]) as im:
+    im.load()
+    print(ocr_ja.ocr(im.convert("RGB")))
+"""
 
 
 run(main)

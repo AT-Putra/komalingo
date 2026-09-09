@@ -62,6 +62,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+from lib.httpread import read_bounded  # noqa: E402
 from lib.result import Checks, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider  # noqa: E402
 from sidecar.models import select_provider  # noqa: E402
@@ -140,36 +141,6 @@ def get(port: int, path: str, timeout: float = 5.0):
         return r.status, r.read()
 
 
-def _read_bounded(fp, budget: float = BODY_TIMEOUT) -> bytes:
-    """Read a response body within `budget` WALL-CLOCK seconds, never raising.
-
-    urlopen's timeout is per-recv, not a budget for the whole body: a child
-    that stops writing part-way through can hold the read for another full
-    timeout before it fails. The pull therefore happens on a thread, so the
-    budget is real time rather than time-between-packets, and every outcome
-    comes back as bytes that describe themselves instead of as an exception
-    raised from inside an except clause.
-    """
-    box: dict = {}
-
-    def pull():
-        try:
-            box["data"] = fp.read()
-        except Exception as exc:  # noqa: BLE001 -- every failure becomes a reason
-            box["error"] = exc
-
-    puller = threading.Thread(target=pull, daemon=True)
-    puller.start()
-    puller.join(budget)
-
-    if "data" in box:
-        return box["data"]
-    if "error" in box:
-        exc = box["error"]
-        return f"<body unreadable: {type(exc).__name__}: {exc}>".encode()
-    return f"<body did not arrive within {budget:.0f}s; the exe stopped writing>".encode()
-
-
 def post(port: int, path: str, payload=None, headers=None, timeout: float = 120.0):
     """(status, body). An HTTP error is a status, not an exception -- 403 and
     405 are expected results here, not failures."""
@@ -182,7 +153,7 @@ def post(port: int, path: str, payload=None, headers=None, timeout: float = 120.
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, _read_bounded(r)
+            return r.status, read_bounded(r, BODY_TIMEOUT)
     except urllib.error.HTTPError as e:
         # The error BODY is the diagnosis, and reading it is a second network
         # read on a connection whose budget the first one already spent. When
@@ -190,7 +161,7 @@ def post(port: int, path: str, payload=None, headers=None, timeout: float = 120.
         # raises TimeoutError out of _safe_read -- so a plain HTTP 500 reaches
         # run_all wearing the costume of a timeout. Report the status either
         # way; the body is a bonus, not a precondition.
-        return e.code, _read_bounded(e)
+        return e.code, read_bounded(e, BODY_TIMEOUT)
 
 
 def wait_health(proc, port: int, budget: float = HEALTH_TIMEOUT):

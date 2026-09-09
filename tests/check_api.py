@@ -10,6 +10,7 @@ exits on any POST.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -20,30 +21,61 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+from lib.httpread import read_bounded  # noqa: E402
 from lib.result import Checks, run  # noqa: E402
 
 NONCE = "test-nonce-4a91c2"
 PORT = 8791
+SMOKE = os.path.join(ROOT, "fixtures", "smoke", "tategaki_01.png")
+# The server is started pointed here, so no stage can find its weights and the
+# weights-failure path is reachable without touching the user's real cache.
+EMPTY_MODELS = os.path.join(ROOT, "build", "work", "api-empty-models")
 
 SERVER = """
-import os, sys, uvicorn
+import socket, sys, uvicorn
+
+# Refuse every OUTBOUND connection that is not loopback, before importing the
+# app. An empty MT_MODEL_DIR alone does not reach the weights-failure path --
+# on a machine with a network it just re-downloads and succeeds, which is what
+# the first version of this check proved by passing 200. Loopback stays open
+# because uvicorn and this check's own client both need it.
+_real_connect = socket.socket.connect
+
+
+def _loopback_only(self, address, *a, **k):
+    host = str(address[0]) if isinstance(address, tuple) else ""
+    if not (host.startswith("127.") or host in ("localhost", "::1")):
+        raise OSError("blocked by check_api: no outbound network in this test")
+    return _real_connect(self, address, *a, **k)
+
+
+socket.socket.connect = _loopback_only
+
 from sidecar.main import app, HOST
 uvicorn.run(app, host=HOST, port=int(sys.argv[1]), log_level="error")
 """
 
 
-def call(method, path, port=PORT, headers=None, host="127.0.0.1", timeout=5):
+def call(method, path, port=PORT, headers=None, host="127.0.0.1", timeout=5, body=None):
     """Returns (status, body). A refused connection is status 0."""
+    heads = dict(headers or {})
+    if body is not None:
+        heads.setdefault("content-type", "application/json")
     req = urllib.request.Request(
-        f"http://{host}:{port}{path}", method=method, headers=headers or {}
+        f"http://{host}:{port}{path}", method=method, headers=heads
     )
     if method == "POST":
-        req.data = b""
+        req.data = body.encode() if isinstance(body, str) else (body or b"")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, r.read().decode("utf-8", "replace")
+            return r.status, read_bounded(r, timeout).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
+        # The error BODY is the diagnosis and reading it is a second read on a
+        # connection the first one already spent. Unguarded, e.read() raises
+        # from inside this except clause and takes the whole check with it --
+        # which is how removing main.py's weights handler produced a urllib
+        # stack trace instead of three red asserts.
+        return e.code, read_bounded(e, timeout).decode("utf-8", "replace")
     except (urllib.error.URLError, OSError):
         return 0, ""
 
@@ -59,7 +91,10 @@ def wait_up(port, tries=60):
 def main():
     c = Checks("check_api")
 
-    env = dict(os.environ, MT_SHUTDOWN_NONCE=NONCE, PYTHONIOENCODING="utf-8", PYTHONPATH=ROOT)
+    shutil.rmtree(EMPTY_MODELS, ignore_errors=True)
+    os.makedirs(EMPTY_MODELS, exist_ok=True)
+    env = dict(os.environ, MT_SHUTDOWN_NONCE=NONCE, PYTHONIOENCODING="utf-8",
+               PYTHONPATH=ROOT, MT_MODEL_DIR=EMPTY_MODELS)
     proc = subprocess.Popen(
         [sys.executable, "-c", SERVER, str(PORT)],
         env=env,
@@ -105,6 +140,30 @@ def main():
                 call("GET", "/api/health", host=lan, timeout=2)[0] == 0,
                 f"NOT reachable on the LAN address {lan} -- 127.0.0.1 only",
             )
+
+        # -- a weights failure reaches the UI with its reason intact -------
+        # The regression this pins: /api/translate used to catch ProviderError
+        # only, so a checksum mismatch or a dead network -- the two failures
+        # models.py works hardest to keep distinguishable -- arrived as a bare
+        # 500 with an empty body. Everything underneath can name its reason
+        # perfectly and it stops at the boundary.
+        #
+        # Forced by pointing MT_MODEL_DIR at an empty directory the server was
+        # started with, so the first stage that needs weights cannot get them.
+        status, body = call("POST", "/api/translate", body=json.dumps({
+            "src_path": SMOKE, "dest_dir": os.path.join(EMPTY_MODELS, "out"), "page": 1,
+        }), timeout=60)
+        c.check(status == 503, f"a weights failure is 503, not a bare 500 (got {status})")
+        try:
+            payload = json.loads(body)
+        except (ValueError, TypeError):
+            payload = {}
+        c.check(bool(payload.get("error")),
+                f"the body carries a reason, not an empty 500 ({body[:160]!r})")
+        c.check(payload.get("kind") in {"network", "checksum", "space", "weights",
+                                        "config", "error"},
+                f"and a machine-readable kind the UI can branch on "
+                f"({payload.get('kind')!r})")
 
         # -- the correct nonce actually shuts it down ----------------------
         status, _ = call("POST", "/api/shutdown", headers={"X-Shutdown-Nonce": NONCE})

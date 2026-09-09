@@ -21,6 +21,7 @@ the run mid-page the first time a stage name meets a non-ASCII filename.
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sys
@@ -34,7 +35,9 @@ from fastapi import FastAPI, Request, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from . import pipeline  # noqa: E402
+from .detect import DetectError  # noqa: E402
 from .llm import LLMClient, ProviderError  # noqa: E402
+from .models import FetchError  # noqa: E402
 
 HOST = "127.0.0.1"  # never 0.0.0.0. See the module docstring.
 SHUTDOWN_NONCE = os.environ.get("MT_SHUTDOWN_NONCE", "")
@@ -90,6 +93,28 @@ def translate(req: TranslateRequest):
         return Response(
             content=f'{{"status":{e.status},"body":{e.body!r}}}',
             status_code=502,
+            media_type="application/json",
+        )
+    except (FetchError, DetectError) as e:
+        # ONE handler for both, because DetectError deliberately mirrors
+        # FetchError's (reason, kind) shape -- see its docstring. A caller that
+        # can show one does not need a second display path for the other.
+        #
+        # Without this the whole naming discipline underneath stops here.
+        # models.py goes to real trouble to make a dead network, a checksum
+        # mismatch and a full disk three distinguishable failures with three
+        # different user actions, and an uncaught exception flattens all three
+        # into a bare 500 with an empty body -- which is exactly as useful to
+        # the person waiting as "model download failed", the string that
+        # docstring exists to forbid.
+        #
+        # 503, not 500: the app is not broken, a resource it needs is not
+        # available. `kind` is what lets the UI branch -- network means check
+        # the connection, checksum means the file is bad and refetching helps,
+        # space means free some disk. Nothing downstream has to parse prose.
+        return Response(
+            content=json.dumps({"error": e.reason, "kind": e.kind}),
+            status_code=503,
             media_type="application/json",
         )
     pipeline.write_regions(record, req.dest_dir)
