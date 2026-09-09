@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict
 
 from PIL import Image, ImageDraw
 
-from . import atomic, imaging
+from . import atomic, imaging, ocr_ja
+from . import detect as detector
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
 
@@ -62,38 +64,25 @@ def _changed_in_polygon(before: Image.Image, after: Image.Image, polygon) -> int
 
 
 def detect(img: Image.Image, page: int) -> list[dict]:
-    """Speech-bubble regions. Phase 0 uses a fixed grid over the page.
+    """Text regions from detect.py's DB model.
 
-    ponytail: a geometric placeholder, not a detector. Ceiling: it finds
-    nothing real and its region count is a function of page size only.
-    Upgrade path: Phase 1 replaces the body with the comic-text-detector ONNX
-    model behind this same signature.
+    Regions become plain dicts here rather than travelling as dataclasses,
+    because every stage after this one mutates them in place and run_page
+    json-serialises the same objects into regions.json. asdict carries
+    confidence through to that file, which is the only place a reader can see
+    whether a detection was marginal.
     """
-    w, h = img.size
-    regions = [
-        {
-            "id": 1,
-            "polygon": [[w // 8, h // 8], [w // 2, h // 8], [w // 2, h // 3], [w // 8, h // 3]],
-            "text": "",
-        },
-        {
-            "id": 2,
-            "polygon": [[w // 2, h // 2], [w * 7 // 8, h // 2], [w * 7 // 8, h * 3 // 4], [w // 2, h * 3 // 4]],
-            "text": "",
-        },
-    ]
+    regions = [asdict(r) for r in detector.detect(img)]
     emit("detect", f"{len(regions)} regions", page, 10)
     return regions
 
 
 def ocr(regions: list[dict], img: Image.Image, page: int) -> int:
-    """Japanese text per region. Returns the number of OCR calls made.
-
-    ponytail: returns a fixed string per region. Ceiling: it reads nothing.
-    Upgrade path: Phase 1 swaps in manga-ocr per region crop.
-    """
+    """Japanese text per region. Returns the number of OCR calls made."""
+    rgb = img.convert("RGB")
     for r in regions:
-        r["text"] = "こんにちは"
+        x0, y0, x1, y1 = _bbox(r["polygon"])
+        r["text"] = ocr_ja.ocr(rgb.crop((x0, y0, x1, y1)))
     emit("ocr", f"{len(regions)} calls", page, 25)
     return len(regions)
 

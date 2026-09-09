@@ -160,7 +160,7 @@ def main():
         ["npm", "run", "build"],
         cwd=ROOT,
         capture_output=True,
-        text=True,
+        encoding="utf-8", errors="replace",
         shell=(os.name == "nt"),
     )
     c.check(r.returncode == 0, f"npm run build exits 0{'' if r.returncode == 0 else ': ' + r.stderr[-400:]}")

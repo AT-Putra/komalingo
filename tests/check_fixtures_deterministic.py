@@ -52,7 +52,8 @@ def generate(label):
     for sub in SUBDIRS:
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
     r = subprocess.run([sys.executable, str(GENERATOR)], cwd=ROOT,
-                       capture_output=True, text=True)
+                       capture_output=True,
+                       encoding="utf-8", errors="replace")
     if r.returncode != 0:
         print(f"FAIL: generator exited {r.returncode} on run {label}")
         print(r.stdout, r.stderr, sep="\n")

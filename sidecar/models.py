@@ -34,6 +34,20 @@ MANIFEST = {
         "sha256": "",  # filled at Phase 1 when the real weights are pinned
         "size": 0,
     },
+    # PP-OCRv3's Chinese detection head, which is a DB model -- the same head
+    # cv2.dnn.TextDetectionModel_DB implements. Pinned to opencv_zoo's 4.10.0
+    # TAG, not to main: opencv_zoo has already replaced its text_detection_db
+    # directory once, and a branch URL would have gone 404 under a shipped
+    # build. The digest below was computed from the downloaded bytes and
+    # independently agrees with the git-lfs pointer's oid in the same tree.
+    "text-detection-db": {
+        "url": (
+            "https://media.githubusercontent.com/media/opencv/opencv_zoo/4.10.0/"
+            "models/text_detection_ppocr/text_detection_cn_ppocrv3_2023may.onnx"
+        ),
+        "sha256": "03f550c6b406fda8bf54bd8327815f6c7e2edd98cea02348c93d879254366587",
+        "size": 2423490,
+    },
 }
 
 
@@ -154,6 +168,38 @@ def fetch(url: str, dest, sha256: str = "", size: int = 0, progress=None) -> str
 
     os.replace(part, dest)
     return dest
+
+
+def model_dir() -> str:
+    """Where fetched weights live.
+
+    Not beside the executable and not in the repo: a PyInstaller one-file
+    build unpacks to a temp directory that is deleted on exit, so weights
+    written there would be re-downloaded on every launch. MT_MODEL_DIR
+    overrides it so a check can point at a scratch tree without touching the
+    user's real cache.
+    """
+    override = os.environ.get("MT_MODEL_DIR", "").strip()
+    if override:
+        return override
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "MangaTranslator", "models")
+    return os.path.join(os.path.expanduser("~"), ".cache", "MangaTranslator", "models")
+
+
+def ensure(name: str, progress=None) -> str:
+    """Fetch MANIFEST entry `name` if it is not already on disk. Returns its path.
+
+    The filename comes from the URL, so the manifest has one source of truth
+    for it and a renamed upstream file cannot silently collide with a cached
+    older one under a hand-written local name.
+    """
+    entry = MANIFEST.get(name)
+    if entry is None:
+        raise FetchError(f"no model named {name!r} in the manifest", "error")
+    dest = os.path.join(model_dir(), os.path.basename(entry["url"].split("?")[0]))
+    return fetch(entry["url"], dest, entry["sha256"], entry["size"], progress)
 
 
 def select_provider(force_cpu: bool = False) -> tuple[str, str]:

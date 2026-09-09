@@ -146,5 +146,160 @@
       "mean_cer": null,
       "exact_match": null
     }
+  },
+  {
+    "phase": "1",
+    "timestamp": "2026-09-09T13:33:54Z",
+    "env_class": "full",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS",
+      "check_tategaki": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": null,
+      "exact_match": null
+    }
+  },
+  {
+    "phase": "1",
+    "timestamp": "2026-09-09T13:39:16Z",
+    "env_class": "full",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS",
+      "check_tategaki": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": 0.0074,
+      "exact_match": 0.9167
+    }
+  },
+  {
+    "phase": "1",
+    "timestamp": "2026-09-09T13:53:35Z",
+    "env_class": "full",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS",
+      "check_tategaki": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": 0.0074,
+      "exact_match": 0.9167
+    }
+  },
+  {
+    "phase": "1",
+    "timestamp": "2026-09-09T14:00:35Z",
+    "env_class": "full",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS",
+      "check_tategaki": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": 0.0022,
+      "exact_match": 0.9583
+    }
+  },
+  {
+    "phase": "1",
+    "timestamp": "2026-09-09T14:07:14Z",
+    "env_class": "full",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS",
+      "check_tategaki": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": 0.0022,
+      "exact_match": 0.9583
+    }
   }
 ]

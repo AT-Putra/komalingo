@@ -70,7 +70,8 @@ def emitted_stages(dest: str) -> tuple[list[str], str]:
     )
     r = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=ROOT, capture_output=True, text=True, timeout=300,
+        cwd=ROOT, capture_output=True, timeout=300,
+        encoding="utf-8", errors="replace",
     )
     stages = []
     for line in r.stdout.splitlines():

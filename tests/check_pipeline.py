@@ -47,8 +47,7 @@ def main():
         proc = subprocess.run(
             [sys.executable, "-c", DRIVER, PAGE, out],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
+            encoding="utf-8", errors="replace",
             env=env,
             cwd=ROOT,
         )

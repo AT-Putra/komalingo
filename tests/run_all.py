@@ -66,11 +66,16 @@ PHASE_ORDER = [
     "check_package",
     "check_ipc",
     "check_probe",
+    "check_tategaki",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
 # developer's environment from CI's, and it changes which checks can run.
-REAL_PANELS = os.path.join(ROOT, "fixtures", "panels")
+# This must name the directory the panels are ACTUALLY reassembled into --
+# tests/gen_tategaki_panels.py writes here. It pointed at fixtures/panels/,
+# which no phase ever created, so every run recorded env_class=synthetic and
+# the distinction the ratchet buckets on was decorative.
+REAL_PANELS = os.path.join(ROOT, "fixtures", "tategaki", "panels")
 
 
 def env_class() -> str:
@@ -107,11 +112,37 @@ def discover() -> list[str]:
     return ordered + sorted(found - set(ordered))
 
 
-def run_check(name: str) -> tuple[int, float]:
+def harvest_metrics(stdout: str) -> dict:
+    """Read a check's `METRICS {...}` line, if it printed one.
+
+    A named channel, not a parse of the assert prose: the asserts are worded
+    for a human reader and get reworded, and a ratchet that scrapes them goes
+    quietly blind the first time someone improves the wording.
+    """
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith("METRICS "):
+            try:
+                return json.loads(line[len("METRICS "):])
+            except json.JSONDecodeError:
+                print(f"      ignoring unparseable METRICS line: {line[:80]}")
+            return {}
+    return {}
+
+
+def run_check(name: str) -> tuple[int, float, str]:
     start = time.time()
+    # text=True decodes the child with the LOCALE codec, which on Windows is
+    # cp1252. Any check that prints Japanese -- every OCR check from Phase 1
+    # on -- then kills subprocess's reader thread with UnicodeDecodeError, and
+    # subprocess SWALLOWS it: returncode arrives intact and r.stdout is
+    # silently empty. The check reports PASS with no output, its METRICS line
+    # never reaches the baseline, and on a FAIL the reason never prints
+    # either. Decode as UTF-8 and never raise; force the child to emit it.
     r = subprocess.run(
         [sys.executable, os.path.join(TESTS, name + ".py")],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT, capture_output=True,
+        encoding="utf-8", errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     elapsed = time.time() - start
     tail = (r.stdout or "").strip().splitlines()[-1:] or [""]
@@ -122,7 +153,7 @@ def run_check(name: str) -> tuple[int, float]:
                 print(f"      {line.strip()}")
         if r.stderr.strip():
             print(f"      stderr: {r.stderr.strip()[-300:]}")
-    return r.returncode, elapsed
+    return r.returncode, elapsed, r.stdout or ""
 
 
 def load_records() -> list[dict]:
@@ -154,8 +185,10 @@ def main() -> int:
     print(f"run_all: {len(checks)} checks, env_class={env_class()}, {sys.executable}\n")
 
     results: dict[str, int] = {}
+    measured: dict = {}
     for name in checks:
-        results[name], _ = run_check(name)
+        results[name], _, stdout = run_check(name)
+        measured.update(harvest_metrics(stdout))
 
     worst = max(results.values(), key=lambda code: RANK.get(code, RANK[FAIL])) if results else PASS
     skipped = sorted(n for n, code in results.items() if code == SKIP)
@@ -168,14 +201,15 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "0",
+        "phase": "1",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
         "checks": {n: NAMES.get(c, str(c)) for n, c in sorted(results.items())},
-        # Phase 0's renderer is a placeholder; these are the floor Phase 2a
-        # ratchets against, and they are written even when unmeasured so the
-        # schema is fixed here rather than invented later.
+        # The typeset metrics stay null until Phase 2a's real renderer; they
+        # are written unmeasured so the schema is fixed here rather than
+        # invented later. mean_cer/exact_match are filled from whichever check
+        # printed a METRICS line -- check_tategaki, from Phase 1 on.
         "metrics": {
             "max_overflow_pct": None,
             "min_font_px": None,
@@ -186,6 +220,11 @@ def main() -> int:
             "exact_match": None,
         },
     }
+    # Only keys the schema already names: a check cannot invent a baseline
+    # column by printing one.
+    for key in record["metrics"]:
+        if key in measured:
+            record["metrics"][key] = measured[key]
 
     # -- the ratchet ------------------------------------------------------
     ec = env_class()

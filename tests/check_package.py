@@ -14,6 +14,31 @@ appeared" is satisfied by an empty file too.
 The LLM client points at the US-003 stub, never the live endpoint. This check
 is offline by contract.
 
+Four things about the HARNESS are load-bearing, because each one of them once
+turned a diagnosable failure into an undiagnosable one:
+
+  * The exe's stdout is drained by a thread from the first byte. An undrained
+    PIPE fills at roughly 64 KB, the child blocks mid-write while this process
+    blocks reading its socket, and the traceback that would have named the
+    defect sits unread in the full pipe forever.
+  * Response bodies are read under a wall-clock budget and never raise. An
+    unguarded read of an error body raises from inside an except clause,
+    escapes run(), and replaces every remaining check with a stack trace that
+    names urllib rather than the bug.
+  * No packaged sidecar outlives the run. A one-file exe is a bootloader plus
+    an app CHILD; reaping only the bootloader leaves the child holding
+    build/dist/sidecar-*.exe open, and the NEXT build then dies with WinError 5
+    and reports it as a build failure with an empty reason.
+  * EVERY subprocess here names its encoding. text=True decodes with the ANSI
+    locale codec while the tools we shell out to write the console OEM one, and
+    subprocess SWALLOWS a reader thread that dies decoding -- returncode
+    arrives intact and the stream comes back empty. That empty string is not
+    an error, it is a legal-looking answer, which is how sidecar_pids() once
+    reported "leaked pids: []" with orphans alive. The rule is narrower than
+    "name the encoding": a decode failure and a true negative must never
+    produce the same value. This bullet is counted here because the fourth
+    such call in this file went unfixed for a while beside three that were.
+
 Run from the repo root:
     uv run --project sidecar python tests/check_package.py
     uv run --project sidecar python tests/check_package.py --gpu
@@ -28,6 +53,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -49,6 +75,7 @@ SMOKE = os.path.join(ROOT, "fixtures", "smoke", "tategaki_01.png")
 
 HEALTH_TIMEOUT = 30.0  # cold start budget; past this we fall back to one-dir
 SHUTDOWN_TIMEOUT = 5.0
+BODY_TIMEOUT = 15.0  # wall-clock budget for reading a response body
 TWO_GB = 2 * 1024**3
 
 
@@ -93,7 +120,7 @@ def find_mt() -> str | None:
     if os.path.exists(vswhere):
         r = subprocess.run(
             [vswhere, "-latest", "-property", "installationPath"],
-            capture_output=True, text=True,
+            capture_output=True, encoding="utf-8", errors="replace",
         )
         vs = r.stdout.strip()
         if vs:
@@ -113,6 +140,36 @@ def get(port: int, path: str, timeout: float = 5.0):
         return r.status, r.read()
 
 
+def _read_bounded(fp, budget: float = BODY_TIMEOUT) -> bytes:
+    """Read a response body within `budget` WALL-CLOCK seconds, never raising.
+
+    urlopen's timeout is per-recv, not a budget for the whole body: a child
+    that stops writing part-way through can hold the read for another full
+    timeout before it fails. The pull therefore happens on a thread, so the
+    budget is real time rather than time-between-packets, and every outcome
+    comes back as bytes that describe themselves instead of as an exception
+    raised from inside an except clause.
+    """
+    box: dict = {}
+
+    def pull():
+        try:
+            box["data"] = fp.read()
+        except Exception as exc:  # noqa: BLE001 -- every failure becomes a reason
+            box["error"] = exc
+
+    puller = threading.Thread(target=pull, daemon=True)
+    puller.start()
+    puller.join(budget)
+
+    if "data" in box:
+        return box["data"]
+    if "error" in box:
+        exc = box["error"]
+        return f"<body unreadable: {type(exc).__name__}: {exc}>".encode()
+    return f"<body did not arrive within {budget:.0f}s; the exe stopped writing>".encode()
+
+
 def post(port: int, path: str, payload=None, headers=None, timeout: float = 120.0):
     """(status, body). An HTTP error is a status, not an exception -- 403 and
     405 are expected results here, not failures."""
@@ -125,9 +182,15 @@ def post(port: int, path: str, payload=None, headers=None, timeout: float = 120.
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, r.read()
+            return r.status, _read_bounded(r)
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        # The error BODY is the diagnosis, and reading it is a second network
+        # read on a connection whose budget the first one already spent. When
+        # the child is dying it never arrives, and an unguarded e.read() then
+        # raises TimeoutError out of _safe_read -- so a plain HTTP 500 reaches
+        # run_all wearing the costume of a timeout. Report the status either
+        # way; the body is a bonus, not a precondition.
+        return e.code, _read_bounded(e)
 
 
 def wait_health(proc, port: int, budget: float = HEALTH_TIMEOUT):
@@ -153,18 +216,116 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+# Drained output per process, so a dying child's traceback survives it.
+_CAPTURED: dict[int, list] = {}
+
+
 def launch(port: int, nonce: str) -> subprocess.Popen:
+    """Start the exe with its stdout drained by a thread from the first byte.
+
+    The drain is not a convenience. A pipe holds about 64 KB; past that the
+    child BLOCKS on write, and this harness is meanwhile blocked reading the
+    child's socket, so the two wait on each other and the request dies with no
+    body. Every real failure inside the exe then reaches the reader as a bare
+    500 or a reset -- which is exactly how a missing unidic_lite dictionary
+    stayed invisible for two lanes' worth of iterations while its traceback
+    sat unread in a full pipe.
+    """
     env = {**os.environ, "MT_PORT": str(port), "MT_SHUTDOWN_NONCE": nonce}
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [EXE], env=env, cwd=DIST,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
+    lines: list = []
+    _CAPTURED[proc.pid] = lines
+
+    def drain():
+        for raw in iter(proc.stdout.readline, b""):
+            lines.append(raw.decode("utf-8", "replace").rstrip())
+
+    threading.Thread(target=drain, daemon=True).start()
+    return proc
+
+
+def captured(proc, tail: int = 40) -> str:
+    """What the child actually said, whether or not it is still alive."""
+    return "\n".join(_CAPTURED.get(proc.pid, [])[-tail:])
 
 
 def kill(proc):
-    if proc and proc.poll() is None:
+    """Kill the whole tree, not just the process we hold.
+
+    A one-file PyInstaller exe is a bootloader that unpacks and then runs the
+    app as a CHILD. proc.kill() reaps the bootloader and leaves the app alive,
+    still holding build/dist/sidecar-*.exe open -- so the NEXT build dies with
+    WinError 5 and check_package reports it as a build failure with an empty
+    reason. Five such orphans were found alive in one session.
+    """
+    if not proc or proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True)
+    else:
         proc.kill()
+    try:
         proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def sidecar_pids() -> set[int]:
+    """Every running packaged sidecar, by image name.
+
+    tasklist rather than psutil: this check runs on a bare interpreter and must
+    not grow a dependency in order to clean up after itself.
+    """
+    if os.name != "nt":
+        return set()
+    # BYTES, decoded here. text=True would decode with the ANSI locale codec
+    # while tasklist writes the console OEM codepage -- two different things
+    # that only agree while every row is ASCII. When they disagree the decode
+    # dies, subprocess SWALLOWS it, and r.stdout arrives empty, which parses
+    # to an empty set: indistinguishable from "no sidecars are running". This
+    # function's caller asserts that nothing leaked, so a silent empty set
+    # turns the guard green by failing to look -- the one outcome worse than
+    # the leak it exists to catch. A decode failure and a true negative must
+    # never produce the same value.
+    r = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {EXE_NAME}", "/NH", "/FO", "CSV"],
+        capture_output=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"tasklist failed rc={r.returncode}: "
+            f"{r.stderr.decode('utf-8', 'replace').strip()[:200]} -- "
+            f"cannot prove no sidecar leaked"
+        )
+    pids = set()
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        fields = [f.strip('" ') for f in line.split('","')]
+        if len(fields) >= 2 and fields[0].lower() == EXE_NAME.lower():
+            try:
+                pids.add(int(fields[1]))
+            except ValueError:
+                pass
+    return pids
+
+
+def reap(pids) -> None:
+    """Kill sidecars this run is responsible for.
+
+    Only ever called with (pids now) - (pids before launch). Sweeping by image
+    name alone would also kill a sidecar another process started, and killing
+    someone else's run to tidy up our own is worse than the leak.
+
+    This exists because kill() cannot cover the case it is most needed for: a
+    bootloader that has already exited leaves proc.poll() non-None, so there is
+    no tree left to taskkill, while the app CHILD it spawned is still alive
+    holding build/dist/sidecar-*.exe open.
+    """
+    for pid in sorted(pids):
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
 
 
 # -- the GPU variant -------------------------------------------------------
@@ -203,10 +364,21 @@ def build(c) -> bool:
     r = subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm",
          "--distpath", DIST, "--workpath", os.path.join(ROOT, "build", "work"), SPEC],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT, capture_output=True,
+        encoding="utf-8", errors="replace",
     )
     ok = r.returncode == 0 and os.path.exists(EXE)
-    c.check(ok, f"build/sidecar.spec builds {EXE_NAME}" + ("" if ok else f": {r.stdout[-800:]}"))
+    # STDERR, not just stdout. PyInstaller puts its traceback on stderr, so
+    # reporting stdout alone produced "FAIL: ... builds sidecar.exe:" with
+    # nothing after the colon -- which is how a plain PermissionError from a
+    # leaked sidecar holding the exe open read as an unexplained build
+    # failure, twice, before anyone ran PyInstaller by hand to see it.
+    reason = ""
+    if not ok:
+        reason = (f": rc={r.returncode}\n"
+                  f"{(r.stdout or '')[-600:]}\n"
+                  f"{(r.stderr or '')[-800:]}")
+    c.check(ok, f"build/sidecar.spec builds {EXE_NAME}{reason}")
     return ok
 
 
@@ -251,7 +423,7 @@ def main():
         os.remove(extracted)  # or a stale one from a prior run reads as a pass
     r = subprocess.run(
         [mt, "-nologo", f"-inputresource:{EXE};#1", f"-out:{extracted}"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     embedded = ""
     if os.path.exists(extracted):
@@ -263,13 +435,17 @@ def main():
         f"({len(embedded)} bytes read; mt rc={r.returncode} {r.stdout.strip()[:200]})",
     )
 
+    # Whatever is already running belongs to somebody else. Everything this
+    # run is answerable for is the difference against this set.
+    preexisting = sidecar_pids()
+
     port, nonce = free_port(), "nonce-" + os.urandom(8).hex()
     proc = launch(port, nonce)
     try:
         # [5] it starts and answers within the cold-start budget
         elapsed = wait_health(proc, port)
         if elapsed is None:
-            out = proc.stdout.read().decode("utf-8", "replace")[-1500:] if proc.stdout else ""
+            out = captured(proc)
             c.check(False, f"/api/health returns 200 within {HEALTH_TIMEOUT}s -- fall back to one-dir. Output:\n{out}")
             return c.finish()
         c.check(True, f"/api/health returns 200 in {elapsed:.1f}s")
@@ -352,8 +528,32 @@ def main():
 
         orphans = set(glob.glob(os.path.join(dest, "**", ".*.tmp"), recursive=True)) - before
         c.check(not orphans, f"no temp file survives the shutdown ({sorted(orphans)})")
-    finally:
+
+        # [21] and no PROCESS survives it either. A clean shutdown ends the
+        # bootloader, which is all assert [19] can see -- the app child it
+        # spawned can outlive it, keep the exe file open, and make the next
+        # build fail with WinError 5 while reporting an empty-reason build
+        # failure. That misdirection cost two lanes an hour, so it is asserted
+        # here rather than left to the cleanup in finally.
         kill(proc)
+        try:
+            leaked = sidecar_pids() - preexisting
+            c.check(not leaked,
+                    f"no packaged sidecar survives the run (leaked pids: {sorted(leaked)})")
+        except RuntimeError as e:
+            # Unprovable is not proven. Red, with the reason.
+            c.check(False, f"no packaged sidecar survives the run -- unverifiable: {e}")
+    finally:
+        # The guarantee, on every exit path including each early return above:
+        # the tree if the bootloader still holds one, then anything this run
+        # started that outlived it.
+        kill(proc)
+        try:
+            reap(sidecar_pids() - preexisting)
+        except RuntimeError as e:
+            # Raising out of `finally` would replace whatever actually went
+            # wrong with this. Say it and let the original failure stand.
+            print(f"  cleanup could not enumerate sidecars: {e}", flush=True)
 
     return c.finish()
 
