@@ -22,9 +22,26 @@ ELLIPSE_POINTS = 64
 
 @dataclass
 class Region:
+    """One detected text region, as it travels through the pipeline.
+
+    `text` defaults to None, and the distinction is load-bearing rather than
+    stylistic: None means OCR has not run on this region yet, and "" means it
+    HAS run and found nothing -- ocr_ja's blank gate returns an empty string
+    for a crop with no text in it. typeset.py reads exactly that difference. A
+    region whose source is known-blank has no text to lose, so nothing is
+    flagged; a region whose source is unknown, or non-empty, and whose
+    translation came back empty has lost text and says so.
+
+    It defaulted to "" until Phase 3 came into view. That default is the
+    safest-LOOKING one and the wrong one: it makes every freshly constructed
+    Region claim its source was checked and empty. Harmless while the pipeline
+    passes dicts built by `asdict`, and a silent false negative the moment
+    Phase 3 starts passing dataclasses through the spot-fix path.
+    """
+
     id: int
     polygon: list = field(default_factory=list)
-    text: str = ""  # source Japanese from ocr_ja.py
+    text: str | None = None  # source Japanese from ocr_ja.py; None = not yet OCR'd
     translation: str = ""  # English from llm.py
     typeset: str = ""  # what typeset.py actually rendered (Phase 2a)
     confidence: float = 0.0  # detection confidence from detect.py

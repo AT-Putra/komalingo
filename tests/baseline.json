@@ -719,5 +719,39 @@
       "exact_match": 0.9583,
       "ring_assert_skipped": 0
     }
+  },
+  {
+    "phase": "2a",
+    "timestamp": "2026-09-10T14:54:29Z",
+    "env_class": "full",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_inpaint": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS",
+      "check_tategaki": "PASS",
+      "check_typeset": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": 0.0,
+      "min_font_px": 12,
+      "clipped_glyph_count": 0,
+      "fit_compromised_count": 1,
+      "fit_failed_count": 4,
+      "mean_cer": 0.0022,
+      "exact_match": 0.9583,
+      "ring_assert_skipped": 0
+    }
   }
 ]

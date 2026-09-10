@@ -604,8 +604,10 @@ def typeset_page(regions, page: Image.Image, *, allow_retranslate: bool = True, 
             # -- a false alarm on the one signal AC-1 exists to make trustworthy.
             # A non-empty source, or none supplied, is lost text and is flagged:
             # a provider that omitted this id must not yield a bubble that looks
-            # deliberately blank. (A Region dataclass defaults text to "", so it
-            # cannot express "unknown"; the pipeline passes dicts with OCR text.)
+            # deliberately blank. Both carriers can express the difference:
+            # region.Region defaults text to None (not yet OCR'd) rather than ""
+            # (OCR ran, found nothing), and the pipeline's dicts carry whatever
+            # ocr_ja returned.
             source = r.get("text") if isinstance(r, dict) else getattr(r, "text", None)
             fit.rung = 0
             if source is not None and not str(source).strip():

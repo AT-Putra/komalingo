@@ -60,7 +60,7 @@ from lib.result import Checks, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider, requested_items  # noqa: E402
 from sidecar import typeset  # noqa: E402
 from sidecar.llm import LLMClient  # noqa: E402
-from sidecar.region import ellipse_points  # noqa: E402
+from sidecar.region import Region, ellipse_points  # noqa: E402
 
 BUBBLES = os.path.join(ROOT, "fixtures", "bubbles")
 EXPECTED = os.path.join(BUBBLES, "expected.json")
@@ -416,6 +416,26 @@ def _edge_cases(c, index) -> None:
             f"[blank-source] blank OCR source, empty translation -> fit_failed="
             f"{fit.fit_failed}, reason={fit.reason!r}, {requests} requests -- not a "
             f"failure, and not reported as one")
+
+    # The same distinction through the shared DATACLASS, not just through the
+    # pipeline's dicts. Region.text defaulted to "" until Phase 3 came into
+    # view, which made every freshly built Region claim its source had been
+    # checked and found empty -- so an un-OCR'd region with no translation came
+    # out unflagged, the one direction that loses text silently. Phase 3 is
+    # where dataclasses start reaching this code, so both readings are gated
+    # here before they do.
+    blank_page = Image.new("RGB", tuple(entry["page_size"]), "white")
+    _, fits = typeset.typeset_page([Region(id=RID, polygon=points, translation="")],
+                                   blank_page)
+    c.check(fits[0].fit_failed and fits[0].reason == typeset.REASON_EMPTY,
+            f"[dataclass-source] a Region with text unset reads as UNKNOWN source, so "
+            f"an empty translation is lost text -> fit_failed={fits[0].fit_failed}, "
+            f"reason={fits[0].reason!r}")
+    _, fits = typeset.typeset_page(
+        [Region(id=RID, polygon=points, text="", translation="")], blank_page)
+    c.check(not fits[0].fit_failed and fits[0].reason == typeset.REASON_NO_SOURCE,
+            f"[dataclass-source] a Region with text explicitly \"\" reads as a BLANK "
+            f"source -> fit_failed={fits[0].fit_failed}, reason={fits[0].reason!r}")
 
     # -- rung 4's bleed actually reaching the page --------------------------
     # On an ellipse the narrowest-chord rule keeps even rung-4 ink inside the
