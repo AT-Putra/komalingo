@@ -425,5 +425,36 @@
       "mean_cer": 0.0022,
       "exact_match": 0.9583
     }
+  },
+  {
+    "phase": "1",
+    "timestamp": "2026-09-10T11:07:26Z",
+    "env_class": "full",
+    "skipped": [
+      "check_probe"
+    ],
+    "checks": {
+      "check_api": "PASS",
+      "check_atomic": "PASS",
+      "check_fixtures_deterministic": "PASS",
+      "check_imaging": "PASS",
+      "check_ipc": "PASS",
+      "check_models": "PASS",
+      "check_package": "PASS",
+      "check_pipeline": "PASS",
+      "check_probe": "SKIP",
+      "check_provider": "PASS",
+      "check_settings": "PASS",
+      "check_tategaki": "PASS"
+    },
+    "metrics": {
+      "max_overflow_pct": null,
+      "min_font_px": null,
+      "clipped_glyph_count": null,
+      "fit_compromised_count": null,
+      "fit_failed_count": null,
+      "mean_cer": 0.0022,
+      "exact_match": 0.9583
+    }
   }
 ]

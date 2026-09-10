@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -23,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 
 from lib.httpread import read_bounded  # noqa: E402
 from lib.result import Checks, run  # noqa: E402
+from lib.stub_provider import StubProvider  # noqa: E402
 
 NONCE = "test-nonce-4a91c2"
 PORT = 8791
@@ -78,6 +80,19 @@ def call(method, path, port=PORT, headers=None, host="127.0.0.1", timeout=5, bod
         return e.code, read_bounded(e, timeout).decode("utf-8", "replace")
     except (urllib.error.URLError, OSError):
         return 0, ""
+
+
+def _parse_json(body):
+    """(payload, why). `why` names the parse failure so the assert can print it.
+
+    A bare `except: payload = {}` would report "the body has no error field"
+    for a body that is not JSON at all -- the same message for two different
+    faults, and the wrong one for the bug this file now pins.
+    """
+    try:
+        return json.loads(body), ""
+    except (ValueError, TypeError) as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def wait_up(port, tries=60):
@@ -165,6 +180,50 @@ def main():
                 f"and a machine-readable kind the UI can branch on "
                 f"({payload.get('kind')!r})")
 
+        # -- every error body is REAL JSON (US-P1-09) ----------------------
+        # Both error envelopes used to be built by f-string. `{e.body!r}` is
+        # Python repr, which switches to single quotes the moment the string
+        # contains a double quote -- and a provider error from an
+        # OpenAI-compatible endpoint is itself JSON, so that is the ordinary
+        # case, not the exotic one. The 502 arrived labelled application/json
+        # and json.loads could not read it, which is AC-8 delivering the
+        # provider's own words in an envelope the UI cannot open.
+        #
+        # Asserted HERE, at the HTTP boundary, because check_provider asserts
+        # AC-8 at the LLMClient level and stops one layer short of the bug;
+        # /api/models had no HTTP-level test at all.
+        with open(os.path.join(ROOT, "fixtures", "provider", "error_401.json"),
+                  encoding="utf-8") as fh:
+            provider_body = fh.read()
+        # If the fixture were quote-free the round-trip below would pass
+        # against the f-string too, so this assert guards the assert.
+        c.check('"' in provider_body,
+                "the provider fixture really does contain a double quote")
+
+        with StubProvider(models_status=401, delay=0) as stub:
+            status, body = call(
+                "GET", f"/api/models?base_url={quote(stub.url, safe='')}&model=probe"
+            )
+        c.check(status == 502, f"a provider error on /api/models is 502 (got {status})")
+        payload, why = _parse_json(body)
+        c.check(payload is not None,
+                f"and the 502 body parses as JSON ({why}; body {body[:120]!r})")
+        c.check(isinstance(payload, dict) and payload.get("body") == provider_body,
+                "and carries the provider's response verbatim, quotes intact")
+        c.check(isinstance(payload, dict) and payload.get("status") == 401,
+                f"and the provider's status ({(payload or {}).get('status')!r})")
+
+        # A ValueError message quotes the user's own input back at them --
+        # urllib formats the url with %r -- so whatever was typed into the
+        # Settings base URL field ends up inside the 400 body.
+        bad = 'say "hi"'
+        status, body = call("GET", f"/api/models?base_url={quote(bad, safe='')}&model=probe")
+        c.check(status == 400, f"a bad base_url with a double quote is 400 (got {status})")
+        payload, why = _parse_json(body)
+        c.check(isinstance(payload, dict) and isinstance(payload.get("error"), str),
+                f"and its body parses as JSON with the quote in the message "
+                f"({why}; body {body[:120]!r})")
+
         # -- the correct nonce actually shuts it down ----------------------
         status, _ = call("POST", "/api/shutdown", headers={"X-Shutdown-Nonce": NONCE})
         c.check(status == 200, f"POST with the CORRECT nonce is accepted ({status})")
@@ -178,6 +237,39 @@ def main():
             proc.kill()
             proc.wait(timeout=5)
 
+    # -- the 400 envelope against a message HTTP cannot deliver -------------
+    # A backslash or a newline typed into the base URL comes back through
+    # urllib already escaped -- it formats the url with %r, so `\` arrives as
+    # `\\` and a newline as `\n`, both of which are valid JSON escapes and
+    # survive even the broken f-string. Only the double quote above breaks it
+    # over HTTP, and asserting the other two through the socket would add two
+    # checks that CANNOT go red.
+    #
+    # So the handler is called directly with a ValueError whose message really
+    # does carry a raw backslash, a raw newline and a double quote -- the shape
+    # any other ValueError reaching this handler could take -- and the envelope
+    # it returns is parsed. Not the network path, and deliberately so: this
+    # asserts the one thing the network path cannot reach.
+    import sidecar.main as sidecar_main
+
+    nasty = 'C:\\Users\\me: cannot use "that"\nand a second line'
+    real_client = sidecar_main.LLMClient
+
+    def _explode(*_a, **_k):
+        raise ValueError(nasty)
+
+    sidecar_main.LLMClient = _explode
+    try:
+        response = sidecar_main.models(base_url="http://127.0.0.1:1/v1", model="probe")
+    finally:
+        sidecar_main.LLMClient = real_client
+
+    payload, why = _parse_json(response.body.decode("utf-8"))
+    c.check(response.status_code == 400, f"a ValueError is 400 (got {response.status_code})")
+    c.check(isinstance(payload, dict) and payload.get("error") == nasty,
+            f"and a message with a backslash, a newline and a quote round-trips "
+            f"through json.loads intact ({why}; body {response.body[:120]!r})")
+
     # -- no credentials in the source ---------------------------------------
     src = open(os.path.join(ROOT, "sidecar", "main.py"), encoding="utf-8").read()
     c.check('"0.0.0.0"' not in src and "'0.0.0.0'" not in src, "0.0.0.0 appears nowhere")
@@ -187,6 +279,27 @@ def main():
         "sk-" not in src and "localhost:20128" not in src,
         "no API key or dev base URL baked into main.py",
     )
+    # /api/translate's ProviderError path shares _provider_response with
+    # /api/models, which the HTTP asserts above exercise. This one catches a
+    # NEW hand-built envelope before it reaches a path no check drives: an
+    # f-string interpolated into a JSON body is the bug of US-P1-09 by
+    # construction, whichever handler it appears in.
+    #
+    # Parsed, not grepped. A grep for the old expression would also match this
+    # file's own prose about it, so the check would either go red on a comment
+    # or force the comments to stop naming what they fixed.
+    import ast
+
+    fstrings = [
+        node.lineno
+        for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "content" and isinstance(kw.value, ast.JoinedStr)
+    ]
+    c.check(not fstrings,
+            f"no error body is built by f-string interpolation -- json.dumps only "
+            f"(main.py lines {fstrings})")
 
     return c.finish()
 

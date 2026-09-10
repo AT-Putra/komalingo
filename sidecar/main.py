@@ -60,6 +60,27 @@ class TranslateRequest(BaseModel):
     settings: Settings | None = None  # absent -> offline placeholder path
 
 
+def _provider_response(e: ProviderError) -> Response:
+    """AC-8's envelope, built by json.dumps and never by an f-string.
+
+    The body is the provider's verbatim response, and a provider speaking an
+    OpenAI-compatible protocol answers in JSON -- so it contains double quotes
+    in the ordinary case, not the exotic one. The old `{e.body!r}` used Python
+    repr, which switches to SINGLE quotes as soon as the string contains a
+    double quote, and single-quoted strings are not JSON. The UI was handed a
+    502 labelled application/json that json.loads could not parse, so AC-8's
+    "the provider's own words reach the UI" delivered them unreadable.
+
+    One helper for both call sites, because two hand-built envelopes are two
+    chances to reintroduce this.
+    """
+    return Response(
+        content=json.dumps({"status": e.status, "body": e.body}),
+        status_code=502,
+        media_type="application/json",
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "pid": os.getpid()}
@@ -72,13 +93,17 @@ def models(base_url: str, model: str = "", api_key: str = ""):
         return {"models": LLMClient(base_url, api_key, model or "probe").list_models()}
     except ProviderError as e:
         # The provider's own words reach the UI. See AC-8.
+        return _provider_response(e)
+    except ValueError as e:
+        # json.dumps, never an f-string. A bad base_url comes back from urllib
+        # as "unknown url type: 'say \"hi\"/models'" -- the message quotes the
+        # user's own input back, so it carries whatever they typed, and an
+        # f-string here shipped that raw into a body labelled application/json.
         return Response(
-            content=f'{{"status":{e.status},"body":{e.body!r}}}',
-            status_code=502,
+            content=json.dumps({"error": str(e)}),
+            status_code=400,
             media_type="application/json",
         )
-    except ValueError as e:
-        return Response(content=f'{{"error":"{e}"}}', status_code=400, media_type="application/json")
 
 
 @app.post("/api/translate")
@@ -90,11 +115,7 @@ def translate(req: TranslateRequest):
     try:
         record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client)
     except ProviderError as e:
-        return Response(
-            content=f'{{"status":{e.status},"body":{e.body!r}}}',
-            status_code=502,
-            media_type="application/json",
-        )
+        return _provider_response(e)
     except (FetchError, DetectError) as e:
         # ONE handler for both, because DetectError deliberately mirrors
         # FetchError's (reason, kind) shape -- see its docstring. A caller that

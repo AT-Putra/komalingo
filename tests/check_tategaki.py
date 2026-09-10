@@ -112,10 +112,22 @@ def main():
 
     bordered = Image.new("RGB", (300, 300), "white")
     ImageDraw.Draw(bordered).rectangle([10, 10, 290, 290], outline="black", width=4)
+    # The degenerate sizes are here because the gate used to be green on a
+    # boundary it never tested. Every blank above is 300x300, and _is_blank
+    # took std() of an empty array on a zero-area crop: nan, and nan < 8.0 is
+    # False, so "cannot compute" read as "not blank" and manga-ocr answered a
+    # 0x50 crop with 'それでも、'. pipeline.ocr reaches this from production --
+    # it crops _bbox(polygon) straight from the detector, and a degenerate
+    # polygon gives a zero-area box. A hallucination gate that only ever sees
+    # well-formed input is not a gate.
     blanks = {
         "white": Image.new("RGB", (300, 300), "white"),
         "gray": Image.new("RGB", (300, 300), (200, 200, 200)),
         "bordered": bordered,
+        "zero-width": Image.new("RGB", (0, 50), "white"),
+        "zero-height": Image.new("RGB", (50, 0), "white"),
+        "zero-area": Image.new("RGB", (0, 0), "white"),
+        "one-pixel": Image.new("RGB", (1, 1), "white"),
     }
     for name, img in blanks.items():
         # Once, not once per use: the assert and the message it prints must

@@ -30,8 +30,12 @@ REQUEST_DELAY = 0.2  # seconds. See the module docstring before changing this.
 class StubProvider:
     """Usable as a context manager; `.url` is the OpenAI-compatible base URL."""
 
-    def __init__(self, status=200, delay=REQUEST_DELAY):
+    def __init__(self, status=200, delay=REQUEST_DELAY, models_status=200):
         self.status = status  # 200, 401 or 500 -- selects the canned body
+        # GET /models answers separately from the chat path, because the
+        # Settings dropdown fails on its own: a wrong key is rejected when the
+        # user first lists models, long before any page is translated.
+        self.models_status = models_status
         self.delay = delay
         self.chat_requests = 0
         self.peak_concurrency = 0
@@ -57,7 +61,13 @@ class StubProvider:
 
             def do_GET(self):
                 if self.path.rstrip("/").endswith("/models"):
-                    self._respond(200, fixtures["models"], "application/json")
+                    if stub.models_status == 200:
+                        self._respond(200, fixtures["models"], "application/json")
+                    else:
+                        # The provider's own words, verbatim, quotes and all --
+                        # what AC-8 promises to carry to the UI unchanged.
+                        self._respond(stub.models_status, fixtures["401"],
+                                      "application/json")
                 else:
                     self._respond(404, b'{"error":"not found"}', "application/json")
 

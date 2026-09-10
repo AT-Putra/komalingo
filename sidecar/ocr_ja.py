@@ -52,11 +52,32 @@ def _as_image(img) -> Image.Image:
 
 
 def _is_blank(img) -> bool:
+    """True when the crop carries no ink -- and true when that cannot be told.
+
+    A crop with no pixels is the second case. np.std() of an empty array is
+    nan, and EVERY comparison against nan is False, so the naive
+    `std < 8.0` turned "cannot compute" into "definitely not blank" and let
+    the model run on nothing: manga-ocr answered a 0x50 crop with 'それでも、',
+    invented text, which is the exact hallucination this gate exists to stop.
+    Reachable from production, not only from a test -- pipeline.ocr crops
+    _bbox(polygon) straight from the detector, and a degenerate polygon gives
+    a zero-area box.
+
+    Third time this shape has been recorded (a swallowed decode, an empty
+    tasklist parse, now a nan comparison): a failure to DETERMINE must never
+    produce the same value as a negative determination. So the return is
+    written as `not (std >= 8.0)` rather than `std < 8.0` -- with nan the
+    first says blank and the second says not-blank, and blank is the safe
+    answer, because a blank verdict costs an empty string and a not-blank
+    verdict costs invented dialogue on the page.
+    """
     gray = np.asarray(_as_image(img).convert("L"))
+    if gray.size == 0:
+        return True
     height, width = gray.shape
     inset_y, inset_x = int(height * 0.05), int(width * 0.05)
     interior = gray[inset_y : height - inset_y or None, inset_x : width - inset_x or None]
-    return float(interior.std()) < 8.0
+    return not (float(interior.std()) >= 8.0)
 
 
 _ELLIPSIS = re.compile(r"(?:．|\.){3,}")
@@ -90,6 +111,13 @@ if __name__ == "__main__":
     assert ocr(white) == ""
     assert ocr(gray) == ""
     assert ocr(bordered) == ""
+
+    # Degenerate crops: no pixels means nothing can be read off them, so the
+    # gate must answer "" rather than let the model invent a line.
+    assert _is_blank(Image.new("L", (0, 50), 255))
+    assert _is_blank(Image.new("L", (50, 0), 255))
+    assert _is_blank(Image.new("L", (0, 0), 255))
+    assert _is_blank(Image.new("L", (1, 1), 255))
 
     assert canonical("．．．") == "…"
     assert canonical("ＶＲで") == "VRで"
