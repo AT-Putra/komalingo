@@ -53,7 +53,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -62,6 +61,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+from lib.childio import captured, launch_drained  # noqa: E402
 from lib.httpread import read_bounded  # noqa: E402
 from lib.result import Checks, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider  # noqa: E402
@@ -187,40 +187,17 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-# Drained output per process, so a dying child's traceback survives it.
-_CAPTURED: dict[int, list] = {}
-
-
 def launch(port: int, nonce: str) -> subprocess.Popen:
-    """Start the exe with its stdout drained by a thread from the first byte.
+    """Start the exe with its output drained from the first byte.
 
-    The drain is not a convenience. A pipe holds about 64 KB; past that the
-    child BLOCKS on write, and this harness is meanwhile blocked reading the
-    child's socket, so the two wait on each other and the request dies with no
-    body. Every real failure inside the exe then reaches the reader as a bare
-    500 or a reset -- which is exactly how a missing unidic_lite dictionary
-    stayed invisible for two lanes' worth of iterations while its traceback
-    sat unread in a full pipe.
+    The drain lives in lib/childio.py now, and the reason it has to exist is
+    written there. This check learned it the first time -- a missing
+    unidic_lite dictionary stayed invisible for two lanes' worth of iterations
+    while its traceback sat unread in a full pipe -- and check_api learned it
+    the second, which is what moved it into shared code.
     """
     env = {**os.environ, "MT_PORT": str(port), "MT_SHUTDOWN_NONCE": nonce}
-    proc = subprocess.Popen(
-        [EXE], env=env, cwd=DIST,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-    )
-    lines: list = []
-    _CAPTURED[proc.pid] = lines
-
-    def drain():
-        for raw in iter(proc.stdout.readline, b""):
-            lines.append(raw.decode("utf-8", "replace").rstrip())
-
-    threading.Thread(target=drain, daemon=True).start()
-    return proc
-
-
-def captured(proc, tail: int = 40) -> str:
-    """What the child actually said, whether or not it is still alive."""
-    return "\n".join(_CAPTURED.get(proc.pid, [])[-tail:])
+    return launch_drained([EXE], env=env, cwd=DIST)
 
 
 def kill(proc):

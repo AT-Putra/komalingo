@@ -22,6 +22,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+from lib.childio import captured, launch_drained, said  # noqa: E402
 from lib.httpread import read_bounded  # noqa: E402
 from lib.result import Checks, run  # noqa: E402
 from lib.stub_provider import StubProvider  # noqa: E402
@@ -54,6 +55,18 @@ def _loopback_only(self, address, *a, **k):
 socket.socket.connect = _loopback_only
 
 from sidecar.main import app, HOST
+
+
+# Registered HERE, in the test's own server script, never in main.py. An
+# endpoint that exists only to crash is a debug hatch, and a debug hatch that
+# ships is an endpoint an attacker can reach; the property under test is how
+# the app treats an unexpected exception, and that does not require the
+# shipped binary to carry a way of causing one.
+@app.get("/api/_boom")
+def _boom():
+    raise RuntimeError("deliberate: an exception no handler predicted")
+
+
 uvicorn.run(app, host=HOST, port=int(sys.argv[1]), log_level="error")
 """
 
@@ -110,18 +123,17 @@ def main():
     os.makedirs(EMPTY_MODELS, exist_ok=True)
     env = dict(os.environ, MT_SHUTDOWN_NONCE=NONCE, PYTHONIOENCODING="utf-8",
                PYTHONPATH=ROOT, MT_MODEL_DIR=EMPTY_MODELS)
-    proc = subprocess.Popen(
-        [sys.executable, "-c", SERVER, str(PORT)],
-        env=env,
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # DRAINED, not merely piped. This harness used to hold both pipes and read
+    # neither until the end, so the first traceback the sidecar printed filled
+    # the pipe and blocked it mid-write -- and every request after that timed
+    # out. Read as a server fault, that looks exactly like an application hang,
+    # and it was written up as one before being driven properly. See
+    # lib/childio.py; check_package.py hit the same wall first.
+    proc = launch_drained([sys.executable, "-c", SERVER, str(PORT)], env=env, cwd=ROOT)
     try:
         if not wait_up(PORT):
             proc.kill()
-            out, err = proc.communicate(timeout=5)
-            c.check(False, f"sidecar starts: {err.decode('utf-8', 'replace')[-400:]}")
+            c.check(False, f"sidecar starts: {captured(proc)[-400:]}")
             return c.finish()
 
         status, body = call("GET", "/api/health")
@@ -259,6 +271,32 @@ def main():
                 f"and names the field the user has to fill ({why}; body {body[:100]!r})")
         c.check(call("GET", "/api/health", timeout=4)[0] == 200,
                 "and the sidecar still serves after the rejected translate")
+
+        # -- an exception nobody predicted (US-P1-11) ----------------------
+        # Every other error path in main.py is one somebody thought about.
+        # This is the one nobody did: whatever the next bug turns out to be.
+        # Starlette's default is a plain-text "Internal Server Error" under a
+        # content type the UI cannot parse, which puts the sidecar's worst
+        # moments outside the envelope every other failure arrives in.
+        status, body = call("GET", "/api/_boom")
+        c.check(status == 500, f"an unpredicted exception is 500 (got {status})")
+        payload, why = _parse_json(body)
+        c.check(isinstance(payload, dict) and payload.get("kind") == "internal",
+                f"and its body is JSON the UI can branch on ({why}; body {body[:100]!r})")
+        c.check(isinstance(payload, dict) and payload.get("exception") == "RuntimeError",
+                f"naming the exception CLASS, not its message ({payload})")
+        # The message must NOT travel. An unexpected exception's text can carry
+        # a path, a payload fragment, or part of a provider response, and this
+        # body goes to a renderer.
+        c.check("deliberate:" not in body,
+                f"and not the message text, which is unvetted ({body[:100]!r})")
+        c.check(call("GET", "/api/health", timeout=4)[0] == 200,
+                "and the sidecar still serves afterwards")
+        # The trace is how the NEXT bug gets diagnosed. Tauri reads stderr into
+        # the log pane, so a handler that returned a tidy 500 and swallowed the
+        # traceback would trade one debugging session for every future one.
+        c.check(said(proc, "RuntimeError: deliberate:"),
+                f"and the full traceback still reaches stderr ({captured(proc, 3)!r:.140})")
 
         # -- the correct nonce actually shuts it down ----------------------
         status, _ = call("POST", "/api/shutdown", headers={"X-Shutdown-Nonce": NONCE})

@@ -101,6 +101,34 @@ def _bad_settings_response(e: ValueError) -> Response:
     )
 
 
+@app.exception_handler(Exception)
+def unhandled(request: Request, e: Exception) -> Response:
+    """The last envelope. Every other error path in this file is deliberate;
+    this one catches the ones nobody predicted, so that a bug in the sidecar
+    reaches the UI as something it can read rather than as Starlette's
+    plain-text "Internal Server Error" under an unparseable content type.
+
+    It does NOT swallow the traceback. Starlette re-raises after this handler
+    returns, uvicorn logs it, and Tauri reads it off stderr into the log pane
+    -- which is the only way the next bug gets diagnosed. A handler that
+    returned a tidy 500 and ate the trace would trade one debugging session
+    for every future one.
+
+    `type(e).__name__` and nothing else. The message of an unexpected
+    exception can carry a path, a payload fragment, or a chunk of a provider
+    response, and this envelope goes to a renderer; the class name says
+    "something in the sidecar broke, here is what kind" without shipping
+    whatever happened to be in the string. The full text is on stderr.
+    """
+    return Response(
+        content=json.dumps({"error": "internal error in the sidecar",
+                            "kind": "internal",
+                            "exception": type(e).__name__}),
+        status_code=500,
+        media_type="application/json",
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "pid": os.getpid()}
