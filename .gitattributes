@@ -13,3 +13,4 @@ package-lock.json -text
 # Hand-authored, never generated. The 401 body and the 500 HTML are asserted
 # verbatim, so a line-ending rewrite changes what the AC-8 check compares.
 fixtures/provider/** -text
+graphify-out/graph.json merge=graphify
