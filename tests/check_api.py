@@ -224,6 +224,42 @@ def main():
                 f"and its body parses as JSON with the quote in the message "
                 f"({why}; body {body[:120]!r})")
 
+        # -- a malformed base URL is a 400, not a bare 500 (US-P1-10) ------
+        # http.client.InvalidURL is NOT a ValueError -- it descends from
+        # HTTPException -- so `except ValueError` at the boundary walked past
+        # it and one mistyped character in the port came back as a 500 with an
+        # empty body. Exactly the shape of the weights-failure bug above: the
+        # failure the user can fix arriving as the one that looks like ours.
+        for label, bad in (("a nonnumeric port", "http://127.0.0.1:notaport/v1"),
+                           ("a control character", "http://127.0.0.1\n:9/v1"),
+                           ("no scheme at all", "127-0-0-1/v1")):
+            status, body = call("GET", f"/api/models?base_url={quote(bad, safe='')}&model=probe")
+            c.check(status == 400, f"base_url with {label} is 400, not 500 (got {status})")
+            payload, why = _parse_json(body)
+            c.check(isinstance(payload, dict) and isinstance(payload.get("error"), str),
+                    f"and says why, in JSON ({why}; body {body[:100]!r})")
+            # AND the sidecar still answers. Before the fix this was not a 500,
+            # it was a HANG: the process stayed alive and every later request
+            # timed out, so the cost of the bug was the app bricked until
+            # restart, not one unhelpful status code. A check that stops at the
+            # status cannot tell those two apart -- the shutdown gate below is
+            # the only other place in this file that thought to ask.
+            c.check(call("GET", "/api/health", timeout=4)[0] == 200,
+                    f"and the sidecar still serves afterwards ({label})")
+
+        # The same class of settings error on /api/translate, where the client
+        # used to be built ABOVE the try and could not be caught at all.
+        status, body = call("POST", "/api/translate", body=json.dumps({
+            "src_path": SMOKE, "dest_dir": os.path.join(EMPTY_MODELS, "out"), "page": 1,
+            "settings": {"base_url": "", "api_key": "", "model": ""},
+        }), timeout=60)
+        c.check(status == 400, f"/api/translate with empty settings is 400 (got {status})")
+        payload, why = _parse_json(body)
+        c.check(isinstance(payload, dict) and "base_url" in str(payload.get("error")),
+                f"and names the field the user has to fill ({why}; body {body[:100]!r})")
+        c.check(call("GET", "/api/health", timeout=4)[0] == 200,
+                "and the sidecar still serves after the rejected translate")
+
         # -- the correct nonce actually shuts it down ----------------------
         status, _ = call("POST", "/api/shutdown", headers={"X-Shutdown-Nonce": NONCE})
         c.check(status == 200, f"POST with the CORRECT nonce is accepted ({status})")

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -29,6 +30,19 @@ from dataclasses import dataclass, field
 MAX_CONCURRENT = 3
 MAX_REGIONS = 40  # above this a page is split across requests
 TIMEOUT = 120
+
+
+class SettingsError(ValueError):
+    """The configured settings cannot be used. Not the provider's fault.
+
+    A ValueError subclass on purpose: every caller that already handles the
+    "base_url is required" ValueError keeps working unchanged. The named type
+    exists so /api/translate can catch THIS and not every ValueError raised
+    anywhere inside a page run -- a decode failure deep in the pipeline is our
+    bug and belongs in a 500, while a mistyped port belongs in a 400 the user
+    can act on. One `except ValueError` around the whole run would report both
+    as the second.
+    """
 
 
 class ProviderError(RuntimeError):
@@ -51,9 +65,9 @@ class Region:
 class LLMClient:
     def __init__(self, base_url: str, api_key: str | None, model: str):
         if not base_url:
-            raise ValueError("base_url is required -- it comes from Settings, not a default")
+            raise SettingsError("base_url is required -- it comes from Settings, not a default")
         if not model:
-            raise ValueError("model is required -- it comes from Settings, not a default")
+            raise SettingsError("model is required -- it comes from Settings, not a default")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or ""  # optional and may be empty: local servers
         self.model = model
@@ -74,7 +88,15 @@ class LLMClient:
     def _request(self, path: str, payload=None, method="GET"):
         url = f"{self.base_url}{path}"
         data = json.dumps(payload).encode() if payload is not None else None
-        req = urllib.request.Request(url, data, self._headers(), method=method)
+        try:
+            req = urllib.request.Request(url, data, self._headers(), method=method)
+        except ValueError as e:
+            # A base_url with no scheme lands here: urllib formats the url with
+            # %r into "unknown url type: 'nas/v1/models'". Raised at REQUEST
+            # construction, outside the transport try below, so it needs its
+            # own handler -- and it must arrive as SettingsError so a page run
+            # can tell it apart from a ValueError raised by the pipeline.
+            raise SettingsError(f"invalid base URL {url!r}: {e}") from None
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 return json.loads(r.read())
@@ -85,6 +107,26 @@ class LLMClient:
             raise ProviderError(e.code, body, url) from None
         except urllib.error.URLError as e:
             raise ProviderError(0, f"{type(e.reason).__name__}: {e.reason}", url) from None
+        except http.client.InvalidURL as e:
+            # The two errors this module raises say different things, and a
+            # malformed base URL belongs on the ValueError side: nothing is
+            # wrong with the provider, the SETTINGS are unusable. __init__
+            # already speaks that dialect for a missing base_url, so main.py's
+            # 400 handler is already listening for it.
+            #
+            # Caught HERE because InvalidURL is not a ValueError -- it descends
+            # from HTTPException, so `except ValueError` at the HTTP boundary
+            # walked straight past it, and "localhost:por/v1" (one typo in the
+            # port) went unhandled. Which cost more than a 500: measured, the
+            # sidecar stayed alive and stopped answering. See US-P1-11.
+            raise SettingsError(f"invalid base URL {url!r}: {e}") from None
+        except http.client.HTTPException as e:
+            # Everything else under HTTPException is the provider breaking
+            # protocol mid-conversation -- BadStatusLine, IncompleteRead, a
+            # RemoteDisconnected that urllib did not wrap. Status 0 because no
+            # HTTP status ever arrived; the class name is the only fact there
+            # is, and AC-8 says the caller gets that rather than a synonym.
+            raise ProviderError(0, f"{type(e).__name__}: {e}", url) from None
 
     async def _call(self, path, payload):
         """The only way out to the provider. Holds the semaphore for the call."""

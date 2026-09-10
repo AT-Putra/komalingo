@@ -36,7 +36,7 @@ from pydantic import BaseModel  # noqa: E402
 
 from . import pipeline  # noqa: E402
 from .detect import DetectError  # noqa: E402
-from .llm import LLMClient, ProviderError  # noqa: E402
+from .llm import LLMClient, ProviderError, SettingsError  # noqa: E402
 from .models import FetchError  # noqa: E402
 
 HOST = "127.0.0.1"  # never 0.0.0.0. See the module docstring.
@@ -81,6 +81,26 @@ def _provider_response(e: ProviderError) -> Response:
     )
 
 
+def _bad_settings_response(e: ValueError) -> Response:
+    """A 400 for settings this process cannot use. json.dumps, never f-string.
+
+    Typed ValueError, not SettingsError, because /api/models hands it the
+    wider type: on that endpoint a ValueError can ONLY be about the settings
+    the request itself carries, so there is nothing else it could mislabel.
+    /api/translate is the one that has to narrow, and does.
+
+    The message quotes the user's own input back at them -- urllib formats the
+    url with %r -- so it carries whatever they typed into the Settings field,
+    quotes, backslashes and newlines included. That is exactly the input an
+    f-string body cannot survive.
+    """
+    return Response(
+        content=json.dumps({"error": str(e)}),
+        status_code=400,
+        media_type="application/json",
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "pid": os.getpid()}
@@ -95,27 +115,33 @@ def models(base_url: str, model: str = "", api_key: str = ""):
         # The provider's own words reach the UI. See AC-8.
         return _provider_response(e)
     except ValueError as e:
-        # json.dumps, never an f-string. A bad base_url comes back from urllib
-        # as "unknown url type: 'say \"hi\"/models'" -- the message quotes the
-        # user's own input back, so it carries whatever they typed, and an
-        # f-string here shipped that raw into a body labelled application/json.
-        return Response(
-            content=json.dumps({"error": str(e)}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return _bad_settings_response(e)
 
 
 @app.post("/api/translate")
 def translate(req: TranslateRequest):
     """Run one page. Progress lines go to stdout, which Tauri reads."""
-    client = None
-    if req.settings:
-        client = LLMClient(req.settings.base_url, req.settings.api_key, req.settings.model)
     try:
+        # INSIDE the try. The constructor rejects an empty base_url or model,
+        # and the settings payload can carry both as empty strings -- pydantic
+        # types them, it cannot know they are required downstream. Built above
+        # the try, that error went unhandled -- and unhandled here does not
+        # mean an unhelpful 500, it means the sidecar stops answering at all
+        # (US-P1-11). The one failure the user could have fixed in two seconds
+        # cost them a restart.
+        client = None
+        if req.settings:
+            client = LLMClient(req.settings.base_url, req.settings.api_key, req.settings.model)
         record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client)
     except ProviderError as e:
         return _provider_response(e)
+    except SettingsError as e:
+        # SettingsError, NOT ValueError. A page run is a lot of code, and a
+        # ValueError from inside the pipeline is our bug -- it belongs in a
+        # 500 that says so, not in a 400 that blames the user's settings for
+        # it. The named type is what keeps this handler honest about which of
+        # the two it caught.
+        return _bad_settings_response(e)
     except (FetchError, DetectError) as e:
         # ONE handler for both, because DetectError deliberately mirrors
         # FetchError's (reason, kind) shape -- see its docstring. A caller that
