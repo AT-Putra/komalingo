@@ -51,6 +51,26 @@ NAMES = {PASS: "PASS", FAIL: "FAIL", INCONCLUSIVE: "INCONCLUSIVE", SKIP: "SKIP"}
 # beats 0, which is NOT numeric order -- 1 is the largest by rank, not value.
 RANK = {FAIL: 3, INCONCLUSIVE: 2, SKIP: 1, PASS: 0}
 
+# Which way is WORSE for each baseline metric -- the metric ratchet reads this.
+# A metric in neither set is recorded but never ratcheted, which is a decision
+# to make explicitly here rather than by forgetting to list it.
+#
+# fit_compromised_count and fit_failed_count are deliberately in NEITHER set.
+# They count outcomes over a fixed set of forcing fixtures, so their value is
+# decided by which fixtures exist, not by how good the engine is: adding a
+# legitimate rung-5 fixture would read 4 -> 5 as a regression, while a forcing
+# fixture that silently stopped forcing would read 4 -> 3 as an improvement.
+# Both directions are wrong. The per-fixture asserts in check_typeset, and its
+# drift detector, are what guard those numbers.
+LOWER_IS_BETTER = {
+    "max_overflow_pct",
+    "clipped_glyph_count",
+    "mean_cer",
+    "ring_assert_skipped",
+}
+HIGHER_IS_BETTER = {"min_font_px", "exact_match"}
+METRIC_EPS = 1e-9  # float noise, not tolerance: any real movement counts
+
 # Phase order, not alphabetical: a foundational failure should be read first.
 # Names not listed here still run, after these, sorted -- a check added later
 # is never silently dropped just because nobody updated this list.
@@ -67,6 +87,8 @@ PHASE_ORDER = [
     "check_ipc",
     "check_probe",
     "check_tategaki",
+    "check_typeset",
+    "check_inpaint",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -178,6 +200,26 @@ def append_record(record: dict) -> None:
         fh.write("\n")
 
 
+def metric_regressions(now_metrics: dict, last_metrics: dict) -> list[str]:
+    """Every metric that moved the WRONG way against the last comparable record.
+
+    A function rather than a loop inside main() so it can be driven directly:
+    a ratchet that has only ever been exercised by a run in which nothing
+    regressed has never been seen to fire. A metric the previous record never
+    measured (None) has no floor yet and is skipped, not failed.
+    """
+    out = []
+    for key, now in now_metrics.items():
+        was = last_metrics.get(key)
+        if was is None or now is None:
+            continue
+        if key in LOWER_IS_BETTER and now > was + METRIC_EPS:
+            out.append(f"metric {key}: {was} -> {now} (lower is better)")
+        elif key in HIGHER_IS_BETTER and now < was - METRIC_EPS:
+            out.append(f"metric {key}: {was} -> {now} (higher is better)")
+    return out
+
+
 def main() -> int:
     assert_interpreter()
 
@@ -190,6 +232,24 @@ def main() -> int:
         results[name], _, stdout = run_check(name)
         measured.update(harvest_metrics(stdout))
 
+    # A code outside the 0/1/2/3 contract is not a check RESULT -- it is a
+    # child that crashed or was killed. Windows reports a Ctrl-C'd child as
+    # 3221225794 (0xC000013A, STATUS_CONTROL_C_EXIT), and this runner used to
+    # store that integer as the check's status and append the record anyway.
+    # Two such records reached tests/baseline.json during Phase 2a and had to
+    # be removed by hand: they claimed PASS for checks that never finished, and
+    # the ratchet compares the next run against exactly those claims.
+    #
+    # An interrupted run has measured nothing, so it writes nothing. Refusing
+    # here is not lost information -- the information was never collected.
+    offcontract = {n: c for n, c in results.items() if c not in NAMES}
+    if offcontract:
+        print("\n  ABORTED -- these checks did not return a result code:")
+        for name, code in sorted(offcontract.items()):
+            print(f"    {name}: exit {code}")
+        print("  No baseline record written: an interrupted run has measured nothing.")
+        return FAIL
+
     worst = max(results.values(), key=lambda code: RANK.get(code, RANK[FAIL])) if results else PASS
     skipped = sorted(n for n, code in results.items() if code == SKIP)
 
@@ -201,15 +261,17 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "1",
+        "phase": "2a",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
         "checks": {n: NAMES.get(c, str(c)) for n, c in sorted(results.items())},
-        # The typeset metrics stay null until Phase 2a's real renderer; they
-        # are written unmeasured so the schema is fixed here rather than
-        # invented later. mean_cer/exact_match are filled from whichever check
-        # printed a METRICS line -- check_tategaki, from Phase 1 on.
+        # Phase 2a fills the typeset half of this schema for the first time:
+        # check_typeset prints max_overflow_pct, min_font_px,
+        # clipped_glyph_count, fit_compromised_count and fit_failed_count, and
+        # check_tategaki has printed mean_cer/exact_match since Phase 1. A key
+        # left null here means no check claimed it this run -- which is a
+        # reportable fact, not a default.
         "metrics": {
             "max_overflow_pct": None,
             "min_font_px": None,
@@ -218,6 +280,12 @@ def main() -> int:
             "fit_failed_count": None,
             "mean_cer": None,
             "exact_match": None,
+            # Phase 2a: check_inpaint's assert 1 does not run on a region whose
+            # ring is mostly border ink. The count is carried HERE as well as
+            # printed, because an unannounced skip is the same defect class as
+            # an assert that cannot fail -- and a skip that is only ever
+            # printed is unannounced to everyone reading the record later.
+            "ring_assert_skipped": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline
@@ -247,6 +315,22 @@ def main() -> int:
         if was == "PASS" and status != "PASS":
             regressions.append(f"{name}: PASS -> {status}")
 
+    # The build order's clause is "every METRIC no worse than the last record",
+    # and until Phase 2a only check STATUS was compared -- max_overflow_pct could
+    # have doubled with every check still green. A metric the previous record
+    # never measured (None) has no floor yet and is skipped, not failed.
+    #
+    # A deliberate trade is allowed, and must say so: MT_ACCEPT_METRIC_REGRESSION
+    # carries the one-line reason into the record. A silent one is a regression.
+    accepted = os.environ.get("MT_ACCEPT_METRIC_REGRESSION", "").strip()
+    regressions += metric_regressions(record["metrics"], last.get("metrics") or {})
+    if regressions and accepted and all(r.startswith("metric ") for r in regressions):
+        record["accepted_regression"] = {"reason": accepted, "metrics": regressions}
+        print(f"\n  metric regression ACCEPTED ({accepted}):")
+        for r in regressions:
+            print(f"    {r}")
+        regressions = []
+
     append_record(record)
     if regressions:
         print(f"\n  REGRESSION against {last['timestamp']}:")
@@ -258,4 +342,5 @@ def main() -> int:
     return worst
 
 
-sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())

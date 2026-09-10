@@ -96,6 +96,29 @@ def main():
             record.get("inpaint_calls") == record.get("detections"),
             f"inpaint call count recorded: {record.get('inpaint_calls')}",
         )
+
+        # -- Phase 2a: the fit result reaches the file the editor reads ----
+        # Written by pipeline.render, and until this assert NO check read any
+        # of it back out of regions.json -- the flags could have been dropped
+        # at serialisation and every gate would still be green.
+        regs = record.get("regions", [])
+        fit_keys = {"typeset", "font_px", "rung", "fit_compromised", "fit_failed",
+                    "fit_reason", "retranslated"}
+        c.check(
+            bool(regs) and all(fit_keys <= set(r) for r in regs),
+            f"every region in regions.json carries the typeset result "
+            f"(missing: {sorted(fit_keys - set(regs[0])) if regs else 'no regions'})",
+        )
+        summary = record.get("fit_summary") or {}
+        lists = ("fit_compromised", "fit_failed", "retranslated")
+        c.check(
+            all(isinstance(summary.get(k), list) for k in lists),
+            f"regions.json carries a job summary listing region IDS: {summary}",
+        )
+        c.check(
+            set(summary.get("fit_failed", [])) == {r["id"] for r in regs if r.get("fit_failed")},
+            "the summary's fit_failed ids agree with the per-region flags",
+        )
         changed = record.get("pixels_changed_in_polygon", {})
         c.check(
             bool(changed) and all(v > 0 for v in changed.values()),
@@ -106,7 +129,21 @@ def main():
     src = open(os.path.join(ROOT, "sidecar", "pipeline.py"), encoding="utf-8").read()
     c.check("imaging.save" in src, "the pipeline encodes through imaging.py")
     c.check("atomic.atomic_write" in src, "the pipeline lands bytes through atomic.py")
-    c.check("ponytail:" in src, "the placeholder renderer names its ceiling and upgrade path")
+    # Phase 2a retired the placeholder renderer. Until this revision the assert
+    # here read `"ponytail:" in src` and was described as "the placeholder
+    # renderer names its ceiling" -- which kept passing after the renderer was
+    # replaced, because translate()'s own offline placeholder still carries the
+    # marker. An assert that survives the removal of the thing it describes is
+    # measuring the file, not the claim.
+    c.check("typeset.typeset_page" in src,
+            "the render stage is typeset.py's fit ladder, not the top-left placeholder")
+    c.check("draw.text((x0 + 4, y0 + 4)" not in src,
+            "the Phase 0 top-left anchored draw.text is gone from the render stage")
+    for marker in ("ponytail:",):
+        if marker in src:
+            c.check("Ceiling:" in src and "Upgrade path:" in src,
+                    f"every remaining {marker!r} placeholder still names its "
+                    f"ceiling and its upgrade path")
     c.check("TODO" not in src, "no TODO placeholders left behind")
 
     return c.finish()

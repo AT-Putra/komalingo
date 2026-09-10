@@ -34,6 +34,10 @@ from PIL.PngImagePlugin import PngInfo
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "fixtures"
 
+sys.path.insert(0, str(ROOT))
+
+from sidecar.region import ellipse_points  # noqa: E402
+
 # A JA-capable font is required: the smoke page's whole purpose is vertical
 # Japanese glyphs, and Pillow's default bitmap font renders them as boxes.
 JA_FONTS = ["C:/Windows/Fonts/msgothic.ttc", "C:/Windows/Fonts/YuGothR.ttc"]
@@ -161,59 +165,174 @@ def gen_smoke():
 # typesetter will be handed. The fixture forces a rung by geometry (how much
 # room) crossed with string length. `expected.json` states which rung and what
 # the ladder must report -- the gate reads that, not this docstring.
+#
+# EVERY NUMBER BELOW IS MEASURED, NOT CHOSEN. The first version of this table
+# was written before the ladder existed, and when the ladder arrived FIVE of
+# the six fixtures landed on rung 1: `rung5-geometry`'s "sliver" was a 248px
+# ellipse that fitted its 116px string at full size, and `rung5-nowordfits`'
+# longest word fitted its 133px centre chord with room to spare. Six fixtures
+# that cannot reach the rungs they are named for are six asserts that cannot
+# go red -- the exact defect class this suite exists to remove. The geometry
+# here was found by bisecting the ladder's own rung boundaries; see the rung
+# assert in check_typeset.py, which fails if any fixture stops forcing.
+#
+# Widths are measured against the ELLIPSE CHORD, never the bounding box: a
+# bubble's bbox is far wider than the chord any line may actually use, and
+# tuning against the bbox is how the first version came to be so far out.
+
+# One sentence, sliced at measured word counts. The large fixtures share it so
+# that the ONLY difference between them is the variable each isolates.
+_LONG = (
+    "I told you already that we should never have opened that door because "
+    "whatever waits behind it has been patient for a very long time indeed and "
+    "it remembers every single one of us by name and it will not forget"
+).split()
+
+# Re-measured after the Phase 2a review rewrote the ladder's fit predicate to
+# be monotone -- the first set of numbers was bisected against a predicate with
+# holes in it, and moved when the holes were removed. On the 110x150 bubble
+# below, at the 12px floor:
+#
+#     words 20-23 -> rung 2    24-25 -> rung 3    26-28 -> rung 4    29+ -> rung 5
+#
+# and rung 5's computed capacity is 138 characters for every string past it.
+# Each fixture sits in the MIDDLE of its window, so a small change in the
+# engine's metrics moves a boundary before it moves a fixture off its rung.
+_S27 = " ".join(_LONG[:27])   # 143 chars -- centre of rung 4's 26-28 window
+_S31 = " ".join(_LONG[:31])   # 169 chars -- rung 5 by length
+_S32 = " ".join(_LONG[:32])   # 173 chars -- likewise, distinct for stub keying
+
+# The shared bubble: 110x150, and the page around it is what decides whether
+# rung 4's bleed has anywhere to go.
+_BIG = (15, 10, 125, 160)
+_SMALL = (10, 10, 70, 50)
+
+# A reply LONGER than the cap it was sent with. The spec names this case: rung 5
+# must not trust it over the original, so it is rejected and the ORIGINAL is
+# what gets truncated.
+_TOO_LONG_REPLY = "Still far too long to fit " + _S27
+
+# A reply WITHIN its cap that still does not fit: 121 characters against a cap
+# of 138, but in capitals, which run far wider than the lowercase prefix the cap
+# was measured on. The spec names this case separately from a reply that is too
+# long. This reply is ACCEPTED and rendered, then truncated -- the reply, at a
+# word boundary of the reply -- with retranslated and fit_failed both set.
+_WITHIN_CAP_REPLY = (
+    "WE MUST NEVER OPEN THAT DOOR AGAIN BECAUSE WHATEVER WAITS BEHIND IT "
+    "REMEMBERS EVERY ONE OF US BY NAME AND WILL NOT FORGET"
+)
 
 FORCING = [
-    # (name, W, H, ellipse, ja source, english the typesetter receives, rung, expect)
-    ("rung4", 420, 300, (30, 30, 390, 270), "たすけて",
-     "Help me right now please",
-     4, {"fit_compromised": False, "fit_failed": False,
-         "why": "fits after shrink-to-fit above the font floor"}),
+    # (name, W, H, ellipse, ja source, english the typesetter receives, rung,
+    #  expect, retry_reply)
+    #
+    # Rung 4: the string exhausts rungs 1-3 and fits only once bounded
+    # horizontal bleed is allowed. Both margins (15px) exceed the 8.8px the
+    # bleed needs, so rung 4 is genuinely available here.
+    ("rung4", 140, 170, _BIG, "たすけて", _S27,
+     4, {"fit_compromised": True, "fit_failed": False, "rung4_skipped": False,
+         "retranslated": False,
+         "why": "exhausts rungs 1-3; fits only with bounded horizontal bleed"},
+     None),
 
-    ("rung5-length", 300, 200, (20, 20, 280, 180), "せつめい",
-     "This explanation is far too long to ever fit inside this small bubble at "
-     "any font size above the floor",
-     5, {"fit_compromised": True, "fit_failed": False, "retranslate": True,
-         "why": "length forces one capped re-translation"}),
+    # Rung 5 by LENGTH, reply REJECTED: past rung 4's ceiling on the same
+    # polygon and margins, and the retry comes back LONGER than its cap. The
+    # reply is not trusted over the original; the original is truncated.
+    ("rung5-length", 140, 170, _BIG, "せつめい", _S31,
+     5, {"fit_compromised": False, "fit_failed": True, "rung4_skipped": False,
+         "retranslate": True, "reply_rejected": True, "retranslated": False,
+         "word_boundary": True, "reason": "truncated at a word boundary",
+         "why": "length forces rung 5; the capped retry comes back longer than its cap"},
+     _TOO_LONG_REPLY),
 
-    ("rung5-geometry", 260, 460, (6, 6, 254, 454), "ほそい",
-     "A sentence in a sliver",
-     5, {"fit_compromised": True, "fit_failed": False,
-         "why": "polygon at the raster edge; geometry, not length, forces rung 5"}),
+    # Rung 5 by GEOMETRY, reply ACCEPTED but still too big: the SAME polygon and
+    # the SAME string as the rung-4 fixture, on a page 15px narrower so the
+    # bubble's right edge sits on the raster edge -- rung 4 is SKIPPED rather
+    # than attempted. The retry is within its cap and does not fit, which is
+    # the spec's "the shortened string still does not fit" branch: rendered,
+    # then truncated at a boundary of the REPLY. Paired with rung5-length, the
+    # two cover both ways a retry can fail to rescue a region.
+    ("rung5-geometry", 125, 170, _BIG, "ほそい", _S27,
+     5, {"fit_compromised": False, "fit_failed": True, "rung4_skipped": True,
+         "retranslate": True, "reply_rejected": False, "retranslated": True,
+         "word_boundary": True, "reason": "truncated at a word boundary",
+         "why": "raster edge skips rung 4; the accepted reply still does not fit"},
+     _WITHIN_CAP_REPLY),
 
-    ("rung5-success", 340, 240, (20, 20, 320, 220), "みじかく",
-     "Shortened on retry",
-     5, {"fit_compromised": True, "fit_failed": False, "retranslate": True,
+    # Rung 5's SUCCESS branch. The stub's reply is within its cap and FITS.
+    # Without this fixture an implementation that issues the retry, discards
+    # the reply and truncates passes every other rung-5 assert including the
+    # request count. A retried region that fits cleanly is neither compromised
+    # nor failed; it is reported as retranslated.
+    ("rung5-success", 140, 170, _BIG, "みじかく", _S32,
+     5, {"fit_compromised": False, "fit_failed": False, "rung4_skipped": False,
+         "retranslate": True, "reply_rejected": False, "retranslated": True,
          "rendered_text": "Shortened on retry",
-         "why": "the retry's reply MUST be rendered; discarding it must fail"}),
+         "why": "the retry's reply MUST be rendered; discarding it must fail"},
+     "Shortened on retry"),
 
-    ("rung5-nowordfits", 150, 120, (8, 8, 142, 112), "むり",
+    # Rung 5, no whole word fits: a 60px-wide bubble against a string whose
+    # SHORTEST word is 87px at the floor. Renders empty, fit_failed surfaced.
+    ("rung5-nowordfits", 80, 60, _SMALL, "むり",
      "Incomprehensibilities notwithstanding",
-     5, {"fit_compromised": True, "fit_failed": True, "rendered_text": "",
-         "why": "no whole word fits: renders empty, fit_failed surfaced"}),
+     5, {"fit_compromised": False, "fit_failed": True, "retranslate": True,
+         "reply_rejected": True, "retranslated": False, "rendered_text": "",
+         "reason": "no whole word fits",
+         "why": "no whole word fits: renders empty, fit_failed surfaced"},
+     "Incomprehensibilities notwithstanding"),
 
-    ("rung5-midtoken", 130, 110, (8, 8, 122, 102), "ながい",
+    # Rung 5, first token exceeds capacity: the same bubble against a single
+    # 44-character token. There is no boundary to stop at, so the break is
+    # mid-token with a trailing ellipsis.
+    ("rung5-midtoken", 80, 60, _SMALL, "ながい",
      "Pneumonoultramicroscopicsilicovolcanoconiosis",
-     5, {"fit_compromised": True, "fit_failed": True, "ellipsis": True,
-         "why": "first token exceeds capacity: mid-token break with an ellipsis"}),
+     5, {"fit_compromised": False, "fit_failed": True, "retranslate": True,
+         "reply_rejected": True, "retranslated": False, "ellipsis": True,
+         "reason": "single token broken with an ellipsis",
+         "why": "first token exceeds capacity: mid-token break with an ellipsis"},
+     "Pneumonoultramicroscopicsilicovolcanoconiosis"),
 ]
 
-
 def gen_bubbles():
-    ja = load_font(JA_FONTS, 26)
+    """One bubble per fixture, DRAWN from the same point list the gate measures.
+
+    The bubble is drawn with `draw.polygon` over region.ellipse_points rather
+    than with `draw.ellipse`, so the shape on the raster and the polygon in
+    expected.json are the same object. Drawing a true ellipse and measuring an
+    inscribed 64-gon differs by under a pixel at the waist and by more at the
+    poles -- harmless on an easy string, and enough to flip a boundary fixture
+    between runs, which is precisely what these fixtures are.
+    """
+    ja = load_font(JA_FONTS, 22)
     index = {}
-    for name, w, h, ell, src, english, rung, expect in FORCING:
+    for name, w, h, ell, src, english, rung, expect, retry in FORCING:
+        points = ellipse_points(ell)
         img = Image.new("RGB", (w, h), "white")
         draw = ImageDraw.Draw(img)
-        draw.ellipse(ell, fill="white", outline="black", width=4)
+        draw.polygon(points, fill="white", outline="black")
         draw_vertical(draw, src, ell, ja)
         save_png(img, FIXTURES / "bubbles" / f"{name}.png")
-        index[f"{name}.png"] = {
-            "polygon": list(ell),
+        entry = {
+            "page_size": [w, h],
+            # The BOX, not the 64 derived points. Both the drawing above and
+            # the gate rebuild the polygon with region.ellipse_points(box), so
+            # writing the points here would add 30x the file size and no
+            # information -- and would introduce a second copy that can drift
+            # from the function that made it.
+            "box": list(ell),
+            "shape": "ellipse",
             "source_ja": src,
             "translation_in": english,
             "forces_rung": rung,
             "expect": expect,
         }
+        # The stubbed retry reply lives WITH the fixture, not in the check: the
+        # fixture is what decides whether rung 5's retry is rescued or survived,
+        # and a reply held in the check drifts from the geometry it was chosen
+        # against.
+        if retry is not None:
+            entry["retry_reply"] = retry
+        index[f"{name}.png"] = entry
     return index
 
 

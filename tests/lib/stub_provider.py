@@ -30,12 +30,19 @@ REQUEST_DELAY = 0.2  # seconds. See the module docstring before changing this.
 class StubProvider:
     """Usable as a context manager; `.url` is the OpenAI-compatible base URL."""
 
-    def __init__(self, status=200, delay=REQUEST_DELAY, models_status=200):
+    def __init__(self, status=200, delay=REQUEST_DELAY, models_status=200, replies=None):
         self.status = status  # 200, 401 or 500 -- selects the canned body
         # GET /models answers separately from the chat path, because the
         # Settings dropdown fails on its own: a wrong key is rejected when the
         # user first lists models, long before any page is translated.
         self.models_status = models_status
+        # Per-region canned replies, {region_id: text}. Phase 2a's rung-5 gate
+        # needs the reply CONTENT to differ per fixture -- one fixture's retry
+        # must come back short enough to fit and another's must not -- and the
+        # difference between those two branches is the whole of the
+        # "the reply is rendered, not merely requested" assert. Default None
+        # keeps the echoing behaviour every earlier check was written against.
+        self.replies = replies
         self.delay = delay
         self.chat_requests = 0
         self.peak_concurrency = 0
@@ -91,7 +98,8 @@ class StubProvider:
                     elif stub.status == 500:
                         self._respond(500, fixtures["500"], "text/html")
                     else:
-                        self._respond(200, _chat_reply(stub.last_payload), "application/json")
+                        self._respond(200, _chat_reply(stub.last_payload, stub.replies),
+                                      "application/json")
                 finally:
                     with stub._lock:
                         stub._in_flight -= 1
@@ -126,12 +134,17 @@ def _load_fixtures() -> dict:
     }
 
 
-def _region_ids(payload) -> list:
-    """The ids the request actually asked about, read out of the prompt.
+def requested_items(payload) -> list:
+    """The region objects a request asked about, read out of the prompt.
 
     Parsed from the JSON array after the 'regions ' marker rather than by
     counting '"id"' in the whole prompt: the reply-format template the client
     sends also contains an "id", so counting would report one region too many.
+
+    Returned WHOLE, not reduced to ids, because Phase 2a's rung-5 gate needs the
+    `max_chars` each region was capped at. A stub that reads only ids cannot
+    see a wrong cap, so a rung 5 that sends the provider a nonsense limit would
+    pass every request-count assert.
     """
     texts = []
     if isinstance(payload, dict):
@@ -147,13 +160,20 @@ def _region_ids(payload) -> list:
         if marker < 0:
             continue
         try:
-            return [r["id"] for r in json.loads(text[marker + len("regions ") :])]
-        except (ValueError, KeyError, TypeError):
+            items = json.loads(text[marker + len("regions ") :])
+        except ValueError:
             continue
-    return [0]
+        if isinstance(items, list) and all(isinstance(i, dict) and "id" in i for i in items):
+            return items
+    return []
 
 
-def _chat_reply(payload) -> bytes:
+def _region_ids(payload) -> list:
+    """The ids a request asked about; [0] when the prompt carried none."""
+    return [i["id"] for i in requested_items(payload)] or [0]
+
+
+def _chat_reply(payload, replies=None) -> bytes:
     """Echo one translation per region the request asked about.
 
     The client batches a whole page into one request, so the reply must carry
@@ -162,7 +182,14 @@ def _chat_reply(payload) -> bytes:
     back, so a client that mismaps a split batch onto 0..n cannot pass either.
     """
     ids = _region_ids(payload)
-    body = json.dumps({"translations": [{"id": i, "text": f"STUB {i}"} for i in ids]})
+    if replies is not None:
+        texts = [replies.get(i, f"STUB {i}") for i in ids]
+    else:
+        texts = [f"STUB {i}" for i in ids]
+    body = json.dumps(
+        {"translations": [{"id": i, "text": t} for i, t in zip(ids, texts)]},
+        ensure_ascii=False,
+    )
     return json.dumps(
         {
             "id": "chatcmpl-stub",

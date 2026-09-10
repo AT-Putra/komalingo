@@ -20,7 +20,7 @@ from dataclasses import asdict
 
 from PIL import Image, ImageDraw
 
-from . import atomic, imaging, ocr_ja
+from . import atomic, imaging, ocr_ja, typeset
 from . import detect as detector
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
@@ -114,9 +114,19 @@ def translate(regions: list[dict], page: int, client=None) -> None:
 def inpaint(img: Image.Image, regions: list[dict], page: int) -> tuple[Image.Image, int]:
     """Erase the original text. Returns (image, call count).
 
-    ponytail: fills each polygon with flat white. Ceiling: it destroys any
-    screentone or art under the bubble, which is visible on a textured page.
-    Upgrade path: Phase 1b replaces this with LaMa over a dilated text mask.
+    Fills each detected polygon with flat white. That is CORRECT, not a
+    placeholder, for the case this pipeline actually meets: a detected region is
+    the text area *inside* a speech bubble, and a manga bubble's interior is
+    white, so filling it white continues the bubble's own interior. Phase 2a's
+    check_inpaint.py is what holds that claim to account -- it compares the
+    filled area against the ring of bubble just outside it, and a flat fill
+    passes only where the surrounding bubble is flat too.
+
+    Ceiling: a bubble whose interior carries screentone or a gradient. There,
+    flat white is a box-over and check_inpaint.py's ring assert says so.
+    Upgrade path: a texture-continuing inpainter behind this same call. It is
+    NOT a Phase 2a deliverable -- the build order lists no inpainter module in
+    2a, and there is no "Phase 1b" despite what this docstring used to claim.
     """
     out = img.convert("RGB").copy()
     draw = ImageDraw.Draw(out)
@@ -126,23 +136,53 @@ def inpaint(img: Image.Image, regions: list[dict], page: int) -> tuple[Image.Ima
     return out, len(regions)
 
 
-def render(img: Image.Image, regions: list[dict], page: int) -> Image.Image:
-    """Draw the translations back into the cleaned page.
+def render(
+    img: Image.Image,
+    regions: list[dict],
+    page: int,
+    client=None,
+    *,
+    allow_retranslate: bool = True,
+) -> tuple[Image.Image, dict]:
+    """Draw the translations back into the cleaned page. Returns (image, summary).
 
-    ponytail: upstream's naive renderer -- default font, top-left anchored,
-    no wrapping. Ceiling: NO BUBBLE-FIT GUARANTEE. Long lines overflow the
-    polygon and overlap the art, and that is expected in Phase 0. Upgrade
-    path: Phase 2a replaces this call with the five-rung fit ladder
-    (shrink -> wrap -> break -> compromise -> fail) that check_typeset.py
-    already has fixtures for; the signature does not change.
+    Phase 2a: this is typeset.py's five-rung ladder, replacing the Phase 0
+    placeholder that anchored every string top-left with the default font and
+    no wrapping at all.
+
+    The fit metrics are written back onto the region dicts here rather than
+    returned alongside them, because run_page json-serialises those same
+    objects into regions.json -- which is where a reader, and the spot-fix
+    editor, look to find out which bubbles came out compromised. They are
+    DERIVED on every pass and never read back as input: typeset_page recomputes
+    both flags from the geometry each time, so a user shortening an edit clears
+    the flag by re-running rather than by anyone remembering to clear it.
+
+    `client` is threaded through for rung 5's one length-capped retry, so that
+    request acquires llm.py's Semaphore(3) like every other call.
+    `allow_retranslate=False` is the spot-fix re-render path.
     """
-    out = img.copy()
-    draw = ImageDraw.Draw(out)
+    out, fits = typeset.typeset_page(
+        regions, img, allow_retranslate=allow_retranslate, client=client
+    )
+    by_id = {f.id: f for f in fits}
     for r in regions:
-        x0, y0, _, _ = _bbox(r["polygon"])
-        draw.text((x0 + 4, y0 + 4), r.get("translation", ""), fill="black")
+        f = by_id.get(r["id"])
+        if f is None:
+            continue
+        r["typeset"] = f.text
+        r["font_px"] = f.font_px
+        r["rung"] = f.rung
+        r["rung4_skipped"] = f.rung4_skipped
+        r["fit_compromised"] = f.fit_compromised
+        r["fit_failed"] = f.fit_failed
+        # Why it failed, and whether the text on the page is the provider's
+        # shortened reply rather than the original translation. Without these
+        # the editor can highlight a bubble but cannot tell the user what to do.
+        r["fit_reason"] = f.reason
+        r["retranslated"] = f.retranslated
     emit("render", f"{len(regions)} regions", page, 80)
-    return out
+    return out, typeset.summary(fits)
 
 
 def encode_and_write(img: Image.Image, src_path, dest_dir, page: int) -> str:
@@ -167,7 +207,7 @@ def run_page(src_path, dest_dir, page: int = 1, client=None) -> dict:
         ocr_calls = ocr(regions, src, page)
         translate(regions, page, client)
         cleaned, inpaint_calls = inpaint(original, regions, page)
-        drawn = render(cleaned, regions, page)
+        drawn, fit_summary = render(cleaned, regions, page, client)
         out_path = encode_and_write(drawn, src_path, dest_dir, page)
 
     changed = {r["id"]: _changed_in_polygon(cleaned, drawn, r["polygon"]) for r in regions}
@@ -178,6 +218,10 @@ def run_page(src_path, dest_dir, page: int = 1, client=None) -> dict:
         "ocr_calls": ocr_calls,
         "inpaint_calls": inpaint_calls,
         "pixels_changed_in_polygon": changed,
+        # AC-1's reporting half. Region IDS, not counts alone: "3 regions did
+        # not fit" tells the user the page is incomplete without telling them
+        # where to look, and the spot-fix editor sorts on exactly this list.
+        "fit_summary": fit_summary,
         "regions": regions,
     }
 

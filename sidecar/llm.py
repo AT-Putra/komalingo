@@ -198,6 +198,37 @@ class LLMClient:
             out.update(self._parse(reply))
         return out
 
+    async def retranslate_capped(self, items) -> dict:
+        """Rung 5's length-capped retry. ONE request for every capped region.
+
+        `items` is [(region_id, english, max_chars)]. The cap is per region and
+        computed by typeset.py from the polygon's fitted capacity, so it is
+        carried per item rather than as one number for the page -- a page's
+        bubbles do not share a capacity.
+
+        Batched for the same reason translate_page is: a page of hard bubbles
+        must cost ONE extra request, not one per bubble. It goes through _call
+        like everything else, so it acquires the same Semaphore(3); a shortcut
+        straight to _request here would silently double the cap the user set.
+        """
+        if not items:
+            return {}
+        instruction = (
+            "Rewrite each English text to the SAME MEANING in at most max_chars "
+            "characters. Do not translate to another language; do not add notes. "
+            "Reply with JSON: {\"translations\":[{\"id\":<id>,\"text\":<shorter>}]}.\n"
+            "regions "
+            + json.dumps(
+                [{"id": i, "text": t, "max_chars": n} for i, t, n in items],
+                ensure_ascii=False,
+            )
+        )
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": instruction}],
+        }
+        return self._parse(await self._call("/chat/completions", payload))
+
     # -- vision probe ------------------------------------------------------
 
     async def probe_vision(self, png: bytes, expect: str) -> bool:
