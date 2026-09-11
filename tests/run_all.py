@@ -90,6 +90,7 @@ PHASE_ORDER = [
     "check_typeset",
     "check_inpaint",
     "check_spotfix",
+    "check_group",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -262,7 +263,7 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "2a",
+        "phase": "2b",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,

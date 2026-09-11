@@ -40,6 +40,7 @@ assert that cannot fail.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -57,6 +58,11 @@ from sidecar import pipeline, typeset  # noqa: E402
 from sidecar.llm import LLMClient  # noqa: E402
 
 PAGE = os.path.join(ROOT, "fixtures", "smoke", "tategaki_01.png")
+EXPECTED = os.path.join(ROOT, "fixtures", "smoke", "expected.json")
+# Phase 2b: the source glyph size detect.py reports must be near the size the
+# fixture was drawn at, or the cap derived from it is a number from nowhere.
+GLYPH_TOL = (0.8, 1.4)
+ROOM_CONTAIN = 0.80  # of the block's area the room must hold
 
 RING_INNER, RING_OUTER = 6, 10  # the band, in pixels, on both sides
 DARK_FRAC_OF_RANGE = 0.45  # ring pixels darker than this are border ink
@@ -237,8 +243,14 @@ def _chord_x(points, y: float):
     return max(spans, key=lambda span: span[1] - span[0])
 
 
-def _expected_font_px(points, text: str, page_w: int, page_h: int) -> int:
+def _expected_font_px(points, text: str, page_w: int, page_h: int, cap: int = 0) -> int:
     """The size a single-word line MUST be set at, derived from the polygon.
+
+    Phase 2b: `points` is the ROOM when the engine found one -- verified
+    against the fixture's own ellipse before it is trusted, see _room_ok --
+    and `cap` is the glyph-size ceiling, GLYPH_CAP times a glyph size the
+    gate has likewise checked against the fixture. Both are inputs the gate
+    has examined, not the engine's report of what it drew.
 
     What is independent and what is not, stated exactly, because the first
     version overstated it. INDEPENDENT: the engine's reported font size is never
@@ -266,6 +278,8 @@ def _expected_font_px(points, text: str, page_w: int, page_h: int) -> int:
     bottom = min(max(p[1] for p in inner), float(page_h))
     floor = typeset.floor_px(page_h)
     ceiling = max(floor, min(typeset.max_font_px(page_h), int(h)))
+    if cap:
+        ceiling = max(floor, min(ceiling, cap))
 
     for size in range(ceiling, floor - 1, -1):
         line_h = size * typeset.LEADING
@@ -350,6 +364,55 @@ def _ink_bbox(gray: np.ndarray, mask: np.ndarray):
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
+def _room_ok(c, r, src, src_gray, fixture) -> list:
+    """Phase 2b: the region's room, once the gate has checked it is a room.
+
+    Three things are checked against the FIXTURE, not the engine: the room
+    holds the block it grew from; it lies inside the ellipse the fixture drew
+    that bubble as -- the ground truth of "the bubble interior"; and no ink
+    of the source page lies inside it outside the block, so the border was
+    respected. Returns the room to derive the reference from, or the block
+    when the engine declined one.
+    """
+    rid, block = r["id"], r["polygon"]
+    room = r.get("room")
+    if not room:
+        c.check(False, f"[room {rid}] the engine found a room for this bubble -- every "
+                       f"smoke bubble is a closed ellipse with white inside, so a "
+                       f"decline here is a regression in room.py")
+        return block
+    size = src.size
+    block_m, room_m = _mask(size, block), _mask(size, room)
+    held = (block_m & room_m).sum() / max(block_m.sum(), 1)
+    c.check(held >= ROOM_CONTAIN,
+            f"[room {rid}] holds {held:.3f} >= {ROOM_CONTAIN} of the block it grew from")
+    cx = sum(p[0] for p in block) / len(block)
+    cy = sum(p[1] for p in block) / len(block)
+    bubble = next((b for b in fixture["bubbles"]
+                   if b["box"][0] <= cx <= b["box"][2] and b["box"][1] <= cy <= b["box"][3]),
+                  None)
+    if c.check(bubble is not None, f"[room {rid}] the block sits in a fixture bubble"):
+        ell = Image.new("1", size, 0)
+        ImageDraw.Draw(ell).ellipse(bubble["box"], fill=1)
+        ell_m = np.asarray(ell, dtype=bool)
+        leak = int((room_m & ~ell_m).sum())
+        c.check(leak == 0,
+                f"[room {rid}] {leak} room pixels outside the fixture's ellipse == 0 -- "
+                f"the room is the bubble's interior and nothing past its border")
+        xs = [p[0] for p in block]
+        rxs = [p[0] for p in room]
+        c.check(max(rxs) - min(rxs) > 1.5 * (max(xs) - min(xs)),
+                f"[room {rid}] the room is wider than the column it grew from "
+                f"({max(rxs) - min(rxs):.0f}px vs {max(xs) - min(xs):.0f}px) -- the "
+                f"English gets the bubble's width, which is the point")
+    ink = src_gray < typeset.INK_THRESHOLD
+    stray = int((ink & room_m & ~block_m).sum())
+    c.check(stray == 0,
+            f"[room {rid}] {stray} source ink pixels inside the room outside the block "
+            f"== 0 -- border ink is not room")
+    return room
+
+
 def _composite(c) -> None:
     """The gate nothing else provides: translated text landing on a real page.
 
@@ -362,6 +425,8 @@ def _composite(c) -> None:
         src = im.convert("RGB").copy()
     src_gray = np.array(src.convert("L"), dtype=np.float64)
     page_w, page_h = src.size
+    with open(EXPECTED, encoding="utf-8") as fh:
+        fixture = json.load(fh)[os.path.basename(PAGE)]
 
     # The cleaned page, reproduced by calling the same two stages on the same
     # input. run_page does not surface its intermediate, and assert (a) is a
@@ -384,10 +449,20 @@ def _composite(c) -> None:
 
     # (b) the stub's exact string, at a scale derived from the geometry.
     for r in record["regions"]:
-        rid, points = r["id"], r["polygon"]
+        rid = r["id"]
         c.check(r["typeset"] == STUB_TEXT,
                 f"[composite-b {rid}] the stub's string reached the page record "
                 f"({r['typeset']!r} == {STUB_TEXT!r})")
+        # Phase 2b: the geometry is the ROOM, checked against the fixture's
+        # ellipse first, and the ceiling is the glyph cap, from a glyph size
+        # checked against the size the fixture was drawn at.
+        points = _room_ok(c, r, src, src_gray, fixture)
+        glyph = r.get("glyph_px", 0)
+        lo, hi = GLYPH_TOL
+        c.check(lo * fixture["glyph_px"] <= glyph <= hi * fixture["glyph_px"],
+                f"[glyph {rid}] detect.py reports a {glyph}px source glyph; the fixture "
+                f"was drawn at {fixture['glyph_px']}px (tolerance {lo}-{hi}x)")
+        cap = int(math.ceil(typeset.GLYPH_CAP * glyph)) if glyph else 0
         inside = _mask((page_w, page_h), points)
         box = _ink_bbox(out_gray, inside)
         if not c.check(box is not None,
@@ -402,18 +477,21 @@ def _composite(c) -> None:
         # A page rendered at half scale leaves a half-height ink box, the
         # full-height reference cannot align with it at any shift, and the
         # correlation collapses.
-        size = _expected_font_px(points, STUB_TEXT, page_w, page_h)
+        size = _expected_font_px(points, STUB_TEXT, page_w, page_h, cap)
         score = _best_ncc(out_gray, _reference(STUB_TEXT, size), (box[0], box[1]))
         c.check(score >= NCC_FLOOR,
                 f"[composite-b {rid}] rendered text correlates {score:.3f} >= {NCC_FLOOR} "
-                f"with a {size}px reference derived from the POLYGON, not from the "
-                f"engine's own reported metrics")
+                f"with a {size}px reference derived from the ROOM and the glyph cap, "
+                f"not from the engine's own reported metrics")
 
-    # (c) everything outside the dilated bboxes is untouched.
+    # (c) everything outside the dilated bboxes is untouched. Phase 2b: the
+    # English is in the room and the erasure is in the block, so the bbox
+    # spans both -- the room's margin can leave a sliver of block outside it.
     touched = np.zeros((page_h, page_w), dtype=bool)
     for r in record["regions"]:
-        xs = [p[0] for p in r["polygon"]]
-        ys = [p[1] for p in r["polygon"]]
+        laid = list(r["polygon"]) + list(r.get("room") or [])
+        xs = [p[0] for p in laid]
+        ys = [p[1] for p in laid]
         bleed = typeset.BLEED_FRAC * (max(xs) - min(xs))
         x0 = max(int(min(xs) - bleed), 0)
         x1 = min(int(max(xs) + bleed) + 1, page_w)

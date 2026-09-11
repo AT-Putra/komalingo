@@ -326,7 +326,7 @@ def main():
     _edge_cases(c, index)
     _compare_metrics(c, measured)
 
-    print("METRICS " + json.dumps({
+    metrics = {
         "max_overflow_pct": max(
             (100.0 * m["overflow_px_x"] / m["poly_w"] for m in measured.values()),
             default=0.0,
@@ -335,8 +335,40 @@ def main():
         "clipped_glyph_count": sum(m["clipped_glyphs"] for m in measured.values()),
         "fit_compromised_count": sum(1 for m in measured.values() if m["fit_compromised"]),
         "fit_failed_count": sum(1 for m in measured.values() if m["fit_failed"]),
-    }))
+    }
+    _ratchet_2a(c, metrics)
+    print("METRICS " + json.dumps(metrics))
     return c.finish()
+
+
+def _ratchet_2a(c, metrics) -> None:
+    """Phase 2b's gate, as the build order words it: no worse than 2a's RECORD.
+
+    run_all keeps fit_compromised_count and fit_failed_count out of its own
+    metric ratchet, for a reason that still holds: over a fixed set of
+    FORCING fixtures those counts are decided by which fixtures exist. The
+    build order nonetheless names them for 2b -- "<= 2a's recorded values"
+    -- so they are held here, against the newest phase-2a record in
+    tests/baseline.json, where the reader can see which record. A change
+    that legitimately moves them edits the record with a one-line reason in
+    the commit; a silent one is red. No 2a record is a FAILURE, not a skip:
+    the store is committed, so its absence means the store was broken.
+    """
+    baseline = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baseline.json")
+    try:
+        with open(baseline, encoding="utf-8") as fh:
+            records = [r for r in json.load(fh) if r.get("phase") == "2a"]
+    except (OSError, json.JSONDecodeError):
+        records = []
+    if not c.check(bool(records), f"[ratchet-2a] {baseline} holds a phase-2a record to "
+                                  f"ratchet against"):
+        return
+    last = records[-1]["metrics"]
+    for key in ("fit_compromised_count", "fit_failed_count", "max_overflow_pct"):
+        was, now = last.get(key), metrics[key]
+        c.check(was is not None and now <= was + 1e-9,
+                f"[ratchet-2a] {key} {now} <= 2a's recorded {was} "
+                f"({records[-1]['timestamp']})")
 
 
 def _batching_and_spotfix(c, index) -> None:

@@ -41,6 +41,7 @@
         "text": "またあした"
       }
     ],
+    "glyph_px": 44,
     "notes": "Ring guarantee: bubble 0 sits on screentone with a clean 6-10px band inside its border; line art crosses bubble 2 only.",
     "panels": [
       [
@@ -62,6 +63,78 @@
         1560
       ]
     ],
+    "size": [
+      1200,
+      1700
+    ]
+  },
+  "tategaki_02.png": {
+    "art": {
+      "angle": -14,
+      "box": [
+        720,
+        1000,
+        1150,
+        1440
+      ],
+      "stack": [
+        "収納",
+        "魔法"
+      ],
+      "stack_gap": [
+        740,
+        1066,
+        830,
+        1090
+      ],
+      "text": "DEUS EX MACHINA"
+    },
+    "bubbles": [
+      {
+        "box": [
+          640,
+          110,
+          1100,
+          470
+        ],
+        "columns": [
+          "今日はいい",
+          "天気だね"
+        ],
+        "text": "今日はいい天気だね"
+      },
+      {
+        "box": [
+          110,
+          150,
+          520,
+          690
+        ],
+        "columns": [
+          "史実が売りの",
+          "歴史ゲームを",
+          "やるもんじゃ",
+          "ないな"
+        ],
+        "text": "史実が売りの歴史ゲームをやるもんじゃないな"
+      },
+      {
+        "box": [
+          240,
+          940,
+          700,
+          1500
+        ],
+        "columns": [
+          "反撃なしじゃ",
+          "みんな",
+          "死ぬぞ"
+        ],
+        "text": "反撃なしじゃみんな死ぬぞ"
+      }
+    ],
+    "glyph_px": 44,
+    "notes": "One region per bubble is the claim; the art block beside bubble 2 must remain its own region, and the art between the two stacked words on it must survive the erase.",
     "size": [
       1200,
       1700

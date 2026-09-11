@@ -45,6 +45,18 @@ class Region:
     translation: str = ""  # English from llm.py
     typeset: str = ""  # what typeset.py actually rendered (Phase 2a)
     confidence: float = 0.0  # detection confidence from detect.py
+    # Phase 2b: the source glyph size in px -- the median short side of the
+    # quads detect.py merged into this region, which for a tategaki column is
+    # its width. 0 when unknown. typeset.py caps rung 1 at a multiple of it.
+    glyph_px: int = 0
+    # Phase 2b: the quads detect.py merged into this region -- where the
+    # source glyphs actually are. `polygon` is their convex hull, and the
+    # hull is the right shape to OCR, translate and typeset, but the wrong
+    # shape to ERASE: on text laid down a character's body (page 012's
+    # "Storage Magic") the hull spans the art between the pieces, and filling
+    # it white put a box over the character. inpaint fills the parts. Empty
+    # means "the polygon is the only part".
+    parts: list = field(default_factory=list)
 
 
 def as_points(polygon) -> list[tuple[float, float]]:

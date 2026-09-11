@@ -64,6 +64,13 @@ export interface TranslateResult {
 export interface Region {
   id: number;
   polygon: [number, number][];
+  /**
+   * Phase 2b: the bubble interior the English was actually laid into, or
+   * null when the typesetter declined one and used `polygon`. Derived on
+   * every render like the fit flags. Drawn and hit-tested in preference to
+   * `polygon`, because that is where the English now is.
+   */
+  room?: [number, number][] | null;
   text: string | null; // the Japanese source; null means not yet OCR'd
   translation: string;
   typeset: string;

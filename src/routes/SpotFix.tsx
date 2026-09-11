@@ -30,6 +30,11 @@ import {
 } from "../lib/api";
 
 /** Even-odd ray casting, in page coordinates. */
+/** Where the English is: the room when the typesetter found one, else the block. */
+function laidInto(r: Region): [number, number][] {
+  return r.room && r.room.length >= 3 ? r.room : r.polygon;
+}
+
 function inPolygon(x: number, y: number, poly: [number, number][]): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -93,7 +98,7 @@ export default function SpotFix({
       for (const r of page.regions) {
         if (!r.fit_failed && !r.fit_compromised && r.id !== selected) continue;
         ctx.beginPath();
-        r.polygon.forEach(([x, y], i) =>
+        laidInto(r).forEach(([x, y], i) =>
           i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y),
         );
         ctx.closePath();
@@ -114,7 +119,7 @@ export default function SpotFix({
     // however many screen pixels it is currently shown in.
     const x = ((e.clientX - box.left) * el.width) / box.width;
     const y = ((e.clientY - box.top) * el.height) / box.height;
-    const hit = page.regions.find((r) => inPolygon(x, y, r.polygon));
+    const hit = page.regions.find((r) => inPolygon(x, y, laidInto(r)));
     if (hit) select(hit);
   }
 

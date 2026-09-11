@@ -71,6 +71,7 @@ def save_png(img, path):
 # --------------------------------------------------------------------------
 
 W, H = 1200, 1700
+SMOKE_GLYPH_PX = 44  # the JA face size on both smoke pages; Phase 2b's gates read it
 
 # Three bubbles of differing aspect. Bubble 0 is the screentone-gradient one and
 # carries the clear ring assert 1 depends on; the crossing line art is placed
@@ -133,7 +134,7 @@ def gen_smoke():
     # Bubbles: white ellipse + black outline. Painted AFTER the tone and line
     # art, so bubble 0's interior is clean white -- that clean band inside its
     # own border is the ring check_inpaint.py evaluates.
-    ja = load_font(JA_FONTS, 44)
+    ja = load_font(JA_FONTS, SMOKE_GLYPH_PX)
     for box, text in zip(BUBBLES, BUBBLE_TEXT):
         draw.ellipse(box, fill="white", outline="black", width=5)
         draw_vertical(draw, text, box, ja)
@@ -144,6 +145,7 @@ def gen_smoke():
         "tategaki_01.png": {
             "size": [W, H],
             "panels": panels,
+            "glyph_px": SMOKE_GLYPH_PX,
             "bubbles": [
                 {"box": list(BUBBLES[0]), "text": BUBBLE_TEXT[0],
                  "aspect": round((BUBBLES[0][2] - BUBBLES[0][0])
@@ -160,6 +162,94 @@ def gen_smoke():
             ],
             "notes": "Ring guarantee: bubble 0 sits on screentone with a clean "
                      "6-10px band inside its border; line art crosses bubble 2 only.",
+        }
+    }
+
+
+# --------------------------------------------------------------------------
+# smoke/tategaki_02.png -- multi-column bubbles, for Phase 2b's grouping gate.
+# --------------------------------------------------------------------------
+# tategaki_01 has one column per bubble, so it never showed the defect Phase
+# 2b exists to fix: the detector returns one quad per COLUMN and each column
+# was typeset alone. Three bubbles of 2, 3 and 4 columns, plus a rotated Latin
+# title on a dark block hard against bubble 2 -- page 010's box-art case,
+# where a wide rotated quad's bbox overlaps the neighbouring columns in y and
+# must still stay a separate region.
+
+# (x0, y0, x1, y1), and the columns each carries, right to left as read.
+COLUMN_BUBBLES = [
+    ((640, 110, 1100, 470), ["今日はいい", "天気だね"]),
+    ((110, 150, 520, 690), ["史実が売りの", "歴史ゲームを", "やるもんじゃ", "ないな"]),
+    ((240, 940, 700, 1500), ["反撃なしじゃ", "みんな", "死ぬぞ"]),
+]
+ART_BLOCK = (720, 1000, 1150, 1440)  # dark rectangle; its title is rotated
+ART_TEXT = "DEUS EX MACHINA"
+ART_ANGLE = -14
+# Two words stacked on the art with dark art between them -- page 012's
+# "Storage Magic" laid down a character's body. They group into one block,
+# and the erase must take the two words and leave the art between them.
+ART_STACK = [("収納", (740, 1016)), ("魔法", (740, 1092))]
+ART_STACK_GAP = (740, 1066, 830, 1090)  # (x0, y0, x1, y1) of dark art between the words
+
+
+def draw_columns(draw, columns, box, font, pitch=1.35, leading=1.12):
+    """Tategaki in several columns: right to left, glyphs top to bottom.
+
+    The block is centred in the bubble. Column pitch and leading are what a
+    typeset tankoubon page uses, near enough that the detector sees columns
+    at the spacing it will meet on real pages.
+    """
+    x0, y0, x1, y1 = box
+    size = font.size
+    step = size * pitch
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    tallest = max(len(c) for c in columns) * size * leading
+    top = cy - tallest / 2
+    right = cx + (len(columns) - 1) * step / 2 - size / 2
+    for ci, column in enumerate(columns):
+        x = right - ci * step
+        for gi, ch in enumerate(column):
+            draw.text((x, top + gi * size * leading), ch, font=font, fill="black")
+
+
+def gen_smoke_columns():
+    page = Image.new("RGB", (W, H), "white")
+    draw = ImageDraw.Draw(page)
+    for p in [(60, 60, 1140, 800), (60, 850, 1140, 1560)]:
+        draw.rectangle(p, outline="black", width=7)
+
+    # The art block first, so the bubble beside it is painted over its edge
+    # the way a bubble overlaps panel art; then the rotated title on top.
+    draw.rectangle(ART_BLOCK, fill=(40, 40, 40))
+    latin = load_font(LATIN_FONTS, 54)
+    tw = int(latin.getlength(ART_TEXT)) + 20
+    title = Image.new("RGBA", (tw, 80), (0, 0, 0, 0))
+    ImageDraw.Draw(title).text((10, 8), ART_TEXT, font=latin, fill="white")
+    title = title.rotate(ART_ANGLE, expand=True, resample=Image.BICUBIC)
+    ax0, ay0, ax1, ay1 = ART_BLOCK
+    page.paste(title, ((ax0 + ax1 - title.width) // 2, (ay0 + ay1 - title.height) // 2), title)
+
+    ja = load_font(JA_FONTS, SMOKE_GLYPH_PX)
+    for word, at in ART_STACK:
+        draw.text(at, word, font=ja, fill="white")
+    for box, columns in COLUMN_BUBBLES:
+        draw.ellipse(box, fill="white", outline="black", width=5)
+        draw_columns(draw, columns, box, ja)
+
+    save_png(page, FIXTURES / "smoke" / "tategaki_02.png")
+    return {
+        "tategaki_02.png": {
+            "size": [W, H],
+            "glyph_px": SMOKE_GLYPH_PX,
+            "bubbles": [
+                {"box": list(box), "columns": columns, "text": "".join(columns)}
+                for box, columns in COLUMN_BUBBLES
+            ],
+            "art": {"box": list(ART_BLOCK), "text": ART_TEXT, "angle": ART_ANGLE,
+                    "stack": [w for w, _ in ART_STACK], "stack_gap": list(ART_STACK_GAP)},
+            "notes": "One region per bubble is the claim; the art block beside "
+                     "bubble 2 must remain its own region, and the art between "
+                     "the two stacked words on it must survive the erase.",
         }
     }
 
@@ -473,6 +563,7 @@ def main():
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
 
     smoke = gen_smoke()
+    smoke.update(gen_smoke_columns())
     bubbles = gen_bubbles()
     cbz = gen_cbz()
 

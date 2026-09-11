@@ -505,11 +505,15 @@ def section_flags(c: Checks, cache_dir: str, out_dir: str, record: dict):
     item, rid = record["item_id"], record["pages"][0]["regions"][0]["id"]
     h = record["pages"][0]["page_hash"]
 
-    long_text = (
+    # Phase 2b hands the ladder the whole bubble interior, not the text block,
+    # so "far too long" is measured against the BUBBLE: at the 12px floor a
+    # fixture bubble holds well over a thousand characters, and the sentence
+    # that once overflowed a column fits it. Fifteen copies do not.
+    long_text = " ".join([
         "I told you already that we should never have opened that door because "
         "whatever waits behind it has been patient for a very long time indeed "
         "and it remembers every single one of us by name"
-    )
+    ] * 15)
     out, _ = _quiet(pipeline.rerender, JOB_B, item, 1, rid, long_text, out_dir)
     flagged = next(r for r in out["regions"] if r["id"] == rid)
     c.check(
@@ -998,11 +1002,13 @@ def section_zero_llm(c: Checks, cache_dir: str, out_dir: str, record: dict):
 
     item = record["item_id"]
     rid = record["pages"][3]["regions"][0]["id"]
-    too_long = (
+    # Fifteen copies: see section_flags -- the ladder now has the bubble's
+    # room, and one copy fits it at the floor.
+    too_long = " ".join([
         "I told you already that we should never have opened that door because "
         "whatever waits behind it has been patient for a very long time indeed "
         "and it remembers every single one of us by name and it will not forget"
-    )
+    ] * 15)
 
     # The page must already be translated under (en, stub-model), or rerender
     # refuses with kind "translation" -- the mixed-language guard. Seeded from

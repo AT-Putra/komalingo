@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from . import room as _room
 from .region import as_points
 
 # -- the constants the gate reads back ------------------------------------
@@ -97,6 +98,24 @@ ELLIPSIS = "\u2026"
 # height: on a very tall page the floor rises toward this ceiling, so the
 # ceiling scales too rather than pinching rung 1's range to nothing.
 MAX_FONT_PX = 96
+
+# Phase 2b: rung 1 is also capped at this multiple of the SOURCE glyph size
+# when the region knows it (detect.py records the median column width of the
+# quads it merged). A short "Huh?" in a big bubble otherwise comes out at the
+# 96px ceiling next to a neighbour at 24px; a letterer keeps one size across
+# the page, and the page's own glyphs say what that size is.
+GLYPH_CAP = 1.25
+
+# Phase 2b, from the picture: rung 1's largest fitting size set "Without / a /
+# counterattack / every one of / us is dead." -- the ellipse's top row took
+# "Without", "counterattack" missed the next row by a glyph, and "a" sat on a
+# line of its own. A letterer would drop a size. So would rung 1, now: down
+# to ORPHAN_SHRINK of its best size, it takes the largest size whose layout
+# has no ORPHAN -- a line that is one word of under ORPHAN_CHARS characters,
+# in a layout of two lines or more. Bounded, so it can cost at most 15% of
+# the size and never a rung.
+ORPHAN_SHRINK = 0.85
+ORPHAN_CHARS = 4
 
 FONT_CANDIDATES = ["C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/segoeui.ttf"]
 
@@ -149,6 +168,11 @@ class Fit:
     clipped_glyphs: int = 0
     offpage_ink_px: int = 0
     lines: list = field(default_factory=list)  # [(x, y, text)] in page coordinates
+    # Phase 2b: the polygon the layout actually used -- the bubble interior
+    # room.py found around the erased block, or None when it declined and the
+    # region's own polygon was used. Derived on every pass, never loaded.
+    room: list | None = None
+    font_cap_px: int = 0  # rung 1's ceiling from the source glyph size; 0 = none
 
 
 # -- geometry --------------------------------------------------------------
@@ -484,10 +508,11 @@ def _capacity(points, text: str, page_w: int, page_h: int) -> int:
     return _longest(len(text), lambda n: bool(fits(text[:n])))
 
 
-def _ladder(points, text: str, page_w: int, page_h: int):
+def _ladder(points, text: str, page_w: int, page_h: int, cap: int = 0):
     """Rungs 1-4. Returns (placed, rung, rung4_skipped). placed None on a miss.
 
     On a miss the caller escalates to rung 5, the only rung that cannot miss.
+    `cap` bounds rung 1 from above (0: no bound); it never lowers the floor.
     """
     floor = floor_px(page_h)
     x0, y0, x1, y1 = _bbox(points)
@@ -501,6 +526,8 @@ def _ladder(points, text: str, page_w: int, page_h: int):
     # was found. A hole in the size predicate can therefore cost a font size,
     # but can never escalate a region that fits at the floor into rung 2.
     start = max(floor, min(max_font_px(page_h), int(y1 - y0)))
+    if cap:
+        start = max(floor, min(start, cap))
     lo, hi, best = floor, start, None
     while lo <= hi:
         mid = (lo + hi) // 2
@@ -510,6 +537,12 @@ def _ladder(points, text: str, page_w: int, page_h: int):
         else:
             hi = mid - 1
     if best:
+        if _has_orphan(best):
+            for size in range(best["font_px"] - 1, max(floor, math.ceil(ORPHAN_SHRINK * best["font_px"])) - 1, -1):
+                placed = _layout(points, text, size, tight=False, inset=inset, bleed=0.0, **kw)
+                if placed and not _has_orphan(placed):
+                    best = placed
+                    break
         return best, 1, False
 
     # Rung 2 -- at the floor, tightened. Bounded: no further tightening exists.
@@ -531,6 +564,14 @@ def _ladder(points, text: str, page_w: int, page_h: int):
         return placed, 4, False
 
     return None, 5, False
+
+
+def _has_orphan(placed) -> bool:
+    """A line that is one short word, in a layout of more than one line."""
+    lines = placed["lines"]
+    return len(lines) >= 2 and any(
+        " " not in line and len(line) < ORPHAN_CHARS for _, _, line in lines
+    )
 
 
 def _truncate(points, text: str, page_w: int, page_h: int):
@@ -587,13 +628,22 @@ def typeset_page(regions, page: Image.Image, *, allow_retranslate: bool = True, 
 
     fits: list[Fit] = []
     pending: list[tuple[int, list, str]] = []  # (index, points, original text)
+    all_points = [as_points(r["polygon"] if isinstance(r, dict) else r.polygon) for r in regions]
 
     # -- phase one: rungs 1-4 for every region, collecting rung-5 candidates.
-    for r in regions:
-        points = as_points(r["polygon"] if isinstance(r, dict) else r.polygon)
+    for idx, r in enumerate(regions):
+        block = all_points[idx]
         text = (r.get("translation", "") if isinstance(r, dict) else r.translation) or ""
         rid = r.get("id", 0) if isinstance(r, dict) else r.id
+        glyph = (r.get("glyph_px", 0) if isinstance(r, dict) else getattr(r, "glyph_px", 0)) or 0
         fit = Fit(id=rid, font_px=floor)
+        # The room the bubble gives this block, or the block itself. Found on
+        # the page as delivered here -- the CLEANED page -- with every other
+        # region's block as a wall. Recomputed on every pass, like the flags.
+        others = [pts for j, pts in enumerate(all_points) if j != idx]
+        fit.room = _room.room(page, block, others)
+        points = fit.room or block
+        fit.font_cap_px = int(math.ceil(GLYPH_CAP * glyph)) if glyph else 0
 
         if not text.strip():
             # Nothing will be drawn. Whether that is text LOSS depends on the
@@ -617,7 +667,7 @@ def typeset_page(regions, page: Image.Image, *, allow_retranslate: bool = True, 
             fits.append(fit)
             continue
 
-        placed, rung, skipped = _ladder(points, text, page_w, page_h)
+        placed, rung, skipped = _ladder(points, text, page_w, page_h, fit.font_cap_px)
         fit.rung, fit.rung4_skipped = rung, skipped
         if placed:
             _commit(fit, points, placed, text, page_w, page_h)
@@ -646,7 +696,7 @@ def typeset_page(regions, page: Image.Image, *, allow_retranslate: bool = True, 
         elif cand:
             fit.retranslated = True
             source = cand
-            placed, rung, _ = _ladder(points, cand, page_w, page_h)
+            placed, rung, _ = _ladder(points, cand, page_w, page_h, fit.font_cap_px)
             if placed:
                 # The retry's reply is RENDERED, not merely requested. An
                 # implementation that issues the call and truncates the original

@@ -135,7 +135,12 @@ def inpaint(img: Image.Image, regions: list[dict], page: int) -> tuple[Image.Ima
     out = img.convert("RGB").copy()
     draw = ImageDraw.Draw(out)
     for r in regions:
-        draw.polygon([tuple(p) for p in r["polygon"]], fill="white")
+        # Phase 2b: the PARTS, not the hull. A region is now the hull of the
+        # quads the detector returned for one block, and the hull spans
+        # whatever lies between them -- white inside a bubble, a character's
+        # face under text laid across the art. Only the quads held glyphs.
+        for part in r.get("parts") or [r["polygon"]]:
+            draw.polygon([tuple(p) for p in part], fill="white")
     emit("inpaint", f"{len(regions)} calls", page, 65)
     return out, len(regions)
 
@@ -185,6 +190,10 @@ def render(
         # the editor can highlight a bubble but cannot tell the user what to do.
         r["fit_reason"] = f.reason
         r["retranslated"] = f.retranslated
+        # Phase 2b: the polygon the English was actually laid into -- the
+        # bubble interior room.py found, or null when it declined. The editor
+        # hit-tests on it, because that is where the English now is.
+        r["room"] = [[x, y] for x, y in f.room] if f.room else None
     emit("render", f"{len(regions)} regions", page, 80)
     return out, typeset.summary(fits)
 

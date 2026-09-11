@@ -34,7 +34,7 @@ import os
 
 import numpy as np
 
-from . import models
+from . import group, models
 from .region import Region
 
 # The env flag. Unset means dbnet -- the flag exists so a future detector can
@@ -242,12 +242,12 @@ def _reading_order(polygon, band: int) -> tuple[int, int]:
     return (min(ys) // band, -max(xs))
 
 
-def detect(img, detector: str | None = None, progress=None) -> list[Region]:
-    """Text regions on one page, as Regions carrying polygon and confidence.
+def quads(img, detector: str | None = None, progress=None) -> list[tuple[list[list[int]], float]]:
+    """The net's own answer: one (polygon, confidence) per text LINE, ungrouped.
 
-    ids are 1-based and assigned after sorting, so the same page always gets
-    the same ids. text and translation are left empty: filling them is ocr.py
-    and llm.py's job, and a detector that guessed at them would be lying.
+    Public so a gate can measure what grouping changed against what the net
+    said -- a grouping assert that cannot see the ungrouped quads cannot show
+    that it discriminates.
     """
     selected(detector)  # raises before any download if the flag is unusable
     net = _model(progress)
@@ -257,9 +257,9 @@ def detect(img, detector: str | None = None, progress=None) -> list[Region]:
     found: list[tuple[list[list[int]], float]] = []
     for long_side in _SCALES:
         size = _input_size(width, height, long_side)
-        quads, confidences = _run(net, bgr, size)
+        raw, confidences = _run(net, bgr, size)
         sx, sy = width / size[0], height / size[1]
-        for quad, confidence in zip(quads, confidences, strict=False):
+        for quad, confidence in zip(raw, confidences, strict=False):
             polygon = _quad_to_polygon(quad, sx, sy, width, height)
             xs = [p[0] for p in polygon]
             ys = [p[1] for p in polygon]
@@ -268,10 +268,67 @@ def detect(img, detector: str | None = None, progress=None) -> list[Region]:
             found.append((polygon, float(confidence)))
         if found:
             break  # the coarse scale answered; the fine scale is the retry
+    return found
 
-    band = max(1, height // 24)  # about one line of dialogue on a manga page
-    found.sort(key=lambda pair: _reading_order(pair[0], band))
-    return [
-        Region(id=i, polygon=polygon, confidence=confidence)
-        for i, (polygon, confidence) in enumerate(found, start=1)
+
+def detect(img, detector: str | None = None, progress=None) -> list[Region]:
+    """Text regions on one page, as Regions carrying polygon and confidence.
+
+    ids are 1-based and assigned after sorting, so the same page always gets
+    the same ids. text and translation are left empty: filling them is ocr.py
+    and llm.py's job, and a detector that guessed at them would be lying.
+
+    Phase 2b: one region per BUBBLE, not per column. DB answers per text
+    line, and a line of tategaki is a column, so a bubble arrived here as
+    several quads -- each then OCR'd, translated and typeset on its own.
+    group.py merges them; the polygon becomes the members' convex hull and
+    the confidence the strongest member's. See group.py for the picture that
+    forced this.
+    """
+    bgr = _as_bgr(img)  # once; quads() accepts the array as-is
+    found = quads(bgr, detector, progress)
+    polygons = [polygon for polygon, _ in found]
+    blocks = [
+        ([[int(round(x)), int(round(y))] for x, y in hull],
+         max(found[i][1] for i in members),
+         _glyph_px([found[i][0] for i in members]),
+         [found[i][0] for i in members])
+        for hull, members in group.merge(polygons, _inverse(bgr, polygons))
     ]
+
+    band = max(1, bgr.shape[0] // 24)  # about one line of dialogue on a manga page
+    blocks.sort(key=lambda entry: _reading_order(entry[0], band))
+    return [
+        Region(id=i, polygon=polygon, confidence=confidence, glyph_px=glyph, parts=parts)
+        for i, (polygon, confidence, glyph, parts) in enumerate(blocks, start=1)
+    ]
+
+
+def _inverse(bgr: np.ndarray, polygons) -> list[bool]:
+    """Per quad: light glyphs on a dark ground? (mean gray inside under 128)
+
+    The polarity guard group.py applies: a clock reading "23:45" in white on
+    black one glyph from a bubble is, by geometry, another column of it.
+    """
+    import cv2  # noqa: PLC0415
+
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    out = []
+    for polygon in polygons:
+        mask = np.zeros(gray.shape, np.uint8)
+        cv2.fillPoly(mask, [np.array(polygon, np.int32)], 1)
+        inside = gray[mask == 1]
+        out.append(bool(inside.size) and float(inside.mean()) < 128)
+    return out
+
+
+def _glyph_px(members) -> int:
+    """The source glyph size: the median short side of a block's quads.
+
+    A tategaki column is one glyph wide, a line of horizontal text one glyph
+    tall, and a glyph fragment is one glyph both ways -- so the short side of
+    every quad is about the glyph, and the median is robust to the one
+    whole-block quad the net also returns.
+    """
+    sides = sorted(min(x1 - x0, y1 - y0) for x0, y0, x1, y1 in map(group.bbox, members))
+    return int(round(sides[len(sides) // 2])) if sides else 0
