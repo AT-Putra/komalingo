@@ -26,6 +26,7 @@ import os
 import secrets
 import sys
 import threading
+from contextlib import asynccontextmanager
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -34,15 +35,44 @@ if hasattr(sys.stdout, "reconfigure"):
 from fastapi import FastAPI, Request, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from . import pipeline  # noqa: E402
+from . import cache, pipeline  # noqa: E402
 from .detect import DetectError  # noqa: E402
 from .llm import LLMClient, ProviderError, SettingsError  # noqa: E402
 from .models import FetchError  # noqa: E402
+from .pipeline import CacheMiss  # noqa: E402
 
 HOST = "127.0.0.1"  # never 0.0.0.0. See the module docstring.
 SHUTDOWN_NONCE = os.environ.get("MT_SHUTDOWN_NONCE", "")
 
-app = FastAPI(title="MangaTranslator sidecar")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    r"""Repair leaked cache references before anything can be evicted against them.
+
+    A job killed mid-run leaves its id in every page it touched, and a leaked
+    reference pins those pages against the disk cap forever -- the cache fills
+    with pages nothing can evict. The ids are NAMED, so the leak is
+    identifiable: any id naming no directory under cache\jobs\ is dropped. That
+    is the whole reason refs.json holds a list of ids and not a count.
+
+    A lifespan handler rather than the older startup-event decorator, which is
+    deprecated in this FastAPI and warns on import -- and a deprecation warning
+    on stderr is indistinguishable from a real one in the Tauri log pane.
+    """
+    try:
+        removed = cache.prune_refs()
+        if removed:
+            print(f"cache: pruned {removed} stale job references",
+                  file=sys.stderr, flush=True)
+    except OSError as e:
+        # A cache root that cannot be read is not a reason to refuse to start:
+        # every page in it is re-derivable, and the alternative is a sidecar
+        # that will not launch because of a directory the user could delete.
+        print(f"cache: startup prune skipped ({type(e).__name__}: {e})",
+              file=sys.stderr, flush=True)
+    yield
+
+
+app = FastAPI(title="MangaTranslator sidecar", lifespan=lifespan)
 
 
 class Settings(BaseModel):
@@ -58,6 +88,43 @@ class TranslateRequest(BaseModel):
     dest_dir: str
     page: int = 1
     settings: Settings | None = None  # absent -> offline placeholder path
+
+
+class ItemRequest(BaseModel):
+    """One archive, start to finish. Phase 8 owns the QUEUE, not this route.
+
+    job_id arrives from the caller rather than being minted here, because it is
+    both the delete scope and the placement key: the UI has to be able to name
+    the job it started in order to spot-fix a page of it or delete it later,
+    and a server-minted id it only learns from a response it might not receive
+    is an orphan waiting to happen.
+    """
+
+    src_path: str
+    dest_dir: str
+    job_id: str
+    item_id: str | None = None
+    lang: str = pipeline.DEFAULT_LANG
+    settings: Settings | None = None
+
+
+class RerenderRequest(BaseModel):
+    """AC-10's payload: one region of one page of one job.
+
+    The page is addressed by (item_id, ordinal) and NOT by page hash, because
+    two byte-identical pages in an archive share a hash -- spot-fixing one and
+    silently editing both is precisely the bug placement exists to prevent, and
+    taking a hash here would hand the caller the tool to reintroduce it.
+    """
+
+    job_id: str
+    item_id: str
+    ordinal: int
+    region_id: int
+    text: str
+    dest_dir: str
+    lang: str = pipeline.DEFAULT_LANG
+    settings: Settings | None = None
 
 
 def _provider_response(e: ProviderError) -> Response:
@@ -129,6 +196,36 @@ def unhandled(request: Request, e: Exception) -> Response:
     )
 
 
+def _client(settings: Settings | None):
+    """Build an LLMClient, or None for the offline placeholder path.
+
+    Called INSIDE each route's try, never above it: the constructor rejects an
+    empty base_url or model, and pydantic cannot know those are required
+    downstream. Built above the try, that error goes unhandled -- and unhandled
+    here does not mean an unhelpful 500, it means the sidecar stops answering
+    at all (US-P1-11).
+    """
+    if settings is None:
+        return None
+    return LLMClient(settings.base_url, settings.api_key, settings.model)
+
+
+def _cache_miss_response(e: CacheMiss) -> Response:
+    """404 with a named kind. A missing cache entry is not a server fault.
+
+    `kind` is what lets the UI branch without parsing prose: "placement" means
+    this job never ran that page, "cache" means the page was evicted and the
+    item needs re-running, "region" means the editor and the page disagree
+    about what is on it. A bare 404 collapses three different next actions into
+    one dead end.
+    """
+    return Response(
+        content=json.dumps({"error": e.reason, "kind": e.kind}),
+        status_code=404,
+        media_type="application/json",
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "pid": os.getpid()}
@@ -157,9 +254,7 @@ def translate(req: TranslateRequest):
         # mean an unhelpful 500, it means the sidecar stops answering at all
         # (US-P1-11). The one failure the user could have fixed in two seconds
         # cost them a restart.
-        client = None
-        if req.settings:
-            client = LLMClient(req.settings.base_url, req.settings.api_key, req.settings.model)
+        client = _client(req.settings)
         record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client)
     except ProviderError as e:
         return _provider_response(e)
@@ -193,6 +288,60 @@ def translate(req: TranslateRequest):
             media_type="application/json",
         )
     pipeline.write_regions(record, req.dest_dir)
+    return record
+
+
+@app.post("/api/item")
+def translate_item(req: ItemRequest):
+    """Every page of one CBZ, through the page cache.
+
+    A second run of the same archive under a NEW job_id hits the cache and
+    calls neither detection nor OCR, which is what makes this route -- and not
+    only the re-render one -- part of AC-10's evidence. See cache.py on why the
+    page directory is keyed on content and on nothing about the run.
+    """
+    try:
+        record = pipeline.run_item(
+            req.src_path, req.dest_dir, req.job_id, req.item_id,
+            _client(req.settings), req.lang,
+        )
+    except ProviderError as e:
+        return _provider_response(e)
+    except SettingsError as e:
+        return _bad_settings_response(e)
+    except (FetchError, DetectError) as e:
+        return Response(
+            content=json.dumps({"error": e.reason, "kind": e.kind}),
+            status_code=503,
+            media_type="application/json",
+        )
+    return record
+
+
+@app.post("/api/rerender")
+def rerender(req: RerenderRequest):
+    """AC-10: click a bubble, edit the translation, re-render that page alone.
+
+    Neither detection nor OCR runs on this path, and nothing here re-translates
+    -- pipeline.rerender passes allow_retranslate=False, so rung 5 falls
+    straight to truncation and issues zero LLM requests. check_spotfix asserts
+    both by counter rather than by reading the source.
+
+    A provider client is still accepted and still threaded through, because the
+    MODEL is part of the translation file's key: an edit made while pointed at
+    one model must land in that model's file and must not leak into another's.
+    """
+    try:
+        record = pipeline.rerender(
+            req.job_id, req.item_id, req.ordinal, req.region_id, req.text,
+            req.dest_dir, _client(req.settings), req.lang,
+        )
+    except CacheMiss as e:
+        return _cache_miss_response(e)
+    except ProviderError as e:
+        return _provider_response(e)
+    except SettingsError as e:
+        return _bad_settings_response(e)
     return record
 
 

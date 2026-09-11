@@ -14,14 +14,18 @@ half-page on disk.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import threading
 from dataclasses import asdict
 
 from PIL import Image, ImageDraw
 
-from . import atomic, imaging, ocr_ja, typeset
+from . import atomic, cache, imaging, ocr_ja, typeset
 from . import detect as detector
+from .containers import read_cbz
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
 
@@ -232,3 +236,383 @@ def write_regions(record: dict, dest_dir) -> str:
     with atomic.atomic_write(path, "w", encoding="utf-8") as fh:
         json.dump(record, fh, ensure_ascii=False, indent=2, sort_keys=True)
     return atomic.long_path(path)
+
+
+# -- the cached paths (Phase 3) -------------------------------------------
+#
+# run_page above is untouched: one loose image, no cache, no job. It is what
+# check_pipeline asserts the seven-stage contract against, and threading a
+# cache through it would have made that contract conditional on a cache state.
+# The cache enters here instead, where an ITEM -- an archive with an id and page
+# ordinals -- is the thing being run.
+
+DEFAULT_LANG = "en"
+
+# Serialises the detector and OCR across concurrent jobs. See run_item.
+_MODEL_LOCK = threading.Lock()
+
+
+class CacheMiss(Exception):
+    """A page or region the re-render route was asked for is not cached.
+
+    Carries (reason, kind) like FetchError and DetectError, so main.py's
+    existing "name the failure, let the UI branch on kind" handling extends to
+    it rather than growing a fourth display path.
+    """
+
+    def __init__(self, reason: str, kind: str = "cache"):
+        super().__init__(reason)
+        self.reason, self.kind = reason, kind
+
+
+# What cache.write_regions persists. Keyed on CONTENT, so nothing about a
+# position or a run may live in it: two identical pages share this record, and
+# whichever ordinal wrote it last would own any per-position field. The first
+# draft persisted `page`, `member`, `item_id` and `output` here, and rerender
+# handed them back -- so the UI, which posts the ordinal it was handed, edited
+# page 7 when the user was looking at page 3. Defect A fixed the delivery path
+# and the review found the same confusion alive in the response envelope.
+CONTENT_KEYS = ("page_hash", "src_format", "detections", "fit_summary", "regions")
+
+
+def _persist(h: str, record: dict) -> None:
+    cache.write_regions(h, {k: record[k] for k in CONTENT_KEYS if k in record})
+
+
+def _model_id(client) -> str:
+    """What the translation file is keyed on. 'offline' is a real key, not a hole.
+
+    The placeholder translator produces text, that text gets cached, and a run
+    with a real provider must not pick it up. Naming the offline path keeps the
+    two in separate files for the same reason two providers are.
+    """
+    return getattr(client, "model", None) or "offline"
+
+
+def _load_translations(regions: list[dict], h: str, lang: str, model: str) -> bool:
+    """Fill translations from the cache. True only if EVERY region was covered.
+
+    Partial coverage returns False and the caller re-translates the whole page.
+    That is one wasted request against a half-written entry; the alternative is
+    a page where some bubbles carry last run's text and some carry none, with
+    nothing on screen saying which.
+    """
+    stored = cache.read_translation(h, lang, model)
+    if not stored:
+        return False
+    covered = True
+    for r in regions:
+        entry = stored.get(str(r["id"]))
+        if entry is None:
+            covered = False
+            continue
+        r["translation"] = entry.get("text", "")
+        r["edited"] = bool(entry.get("edited"))
+    return covered
+
+
+_UNSAFE_SEGMENT = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+def _safe_segment(seg: str) -> str:
+    r"""One path segment, made safe to CREATE on Windows.
+
+    The colon is the one that actually loses data, and it does so silently: a
+    member named `page.png:hidden.png` is a valid NTFS alternate data stream
+    reference, so the write SUCCEEDS, the directory listing shows only
+    `page.png`, and the translated page is nowhere the user can find it. Not
+    hypothetical -- verified by writing one. `\\?\` does not help, because an
+    ADS is an NTFS feature rather than a Win32 path-parsing one.
+
+    Trailing dots and spaces are stripped for the same class of reason: Windows
+    silently drops them when creating a file, so `page .png` and `page.png`
+    become the same file and the second archive member overwrites the first.
+
+    A segment that HAD to be altered carries a short digest of its original
+    name. Substitution alone is many-to-one -- `a<b.png` and `a_b.png` both
+    became `a_b.png`, and the second silently overwrote the first, which the
+    review measured. model_slug in cache.py appends a digest for exactly this
+    reason; the first draft of this function did not, one file over.
+    Unaltered names stay exactly as they were, so the ordinary archive is
+    delivered under the names the user knows.
+
+    The strip of trailing dots and spaces runs on the STEM. Run on the whole
+    segment it never fired for `page. .png` (the segment ends in `g`), and the
+    `_translated` suffix then landed after an interior trailing space -- a name
+    Explorer cannot open, kept alive by the \\?\ prefix.
+
+    Device names (CON, NUL, COM1) are deliberately NOT special-cased, and the
+    reason is construction rather than measurement: imaging.output_path appends
+    `_translated` to the stem, so `CON.png` is delivered as `CON_translated.png`
+    and a bare device name can never be the file created. (Win32 does resolve
+    `CON.png` to the console device in some APIs -- the first draft's claim
+    that the extension made it ordinary was the wrong reason for the right
+    conclusion.)
+    """
+    stem, ext = os.path.splitext(seg)
+    clean_stem = _UNSAFE_SEGMENT.sub("_", stem).rstrip(". ")
+    clean_ext = _UNSAFE_SEGMENT.sub("_", ext).rstrip(". ")
+    if clean_stem == stem and clean_ext == ext and clean_stem:
+        return seg
+    digest = hashlib.sha256(seg.encode("utf-8")).hexdigest()[:8]
+    return f"{clean_stem or '_'}-{digest}{clean_ext}"
+
+
+def _member_dest(dest_dir, member: str) -> str:
+    r"""Where one archive member's translated page lands, under `dest_dir`.
+
+    The member's DIRECTORY structure is preserved, and it has to be: an archive
+    with `ch1/p1.png` and `ch10/p1.png` -- which the CBZ fixture has, because
+    real archives have it -- flattens to one `p1_translated.png`, and the
+    second page silently overwrites the first. A collision that loses a page of
+    the user's output is worse than a long path.
+
+    Every member name is also SANITISED here, and this is the one place in the
+    codebase that needs it. read_cbz is read-only and says so; the moment a
+    member name is used to build a path being WRITTEN to, `..\..\startup` is a
+    write outside dest_dir. Leading separators and every dot segment are
+    dropped rather than rejected, because a page with an odd name should still
+    be delivered somewhere sane. A colon is handled by _safe_segment, per
+    segment -- NOT by os.path.splitdrive on the whole path, which the first
+    draft used and which silently discarded the first segment of `a:b.png`
+    as if it were a drive letter.
+
+    Phase 6 owns traversal enforcement on INGEST, where a rejected archive is
+    the right answer. Here the archive is already the user's and the page is
+    already being translated, so the right answer is a safe path.
+    """
+    parts = []
+    for seg in member.replace("\\", "/").split("/"):
+        if seg in ("", ".", ".."):
+            continue
+        parts.append(_safe_segment(seg))
+    safe = os.path.join(*parts) if parts else "page.png"
+    return imaging.output_path(
+        os.path.basename(safe), os.path.join(os.fspath(dest_dir), os.path.dirname(safe))
+    )
+
+
+def _deliver(img: Image.Image, dest_dir, member: str, fmt: str,
+             src: Image.Image, page: int) -> str:
+    """Encode and write one page of an ITEM. The last two stages, for archives.
+
+    encode_and_write cannot serve this path: it re-opens the source FILE to
+    learn the format, and an archive member lives inside a zip nobody re-opens
+    here. Format comes from `fmt`, recorded at ingest, and the icc_profile and
+    exif ride in on `src` -- which for a cached page is the cached raster,
+    because cache.write_raster carried them there for exactly this call.
+    """
+    dest = _member_dest(dest_dir, member)
+    emit("encode", os.path.basename(dest), page, 90)
+    payload = imaging.encode(img, fmt, src)
+    with atomic.atomic_write(dest) as fh:
+        fh.write(payload)
+    emit("write", os.path.basename(dest), page, 100)
+    return atomic.long_path(dest)
+
+
+def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT_LANG):
+    """Every page of one CBZ, through the cache. Returns the job record.
+
+    The cache hit here is what AC-13's "a re-run skips completed pages" cashes
+    out to, and it is keyed on the page's decoded pixels -- so a SECOND job with
+    a NEW job_id hits it. That is the assert check_spotfix exists to hold: an
+    earlier draft of the layout keyed the page directory on job_id, where this
+    loop would have re-detected and re-OCR'd every page while every gate in the
+    suite stayed green.
+    """
+    item_id = item_id or os.path.basename(os.fspath(src_path))
+    model = _model_id(client)
+    cache.mark_running(job_id)
+    records: list[dict] = []
+    warning = None
+    try:
+        for ordinal, member, img in read_cbz.pages(src_path):
+            h = cache.page_hash(img)
+            cache.put_placement(job_id, item_id, ordinal, h, member)
+            cached = cache.read_regions(h) if cache.has_page(h) else None
+            if cached is not None and cache.read_raster(h) is None:
+                # has_page said yes and the raster is gone. Reachable: another
+                # job's enforce_cap can evict between the two calls, and across
+                # PROCESSES the reference writes are still last-writer-wins, so
+                # the in-process lock does not close it entirely. A cache is
+                # allowed to lose an entry; it is not allowed to hand the
+                # renderer a None and call it a page. Treated as a miss, which
+                # costs a re-detect -- the cost the module docstring claims, on
+                # the path where it is actually true.
+                cached = None
+
+            # The seven stages, in STAGES order, each emitting exactly once --
+            # on the hit path too. The UI draws one bar segment per stage and
+            # reads the names, so a cached page that skipped a stage silently
+            # would leave the bar stuck at the one before it; a cached page
+            # that emitted a stage twice would run the bar backwards. Every
+            # branch below emits its stage, once, and says whether it did work.
+            if cached is not None:
+                regions = cached["regions"]
+                fmt, ocr_calls = cached.get("src_format", "PNG"), 0
+                emit("detect", f"{len(regions)} regions (cached)", ordinal, 10)
+                emit("ocr", "0 calls (cached)", ordinal, 25)
+            else:
+                fmt = img.format or "PNG"
+                # The models are not thread-safe and the route is. Three
+                # concurrent run_item calls on an EMPTY cache all raised
+                # DetectError out of OpenCV's forward pass (measured in
+                # review) -- loud, not lossy, but cache.py now promises that
+                # two jobs in one sidecar is the ordinary case, and the lock
+                # in front of the cache is worth nothing if the detector
+                # behind it falls over. manga-ocr under concurrency is
+                # unmeasured and is serialised on the same principle. Phase
+                # 8's queue will make this lock idle; today it is load-bearing.
+                with _MODEL_LOCK:
+                    regions = detect(img, ordinal)
+                    ocr_calls = ocr(regions, img, ordinal)
+
+            if _load_translations(regions, h, lang, model):
+                emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
+            else:
+                translate(regions, ordinal, client)
+                cache.write_translation(
+                    h, lang, model, {r["id"]: r.get("translation", "") for r in regions}
+                )
+                # Read back, deliberately. write_translation refuses to
+                # overwrite an `edited` entry, so the file it just wrote and
+                # the regions in memory can disagree about exactly the regions
+                # the user corrected -- and the regions in memory are what gets
+                # RENDERED. Without this the page would show the fresh
+                # translation while the cache said the edit was kept, which is
+                # the worst of both: the correction is not discarded, it is
+                # just not on the page. Reachable when coverage was partial (a
+                # half-written translation file) and an edit exists.
+                _load_translations(regions, h, lang, model)
+
+            if cached is not None:
+                cleaned, inpaint_calls = cache.read_raster(h), 0
+                emit("inpaint", "0 calls (cached)", ordinal, 65)
+            else:
+                cleaned, inpaint_calls = inpaint(img, regions, ordinal)
+                cache.write_raster(h, cleaned, src=img)
+
+            drawn, fit_summary = render(cleaned, regions, ordinal, client)
+            out_path = _deliver(drawn, dest_dir, member, fmt, cleaned, ordinal)
+
+            record = {
+                "page": ordinal,
+                "page_hash": h,
+                "item_id": item_id,
+                "member": member,
+                "src_format": fmt,
+                "output": out_path,
+                "cached": cached is not None,
+                "detections": len(regions),
+                "ocr_calls": ocr_calls,
+                "inpaint_calls": inpaint_calls,
+                "fit_summary": fit_summary,
+                "regions": regions,
+            }
+            # Written back on EVERY pass, hit or miss. The fit flags are derived
+            # by render, so a cached record whose region was edited shorter must
+            # not keep last run's fit_compromised. Nothing here reads a stored
+            # flag back in as input -- see cache.py's closing paragraph.
+            _persist(h, record)
+            records.append(record)
+        # Once, at the end, and not per page. The plan says disk is "never
+        # evicted mid-job", and per page it could not have reclaimed this job's
+        # own pages anyway -- every one is pinned by its running marker -- while
+        # walking the whole cache tree two hundred times for a two-hundred-page
+        # item. It runs inside the try so the job is still marked running:
+        # its pages are what the cap must not touch.
+        warning = cache.enforce_cap(job_id)
+    finally:
+        cache.clear_running(job_id)
+
+    return {
+        "job_id": str(job_id),
+        "item_id": item_id,
+        "pages": records,
+        "cache_warning": warning,
+    }
+
+
+def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
+             client=None, lang=DEFAULT_LANG) -> dict:
+    """AC-10: one region's text changes, that page alone is re-drawn.
+
+    Neither `detect` nor `ocr` is called from here, and check_spotfix proves it
+    by COUNTER rather than by reading this source: both entrypoints are patched
+    to increment-and-raise for the duration of the wall-clock case. A source
+    assert would keep passing the day an indirect call arrives.
+
+    `allow_retranslate=False` is the other half. On this path the user's text is
+    authoritative: rung 5 re-translating it would overwrite the `edited: true`
+    entry this same phase forbids overwriting, and the round trip would not fit
+    inside AC-10's 3.0s budget. A too-long edit truncates and reports
+    fit_failed, which is the honest outcome and costs zero requests.
+    """
+    placed = cache.get_placement(job_id, item_id, ordinal)
+    if placed is None:
+        raise CacheMiss(
+            f"job {job_id} has no page {ordinal} of item {item_id!r}", "placement"
+        )
+    h = placed["page_hash"]
+    record = cache.read_regions(h)
+    cleaned = cache.read_raster(h)
+    if record is None or cleaned is None:
+        raise CacheMiss(f"page {ordinal} of item {item_id!r} is not in the page cache")
+
+    regions = record["regions"]
+    if not any(r["id"] == region_id for r in regions):
+        raise CacheMiss(f"region {region_id} is not on page {ordinal}", "region")
+
+    model = _model_id(client)
+    # Coverage BEFORE the edit is written. A (lang, model) pair this page was
+    # never translated under has no text for the other regions, and this path
+    # never translates -- so rendering would put the user's edit in one bubble
+    # and the OLD language's text from regions.json in every other. The review
+    # called it a mixed-language page, and it is exactly that. Run the item at
+    # that pair first; the error says so.
+    stored = cache.read_translation(h, lang, model)
+    uncovered = [r["id"] for r in regions if r["id"] != region_id
+                 and str(r["id"]) not in stored]
+    if uncovered:
+        raise CacheMiss(
+            f"page {ordinal} has no {lang!r} translation under model {model!r} "
+            f"for regions {uncovered}; run the item at that language first",
+            "translation",
+        )
+    cache.write_edit(h, lang, model, region_id, text)
+    _load_translations(regions, h, lang, model)
+
+    drawn, fit_summary = render(
+        cleaned, regions, ordinal, client, allow_retranslate=False
+    )
+    # The member name comes from the PLACEMENT, never from the page record:
+    # two identical pages share one record and only one of them can be named in
+    # it, so taking it from there delivers this edit over the other ordinal's
+    # file. That is the placement assert's whole subject.
+    out_path = _deliver(
+        drawn, dest_dir, placed.get("member") or f"{item_id}_{ordinal:04d}.png",
+        record.get("src_format", "PNG"), cleaned, ordinal,
+    )
+
+    # Position facts come from the PLACEMENT and the request, never from the
+    # content record -- see CONTENT_KEYS. `page` in particular: the UI posts
+    # back whatever `page` it was handed, so a response carrying the shared
+    # record's ordinal sends the user's next edit to the other identical page.
+    record = dict(
+        record,
+        page=ordinal,
+        item_id=item_id,
+        member=placed.get("member"),
+        output=out_path,
+        cached=True,
+        ocr_calls=0,
+        inpaint_calls=0,
+        fit_summary=fit_summary,
+        regions=regions,
+        edited_region=region_id,
+        edit_on_other_model=cache.has_edit_for_other_model(h, lang, model),
+    )
+    _persist(h, record)
+    record["cache_warning"] = cache.enforce_cap(job_id)
+    return record

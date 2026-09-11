@@ -53,6 +53,55 @@ export interface TranslateResult {
   pixels_changed_in_polygon: Record<string, number>;
 }
 
+/**
+ * One detected region as regions.json carries it.
+ *
+ * `fit_compromised` and `fit_failed` are REPORTING fields, recomputed by the
+ * typesetter on every render. The editor sorts on them and never writes them
+ * back: shortening an edit clears the flag by re-rendering, and a UI that
+ * cached the old value would keep highlighting a bubble that is now fine.
+ */
+export interface Region {
+  id: number;
+  polygon: [number, number][];
+  text: string | null; // the Japanese source; null means not yet OCR'd
+  translation: string;
+  typeset: string;
+  fit_compromised: boolean;
+  fit_failed: boolean;
+  fit_reason?: string;
+  retranslated?: boolean;
+  edited?: boolean;
+}
+
+export interface PageRecord {
+  page: number;
+  page_hash: string;
+  item_id: string;
+  member: string;
+  output: string;
+  cached: boolean;
+  detections: number;
+  regions: Region[];
+  fit_summary: {
+    fit_compromised: number[];
+    fit_failed: number[];
+    retranslated: number[];
+  };
+  /** Present when the page cache is over its cap and could not evict. */
+  cache_warning?: string | null;
+  /** True when an edit for this page exists under a different model. */
+  edit_on_other_model?: boolean;
+  edited_region?: number;
+}
+
+export interface ItemResult {
+  job_id: string;
+  item_id: string;
+  pages: PageRecord[];
+  cache_warning: string | null;
+}
+
 async function call<T>(
   path: string,
   method: "GET" | "POST" = "GET",
@@ -79,6 +128,34 @@ export const api = {
     page?: number;
     settings?: ProviderSettings;
   }) => call<TranslateResult>("/api/translate", "POST", req),
+
+  /** Every page of one CBZ, through the page cache. */
+  item: (req: {
+    src_path: string;
+    dest_dir: string;
+    job_id: string;
+    item_id?: string;
+    lang?: string;
+    settings?: ProviderSettings;
+  }) => call<ItemResult>("/api/item", "POST", req),
+
+  /**
+   * AC-10: one region's text changes, that page alone is re-drawn.
+   *
+   * The page is addressed by (item_id, ordinal), never by page hash. Two
+   * byte-identical pages in an archive share a hash, and editing one must not
+   * edit the other.
+   */
+  rerender: (req: {
+    job_id: string;
+    item_id: string;
+    ordinal: number;
+    region_id: number;
+    text: string;
+    dest_dir: string;
+    lang?: string;
+    settings?: ProviderSettings;
+  }) => call<PageRecord>("/api/rerender", "POST", req),
 };
 
 export interface ModelInfo {

@@ -114,3 +114,55 @@ button {
     background-color: #0f0f0f69;
   }
 }
+
+/* Phase 3: the spot-fix editor. */
+.spotfix .page {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid #888;
+  cursor: crosshair;
+}
+
+.spotfix .regions {
+  list-style: none;
+  padding: 0;
+  text-align: left;
+}
+
+.spotfix .regions li {
+  display: flex;
+  gap: 0.6em;
+  align-items: baseline;
+  margin: 0.2em 0;
+}
+
+.spotfix .regions .typeset {
+  opacity: 0.75;
+  font-size: 0.9em;
+}
+
+/* The two flags AC-1 makes trustworthy, in the order the summary lists them. */
+.spotfix button.failed { border-color: #d33; color: #d33; }
+.spotfix button.compromised { border-color: #e90; color: #e90; }
+
+.spotfix .source {
+  font-size: 0.95em;
+  opacity: 0.8;
+  margin: 0.2em 0;
+}
+
+.spotfix textarea {
+  width: 100%;
+  font: inherit;
+}
+
+.warn {
+  border-left: 3px solid #e90;
+  padding-left: 0.6em;
+  text-align: left;
+}
+
+.row.pages {
+  flex-wrap: wrap;
+  gap: 0.25em;
+}

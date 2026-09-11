@@ -1,0 +1,51 @@
+{
+  "sample.cbz": {
+    "candidate_members": [
+      "ch1/broken.png",
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p9.png",
+      "ch1/p10.png",
+      "ch2/p1.png",
+      "ch2/p2.png",
+      "ch10/p1.png",
+      "ch10/p2.png"
+    ],
+    "identical_ordinals": [
+      3,
+      7
+    ],
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png",
+      "ch1/p9.png",
+      "ch10/p1.png",
+      "ch10/p2.png",
+      "ch2/p1.png",
+      "ch2/p2.png"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p9.png",
+      "ch1/p10.png",
+      "ch2/p1.png",
+      "ch2/p2.png",
+      "ch10/p1.png",
+      "ch10/p2.png"
+    ],
+    "notes": "Ordinals 3 and 7 are byte-identical pages in different chapter directories. Natural and lexicographic order differ, so a reader that sorted the wrong way is visible.",
+    "page_size": [
+      620,
+      880
+    ],
+    "skipped_members": [
+      "ComicInfo.xml",
+      "Thumbs.db",
+      "__MACOSX/._ch1/p1.png",
+      "ch1/broken.png",
+      "notes.txt"
+    ]
+  }
+}

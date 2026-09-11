@@ -3,8 +3,8 @@
 
     uv run --project sidecar python tests/gen_fixtures.py
 
-Writes `fixtures/smoke/` and `fixtures/bubbles/` (Phase 0a); Phase 6 extends
-this with `fixtures/archives/`. Exit 0 always, or a traceback -- there is no
+Writes `fixtures/smoke/` and `fixtures/bubbles/` (Phase 0a) and
+`fixtures/cbz/` (Phase 3); Phase 6 extends this with `fixtures/archives/`. Exit 0 always, or a traceback -- there is no
 partial-success mode: a generator that half-writes a fixture tree is worse
 than one that fails.
 
@@ -17,14 +17,19 @@ tree, byte-identical). Three sources of nondeterminism are closed here:
     then omits it.
   - Dict/glob ordering: every loop iterates an explicit list, never a
     directory listing.
+  - Zip metadata: a ZipInfo's date_time defaults to the wall clock and its
+    external_attr to the process umask, so an archive written twice differs
+    twice over. Both are pinned in gen_cbz.
 
 `fixtures/provider/` is deliberately NOT generated -- three hand-authored HTTP
 bodies are Phase 0 deliverables (build order, section E).
 """
 
+import io
 import json
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +41,7 @@ FIXTURES = ROOT / "fixtures"
 
 sys.path.insert(0, str(ROOT))
 
+from sidecar.containers.read_cbz import _natural_key  # noqa: E402
 from sidecar.region import ellipse_points  # noqa: E402
 
 # A JA-capable font is required: the smoke page's whole purpose is vertical
@@ -336,6 +342,120 @@ def gen_bubbles():
     return index
 
 
+# --------------------------------------------------------------------------
+# cbz/sample.cbz -- Phase 3's one real multi-page item.
+# --------------------------------------------------------------------------
+# Phase 3 freezes the page-cache contract, and two clauses of it are only
+# testable against a real archive:
+#
+#   * PLACEMENT. Two byte-identical pages share a page hash, so they share a
+#     page directory and a translation -- which is correct and wanted. Editing
+#     one and silently editing the other is the bug placement exists to
+#     prevent, and a directory of loose files cannot exhibit it.
+#   * ORDER. Members are natural-sorted on the FULL path. The layout below has
+#     a lexicographic order that differs from its natural order in both
+#     directions that matter: ch10 after ch2 (a directory segment), and p10
+#     after p9 (a filename segment). A reader that sorted lexicographically
+#     would produce a visibly different page order against this file and an
+#     identical one against any tidily zero-padded archive.
+#
+# Ordinals 3 and 7 are the identical pair. They are deliberately NOT adjacent
+# and NOT in the same chapter directory, so a placement bug cannot pass by
+# accidentally treating neighbours alike.
+#
+# Junk members and one undecodable member are included because skipping them
+# is part of the contract and because ordinals must stay contiguous across
+# them: a hole would mean "page 7" naming different pages before and after a
+# corrupt member was repaired.
+
+CBZ_W, CBZ_H = 620, 880
+
+# (member path, page index). Page index repeats for the identical pair.
+# Written to the archive in REVERSE natural order, so a reader that trusted
+# the zip's central directory order would produce the exactly wrong sequence.
+CBZ_MEMBERS = [
+    ("ch1/p1.png", 0),
+    ("ch1/p2.png", 1),
+    ("ch1/p9.png", 2),    # ordinal 3  -- identical to ordinal 7
+    ("ch1/p10.png", 3),
+    ("ch2/p1.png", 4),
+    ("ch2/p2.png", 5),
+    ("ch10/p1.png", 2),   # ordinal 7  -- identical to ordinal 3
+    ("ch10/p2.png", 6),
+]
+CBZ_JUNK = {
+    "ComicInfo.xml": b"<?xml version=\"1.0\"?><ComicInfo><Title>sample</Title></ComicInfo>",
+    "Thumbs.db": b"\x00\x01not a page",
+    "__MACOSX/._ch1/p1.png": b"\x00\x05\x16\x07resource fork",
+    "notes.txt": b"credits\n",
+    # Named .png and not a PNG: the decode-failure path, which must skip with a
+    # warning rather than abort the enumeration. It sorts FIRST inside ch1
+    # (text before digits under the natural key), so if a skipped member left a
+    # hole every ordinal after it would shift.
+    "ch1/broken.png": b"not an image at all",
+}
+
+# The zip's own timestamp and external attributes are wall-clock and umask
+# derived unless pinned. Without this the archive differs on every
+# regeneration and check_fixtures_deterministic goes red on a fixture that
+# changed in no way that matters.
+CBZ_DATE = (1980, 1, 1, 0, 0, 0)
+
+
+def _cbz_page(i: int) -> bytes:
+    """One page: two bubbles with Latin text, on a panel border. Deterministic."""
+    img = Image.new("RGB", (CBZ_W, CBZ_H), "white")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((20, 20, CBZ_W - 20, CBZ_H - 20), outline="black", width=5)
+    font = load_font(LATIN_FONTS, 22)
+    boxes = [(70, 90, 400, 330), (200, 470, 550, 760)]
+    for j, box in enumerate(boxes):
+        draw.ellipse(box, fill="white", outline="black", width=4)
+        draw.text((box[0] + 40, box[1] + 60), f"PAGE {i}\nBUBBLE {j}",
+                  font=font, fill="black")
+    buf = io.BytesIO()
+    img.save(buf, "PNG", pnginfo=PngInfo(), optimize=False, compress_level=6)
+    return buf.getvalue()
+
+
+def gen_cbz():
+    pages = {i: _cbz_page(i) for i in sorted({idx for _n, idx in CBZ_MEMBERS})}
+    path = FIXTURES / "cbz" / "sample.cbz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, payload in list(CBZ_JUNK.items()) + [
+            (n, pages[i]) for n, i in reversed(CBZ_MEMBERS)
+        ]:
+            info = zipfile.ZipInfo(name, date_time=CBZ_DATE)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, payload)
+
+    order = [n for n, _i in CBZ_MEMBERS]
+    # What members() reports: every member selected by EXTENSION, before
+    # anything is decoded. ch1/broken.png is named .png and is not one, so it
+    # is a candidate and not a page -- the two lists differ by exactly that
+    # file, which is what makes "a skipped member leaves no ordinal hole"
+    # testable.
+    candidates = sorted(order + ["ch1/broken.png"], key=_natural_key)
+    identical = [o + 1 for o, (_n, i) in enumerate(CBZ_MEMBERS)
+                 if [x for _y, x in CBZ_MEMBERS].count(i) > 1]
+    return {
+        "sample.cbz": {
+            "page_size": [CBZ_W, CBZ_H],
+            "natural_order": order,
+            "candidate_members": candidates,
+            "lexicographic_order": sorted(order),
+            "identical_ordinals": identical,
+            "skipped_members": sorted(CBZ_JUNK),
+            "notes": "Ordinals 3 and 7 are byte-identical pages in different "
+                     "chapter directories. Natural and lexicographic order "
+                     "differ, so a reader that sorted the wrong way is visible.",
+        }
+    }
+
+
 def write_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     # sort_keys + fixed separators + trailing newline: byte-identical across runs.
@@ -349,21 +469,26 @@ def write_json(path, obj):
 
 
 def main():
-    for sub in ("smoke", "bubbles"):
+    for sub in ("smoke", "bubbles", "cbz"):
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
 
     smoke = gen_smoke()
     bubbles = gen_bubbles()
+    cbz = gen_cbz()
 
     write_json(FIXTURES / "smoke" / "expected.json", smoke)
     write_json(FIXTURES / "bubbles" / "expected.json", bubbles)
+    write_json(FIXTURES / "cbz" / "expected.json", cbz)
 
-    n = len(smoke) + len(bubbles)
-    print(f"generated {n} fixtures + 2 expected.json under {FIXTURES}")
+    n = len(smoke) + len(bubbles) + len(cbz)
+    print(f"generated {n} fixtures + 3 expected.json under {FIXTURES}")
     for name in sorted(smoke):
         print(f"  smoke/{name}")
     for name in sorted(bubbles):
         print(f"  bubbles/{name}  rung {bubbles[name]['forces_rung']}")
+    for name in sorted(cbz):
+        print(f"  cbz/{name}  {len(CBZ_MEMBERS)} pages, "
+              f"identical ordinals {cbz[name]['identical_ordinals']}")
     return 0
 
 

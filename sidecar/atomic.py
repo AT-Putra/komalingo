@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from contextlib import contextmanager
 
 # Crash-injection hook. check_package.py sets this to park a write between the
@@ -52,7 +53,18 @@ def atomic_write(dest, mode: str = "wb", encoding: str | None = None):
 
     # In the destination directory (invariant 1), and prefixed with a dot so a
     # directory glob run mid-write does not pick it up as real output.
-    tmp = os.path.join(directory, f".{os.path.basename(dest)}.{os.getpid()}.tmp")
+    #
+    # Thread ident as well as pid. The sidecar's routes are sync, so FastAPI
+    # runs two concurrent requests in two threadpool threads of ONE process --
+    # and two threads writing the same destination with a pid-only temp name
+    # open the same temp file, and the second fails with PermissionError
+    # [WinError 32] out of a job that did nothing wrong. Measured by the Phase
+    # 3 review: 72 of 240 concurrent writes. The name still matches `.*.tmp`,
+    # which is what check_package's stray-file sweep looks for.
+    tmp = os.path.join(
+        directory,
+        f".{os.path.basename(dest)}.{os.getpid()}.{threading.get_ident()}.tmp",
+    )
 
     fh = open(tmp, mode, encoding=encoding)
     try:

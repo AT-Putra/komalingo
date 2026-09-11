@@ -89,6 +89,7 @@ PHASE_ORDER = [
     "check_tategaki",
     "check_typeset",
     "check_inpaint",
+    "check_spotfix",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
