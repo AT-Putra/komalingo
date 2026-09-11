@@ -143,6 +143,8 @@ export const api = {
     job_id: string;
     item_id?: string;
     lang?: string;
+    /** The language the pages are written in: which OCR reads them. Phase 4. */
+    source?: Source;
     settings?: ProviderSettings;
   }) => call<ItemResult>("/api/item", "POST", req),
 
@@ -164,6 +166,13 @@ export const api = {
     settings?: ProviderSettings;
   }) => call<PageRecord>("/api/rerender", "POST", req),
 };
+
+export type Source = "ja" | "zh" | "ko";
+export const SOURCES: { value: Source; label: string }[] = [
+  { value: "ja", label: "Japanese" },
+  { value: "zh", label: "Chinese" },
+  { value: "ko", label: "Korean" },
+];
 
 export interface ModelInfo {
   id: string;

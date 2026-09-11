@@ -88,6 +88,42 @@ MANIFEST = {
         "sha256": "03f550c6b406fda8bf54bd8327815f6c7e2edd98cea02348c93d879254366587",
         "size": 2423490,
     },
+    # Phase 4: PP-OCRv5 text-line RECOGNITION for zh and ko (AC-3), as ONNX,
+    # run by onnxruntime -- not the paddleocr package, which drags the whole
+    # paddlepaddle runtime behind it for one recogniser. The weights are
+    # PaddlePaddle's (Apache-2.0), exported by the oar-ocr project and
+    # published as GitHub RELEASE assets under a version tag, which is a fixed
+    # point the same way opencv_zoo's 4.10.0 tag is. Each digest below is the
+    # sha256 GitHub itself reports for the asset, and fetch() verifies it.
+    # The dictionary travels with its model: a recogniser's output is an index
+    # into a character list, and the wrong list turns every glyph into a
+    # different, plausible glyph with no error raised anywhere.
+    "pp-ocrv5-rec-zh": {
+        "base_url": "https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/",
+        "files": {
+            "pp-ocrv5_mobile_rec.onnx": {
+                "sha256": "243a0f06d826761323e9045e9b113ab2c191c3aa50565585e628300b8eda0224",
+                "size": 16562373,
+            },
+            "ppocrv5_dict.txt": {
+                "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
+                "size": 74012,
+            },
+        },
+    },
+    "pp-ocrv5-rec-ko": {
+        "base_url": "https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/",
+        "files": {
+            "korean_pp-ocrv5_mobile_rec.onnx": {
+                "sha256": "2d7ed96308065a86103325d22af07a88c4d06afc009f21602a4882342c0cc054",
+                "size": 13446374,
+            },
+            "ppocrv5_korean_dict.txt": {
+                "sha256": "a88071c68c01707489baa79ebe0405b7beb5cca229f4fc94cc3ef992328802d7",
+                "size": 47451,
+            },
+        },
+    },
 }
 
 

@@ -27,6 +27,7 @@ import secrets
 import sys
 import threading
 from contextlib import asynccontextmanager
+from typing import Literal
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -75,6 +76,9 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="MangaTranslator sidecar", lifespan=lifespan)
 
 
+Source = Literal["ja", "zh", "ko"]  # pipeline.SOURCES, as a type pydantic can check
+
+
 class Settings(BaseModel):
     """What the Settings UI sends. No defaults -- absent means absent."""
 
@@ -87,6 +91,7 @@ class TranslateRequest(BaseModel):
     src_path: str
     dest_dir: str
     page: int = 1
+    source: Source = pipeline.DEFAULT_SOURCE  # the language the page is written in
     settings: Settings | None = None  # absent -> offline placeholder path
 
 
@@ -105,6 +110,10 @@ class ItemRequest(BaseModel):
     job_id: str
     item_id: str | None = None
     lang: str = pipeline.DEFAULT_LANG
+    # Phase 4: which OCR reads the page. Validated here, so a typo is a 422
+    # with the accepted set in it rather than a ValueError halfway through
+    # an archive. RerenderRequest has no source: it never OCRs.
+    source: Source = pipeline.DEFAULT_SOURCE
     settings: Settings | None = None
 
 
@@ -255,7 +264,7 @@ def translate(req: TranslateRequest):
         # (US-P1-11). The one failure the user could have fixed in two seconds
         # cost them a restart.
         client = _client(req.settings)
-        record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client)
+        record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client, req.source)
     except ProviderError as e:
         return _provider_response(e)
     except SettingsError as e:
@@ -303,7 +312,7 @@ def translate_item(req: ItemRequest):
     try:
         record = pipeline.run_item(
             req.src_path, req.dest_dir, req.job_id, req.item_id,
-            _client(req.settings), req.lang,
+            _client(req.settings), req.lang, req.source,
         )
     except ProviderError as e:
         return _provider_response(e)

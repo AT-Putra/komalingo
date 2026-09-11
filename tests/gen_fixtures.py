@@ -3,8 +3,9 @@
 
     uv run --project sidecar python tests/gen_fixtures.py
 
-Writes `fixtures/smoke/` and `fixtures/bubbles/` (Phase 0a) and
-`fixtures/cbz/` (Phase 3); Phase 6 extends this with `fixtures/archives/`. Exit 0 always, or a traceback -- there is no
+Writes `fixtures/smoke/` and `fixtures/bubbles/` (Phase 0a), `fixtures/cbz/`
+(Phase 3) and `fixtures/zh/`, `fixtures/ko/` (Phase 4); Phase 6 extends this
+with `fixtures/archives/`. Exit 0 always, or a traceback -- there is no
 partial-success mode: a generator that half-writes a fixture tree is worse
 than one that fails.
 
@@ -433,6 +434,122 @@ def gen_bubbles():
 
 
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# zh/ and ko/ -- Phase 4's pages: the Phase 1 bars, for the second engine.
+# --------------------------------------------------------------------------
+# PAGES, not crops. The Phase 1 panels are single-bubble crops because real
+# scans came that way; a synthetic set can be drawn at page scale, and has to
+# be: the detector runs at a 1408px long side, so a 240px crop is upscaled
+# five times and comes back as glyph-sized fragments -- the wrong granularity
+# for a recogniser that reads LINES. Six bubbles a page, four pages a
+# language, one phrase per bubble, is the twenty-four Phase 1 asked for.
+#
+# Ground truth is the phrase as the pipeline must hand it to translation:
+# lines joined with "" for Chinese and " " for Korean. Six Chinese bubbles are
+# vertical (Taiwan and Hong Kong manhua set dialogue that way; the mainland
+# does not), six are two horizontal lines, the rest one line. Korean is all
+# horizontal -- manhwa is -- with six two-line bubbles.
+
+ZH_FONTS = ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simsun.ttc"]
+KO_FONTS = ["C:/Windows/Fonts/malgun.ttf"]
+CJK_GLYPH_PX = 40
+
+# (lines, orientation). A one-element list is one line or one column.
+ZH_PHRASES = [
+    (["你在做什么？"], "horizontal"),
+    (["快跑！"], "horizontal"),
+    (["这绝不可能"], "vertical"),
+    (["我不会放弃的"], "vertical"),
+    (["等等我！"], "horizontal"),
+    (["这是什么", "地方？"], "horizontal"),
+    (["太好了！"], "horizontal"),
+    (["别开玩笑了"], "horizontal"),
+    (["你没事吧？"], "horizontal"),
+    (["我们明天", "再来一次吧"], "horizontal"),
+    (["小心！"], "vertical"),
+    (["对不起"], "horizontal"),
+    (["谢谢你"], "horizontal"),
+    (["这个世界真是", "太不公平了"], "horizontal"),
+    (["没问题"], "horizontal"),
+    (["快救命啊"], "vertical"),
+    (["不要过来！"], "horizontal"),
+    (["你到底", "想说什么"], "horizontal"),
+    (["你是谁？"], "vertical"),
+    (["真的吗？"], "horizontal"),
+    (["我不想", "再看到你了"], "horizontal"),
+    (["太危险了"], "vertical"),
+    (["让我们", "一起去吧"], "horizontal"),
+    (["我回来了"], "horizontal"),
+]
+KO_PHRASES = [
+    (["뭐 하는 거야?"], "horizontal"),
+    (["빨리 도망쳐!"], "horizontal"),
+    (["이럴 수는 없어"], "horizontal"),
+    (["난 절대로", "포기하지 않을 거야"], "horizontal"),
+    (["기다려 줘!"], "horizontal"),
+    (["정말 잘됐다!"], "horizontal"),
+    (["농담하지 마"], "horizontal"),
+    (["여기는 도대체", "어디지?"], "horizontal"),
+    (["괜찮아?"], "horizontal"),
+    (["가자"], "horizontal"),
+    (["너무 위험하니까", "조심해"], "horizontal"),
+    (["미안해"], "horizontal"),
+    (["고마워"], "horizontal"),
+    (["걱정하지 말고", "기다려"], "horizontal"),
+    (["문제없어"], "horizontal"),
+    (["배고파"], "horizontal"),
+    (["살려 주세요!"], "horizontal"),
+    (["다녀왔습니다", "형님"], "horizontal"),
+    (["오지 마!"], "horizontal"),
+    (["넌 누구야?"], "horizontal"),
+    (["진짜?"], "horizontal"),
+    (["내일 다시", "오자"], "horizontal"),
+    (["알았어"], "horizontal"),
+    (["다녀왔어"], "horizontal"),
+]
+CJK_SEPARATOR = {"zh": "", "ko": " "}
+# Six bubbles a page, in a 2 x 3 grid of 480px ellipses.
+CJK_BUBBLES = [
+    (x0, y0, x0 + 480, y0 + 480)
+    for y0 in (80, 620, 1160)
+    for x0 in (640, 80)  # right column first: the reading order of a CJK page
+]
+
+
+def draw_lines(draw, lines, box, font, leading=1.3):
+    """Horizontal text, lines centred in the bubble."""
+    x0, y0, x1, y1 = box
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    line_h = font.size * leading
+    top = cy - len(lines) * line_h / 2
+    for i, line in enumerate(lines):
+        w = font.getlength(line)
+        draw.text((cx - w / 2, top + i * line_h), line, font=font, fill="black")
+
+
+def gen_cjk(lang, phrases, fonts):
+    out = {}
+    for page_no in range(4):
+        page = Image.new("RGB", (W, H), "white")
+        draw = ImageDraw.Draw(page)
+        draw.rectangle((40, 40, W - 40, H - 40), outline="black", width=7)
+        font = load_font([fonts[page_no % len(fonts)]] + fonts, CJK_GLYPH_PX)
+        bubbles = []
+        for box, (lines, orientation) in zip(CJK_BUBBLES, phrases[page_no * 6:(page_no + 1) * 6]):
+            draw.ellipse(box, fill="white", outline="black", width=5)
+            if orientation == "vertical":
+                draw_columns(draw, lines, box, font)
+            else:
+                draw_lines(draw, lines, box, font)
+            bubbles.append({"box": list(box), "lines": lines, "orientation": orientation,
+                            "text": CJK_SEPARATOR[lang].join(lines)})
+        name = f"page_{page_no + 1:02d}.png"
+        save_png(page, FIXTURES / lang / name)
+        out[name] = {"size": [W, H], "glyph_px": CJK_GLYPH_PX,
+                     "font": Path(fonts[page_no % len(fonts)]).name, "bubbles": bubbles}
+    return out
+
+
 # cbz/sample.cbz -- Phase 3's one real multi-page item.
 # --------------------------------------------------------------------------
 # Phase 3 freezes the page-cache contract, and two clauses of it are only
@@ -559,20 +676,27 @@ def write_json(path, obj):
 
 
 def main():
-    for sub in ("smoke", "bubbles", "cbz"):
+    for sub in ("smoke", "bubbles", "cbz", "zh", "ko"):
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
 
     smoke = gen_smoke()
     smoke.update(gen_smoke_columns())
     bubbles = gen_bubbles()
     cbz = gen_cbz()
+    zh = gen_cjk("zh", ZH_PHRASES, ZH_FONTS)
+    ko = gen_cjk("ko", KO_PHRASES, KO_FONTS)
 
     write_json(FIXTURES / "smoke" / "expected.json", smoke)
     write_json(FIXTURES / "bubbles" / "expected.json", bubbles)
     write_json(FIXTURES / "cbz" / "expected.json", cbz)
+    write_json(FIXTURES / "zh" / "expected.json", zh)
+    write_json(FIXTURES / "ko" / "expected.json", ko)
 
-    n = len(smoke) + len(bubbles) + len(cbz)
-    print(f"generated {n} fixtures + 3 expected.json under {FIXTURES}")
+    n = len(smoke) + len(bubbles) + len(cbz) + len(zh) + len(ko)
+    print(f"generated {n} fixtures + 5 expected.json under {FIXTURES}")
+    for lang, pages in (("zh", zh), ("ko", ko)):
+        for name in sorted(pages):
+            print(f"  {lang}/{name}  {len(pages[name]['bubbles'])} bubbles, {pages[name]['font']}")
     for name in sorted(smoke):
         print(f"  smoke/{name}")
     for name in sorted(bubbles):

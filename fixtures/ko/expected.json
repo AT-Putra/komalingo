@@ -1,0 +1,360 @@
+{
+  "page_01.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "뭐 하는 거야?"
+        ],
+        "orientation": "horizontal",
+        "text": "뭐 하는 거야?"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "빨리 도망쳐!"
+        ],
+        "orientation": "horizontal",
+        "text": "빨리 도망쳐!"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "이럴 수는 없어"
+        ],
+        "orientation": "horizontal",
+        "text": "이럴 수는 없어"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "난 절대로",
+          "포기하지 않을 거야"
+        ],
+        "orientation": "horizontal",
+        "text": "난 절대로 포기하지 않을 거야"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "기다려 줘!"
+        ],
+        "orientation": "horizontal",
+        "text": "기다려 줘!"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "정말 잘됐다!"
+        ],
+        "orientation": "horizontal",
+        "text": "정말 잘됐다!"
+      }
+    ],
+    "font": "malgun.ttf",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  },
+  "page_02.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "농담하지 마"
+        ],
+        "orientation": "horizontal",
+        "text": "농담하지 마"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "여기는 도대체",
+          "어디지?"
+        ],
+        "orientation": "horizontal",
+        "text": "여기는 도대체 어디지?"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "괜찮아?"
+        ],
+        "orientation": "horizontal",
+        "text": "괜찮아?"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "가자"
+        ],
+        "orientation": "horizontal",
+        "text": "가자"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "너무 위험하니까",
+          "조심해"
+        ],
+        "orientation": "horizontal",
+        "text": "너무 위험하니까 조심해"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "미안해"
+        ],
+        "orientation": "horizontal",
+        "text": "미안해"
+      }
+    ],
+    "font": "malgun.ttf",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  },
+  "page_03.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "고마워"
+        ],
+        "orientation": "horizontal",
+        "text": "고마워"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "걱정하지 말고",
+          "기다려"
+        ],
+        "orientation": "horizontal",
+        "text": "걱정하지 말고 기다려"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "문제없어"
+        ],
+        "orientation": "horizontal",
+        "text": "문제없어"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "배고파"
+        ],
+        "orientation": "horizontal",
+        "text": "배고파"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "살려 주세요!"
+        ],
+        "orientation": "horizontal",
+        "text": "살려 주세요!"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "다녀왔습니다",
+          "형님"
+        ],
+        "orientation": "horizontal",
+        "text": "다녀왔습니다 형님"
+      }
+    ],
+    "font": "malgun.ttf",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  },
+  "page_04.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "오지 마!"
+        ],
+        "orientation": "horizontal",
+        "text": "오지 마!"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "넌 누구야?"
+        ],
+        "orientation": "horizontal",
+        "text": "넌 누구야?"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "진짜?"
+        ],
+        "orientation": "horizontal",
+        "text": "진짜?"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "내일 다시",
+          "오자"
+        ],
+        "orientation": "horizontal",
+        "text": "내일 다시 오자"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "알았어"
+        ],
+        "orientation": "horizontal",
+        "text": "알았어"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "다녀왔어"
+        ],
+        "orientation": "horizontal",
+        "text": "다녀왔어"
+      }
+    ],
+    "font": "malgun.ttf",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  }
+}

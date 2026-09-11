@@ -67,8 +67,9 @@ LOWER_IS_BETTER = {
     "clipped_glyph_count",
     "mean_cer",
     "ring_assert_skipped",
+    "cjk_mean_cer",
 }
-HIGHER_IS_BETTER = {"min_font_px", "exact_match"}
+HIGHER_IS_BETTER = {"min_font_px", "exact_match", "cjk_exact_match"}
 METRIC_EPS = 1e-9  # float noise, not tolerance: any real movement counts
 
 # Phase order, not alphabetical: a foundational failure should be read first.
@@ -91,6 +92,7 @@ PHASE_ORDER = [
     "check_inpaint",
     "check_spotfix",
     "check_group",
+    "check_cjk",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -263,7 +265,7 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "2b",
+        "phase": "4",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
@@ -288,6 +290,12 @@ def main() -> int:
             # an assert that cannot fail -- and a skip that is only ever
             # printed is unannounced to everyone reading the record later.
             "ring_assert_skipped": None,
+            # Phase 4: check_cjk's Phase 1 bars over the zh and ko pages, one
+            # number each across both languages. AC-3 is "same as AC-1 for zh
+            # and ko"; a record that could not show the second engine's floor
+            # would let it drift with nothing going red.
+            "cjk_mean_cer": None,
+            "cjk_exact_match": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline

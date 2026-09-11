@@ -7,9 +7,11 @@ import {
   loadSettings,
   onLog,
   onProgress,
+  SOURCES,
   type ItemResult,
   type PageRecord,
   type Progress,
+  type Source,
 } from "./lib/api";
 import "./App.css";
 
@@ -33,6 +35,7 @@ export default function App() {
 
   const [src, setSrc] = useState("");
   const [dest, setDest] = useState("");
+  const [source, setSource] = useState<Source>("ja");
   const [job, setJob] = useState<ItemResult | null>(null);
   const [page, setPage] = useState<PageRecord | null>(null);
   const [busy, setBusy] = useState(false);
@@ -65,6 +68,7 @@ export default function App() {
         // and the address every later spot-fix uses. A server-minted id the UI
         // only learns from a response it might not receive is an orphan.
         job_id: `job-${Date.now()}`,
+        source,
         settings: settings.base_url && settings.model ? settings : undefined,
       });
       setJob(result);
@@ -148,6 +152,17 @@ export default function App() {
               placeholder="output folder"
               size={30}
             />
+            <select
+              aria-label="source language"
+              value={source}
+              onChange={(e) => setSource(e.target.value as Source)}
+            >
+              {SOURCES.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
             <button onClick={runItem} disabled={busy || !src || !dest}>
               {busy ? "Translating…" : "Translate archive"}
             </button>

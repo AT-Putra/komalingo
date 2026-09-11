@@ -23,7 +23,7 @@ from dataclasses import asdict
 
 from PIL import Image, ImageDraw
 
-from . import atomic, cache, imaging, ocr_ja, typeset
+from . import atomic, cache, imaging, ocr_cjk, ocr_ja, typeset
 from . import detect as detector
 from .containers import read_cbz
 
@@ -81,12 +81,31 @@ def detect(img: Image.Image, page: int) -> list[dict]:
     return regions
 
 
-def ocr(regions: list[dict], img: Image.Image, page: int) -> int:
-    """Japanese text per region. Returns the number of OCR calls made."""
+# The source languages the pipeline reads, and which engine reads each. ja is
+# manga-ocr's -- whole bubble, one pass, furigana and all -- and NEVER
+# PaddleOCR's: PP-OCRv5 reads Japanese at 60% (spec, component table). zh and
+# ko are PP-OCRv5's, per text line. Phase 4, AC-3.
+SOURCES = ("ja", "zh", "ko")
+DEFAULT_SOURCE = "ja"
+
+
+def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_SOURCE) -> int:
+    """Source text per region. Returns the number of OCR calls made.
+
+    One call per region on both paths. manga-ocr takes the whole region
+    (its hull) in one pass; PP-OCRv5 takes the region's PARTS -- one per text
+    line as the detector saw them -- and ocr_cjk joins them in reading order,
+    which is still one call here and one entry in regions.json.
+    """
+    if source not in SOURCES:
+        raise ValueError(f"source {source!r} is not one of {SOURCES}")
     rgb = img.convert("RGB")
     for r in regions:
-        x0, y0, x1, y1 = _bbox(r["polygon"])
-        r["text"] = ocr_ja.ocr(rgb.crop((x0, y0, x1, y1)))
+        if source == "ja":
+            x0, y0, x1, y1 = _bbox(r["polygon"])
+            r["text"] = ocr_ja.ocr(rgb.crop((x0, y0, x1, y1)))
+        else:
+            r["text"] = ocr_cjk.ocr(rgb, r.get("parts") or [r["polygon"]], source)
     emit("ocr", f"{len(regions)} calls", page, 25)
     return len(regions)
 
@@ -210,14 +229,14 @@ def encode_and_write(img: Image.Image, src_path, dest_dir, page: int) -> str:
 # -- the run ---------------------------------------------------------------
 
 
-def run_page(src_path, dest_dir, page: int = 1, client=None) -> dict:
+def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAULT_SOURCE) -> dict:
     """One page through all seven stages, in order. Returns the regions record."""
     with Image.open(atomic.long_path(src_path)) as src:
         src.load()
         original = src.convert("RGB").copy()
 
         regions = detect(src, page)
-        ocr_calls = ocr(regions, src, page)
+        ocr_calls = ocr(regions, src, page, source)
         translate(regions, page, client)
         cleaned, inpaint_calls = inpaint(original, regions, page)
         drawn, fit_summary = render(cleaned, regions, page, client)
@@ -226,6 +245,7 @@ def run_page(src_path, dest_dir, page: int = 1, client=None) -> dict:
     changed = {r["id"]: _changed_in_polygon(cleaned, drawn, r["polygon"]) for r in regions}
     return {
         "page": page,
+        "source": source,
         "output": out_path,
         "detections": len(regions),
         "ocr_calls": ocr_calls,
@@ -281,7 +301,11 @@ class CacheMiss(Exception):
 # handed them back -- so the UI, which posts the ordinal it was handed, edited
 # page 7 when the user was looking at page 3. Defect A fixed the delivery path
 # and the review found the same confusion alive in the response envelope.
-CONTENT_KEYS = ("page_hash", "src_format", "detections", "fit_summary", "regions")
+# `source` is content: the OCR text in `regions` was read by the engine for
+# that language, and a page cached under ja and re-run under zh must not hand
+# the zh run manga-ocr's reading of Chinese. run_item treats a mismatch as a
+# miss. Phase 4.
+CONTENT_KEYS = ("page_hash", "src_format", "source", "detections", "fit_summary", "regions")
 
 
 def _persist(h: str, record: dict) -> None:
@@ -420,7 +444,8 @@ def _deliver(img: Image.Image, dest_dir, member: str, fmt: str,
     return atomic.long_path(dest)
 
 
-def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT_LANG):
+def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT_LANG,
+             source=DEFAULT_SOURCE):
     """Every page of one CBZ, through the cache. Returns the job record.
 
     The cache hit here is what AC-13's "a re-run skips completed pages" cashes
@@ -430,6 +455,8 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     loop would have re-detected and re-OCR'd every page while every gate in the
     suite stayed green.
     """
+    if source not in SOURCES:
+        raise ValueError(f"source {source!r} is not one of {SOURCES}")
     item_id = item_id or os.path.basename(os.fspath(src_path))
     model = _model_id(client)
     cache.mark_running(job_id)
@@ -449,6 +476,10 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
                 # renderer a None and call it a page. Treated as a miss, which
                 # costs a re-detect -- the cost the module docstring claims, on
                 # the path where it is actually true.
+                cached = None
+            if cached is not None and cached.get("source", DEFAULT_SOURCE) != source:
+                # Read under another source language: the cached text is the
+                # other engine's. A miss, so this run's engine reads the page.
                 cached = None
 
             # The seven stages, in STAGES order, each emitting exactly once --
@@ -475,7 +506,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
                 # 8's queue will make this lock idle; today it is load-bearing.
                 with _MODEL_LOCK:
                     regions = detect(img, ordinal)
-                    ocr_calls = ocr(regions, img, ordinal)
+                    ocr_calls = ocr(regions, img, ordinal, source)
 
             if _load_translations(regions, h, lang, model):
                 emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
@@ -511,6 +542,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
                 "item_id": item_id,
                 "member": member,
                 "src_format": fmt,
+                "source": source,
                 "output": out_path,
                 "cached": cached is not None,
                 "detections": len(regions),

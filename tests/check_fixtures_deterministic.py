@@ -26,7 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "fixtures"
-SUBDIRS = ("smoke", "bubbles", "cbz")
+SUBDIRS = ("smoke", "bubbles", "cbz", "zh", "ko")
 GENERATOR = ROOT / "tests" / "gen_fixtures.py"
 
 

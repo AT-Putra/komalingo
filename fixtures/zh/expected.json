@@ -1,0 +1,360 @@
+{
+  "page_01.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "你在做什么？"
+        ],
+        "orientation": "horizontal",
+        "text": "你在做什么？"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "快跑！"
+        ],
+        "orientation": "horizontal",
+        "text": "快跑！"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "这绝不可能"
+        ],
+        "orientation": "vertical",
+        "text": "这绝不可能"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "我不会放弃的"
+        ],
+        "orientation": "vertical",
+        "text": "我不会放弃的"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "等等我！"
+        ],
+        "orientation": "horizontal",
+        "text": "等等我！"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "这是什么",
+          "地方？"
+        ],
+        "orientation": "horizontal",
+        "text": "这是什么地方？"
+      }
+    ],
+    "font": "msyh.ttc",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  },
+  "page_02.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "太好了！"
+        ],
+        "orientation": "horizontal",
+        "text": "太好了！"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "别开玩笑了"
+        ],
+        "orientation": "horizontal",
+        "text": "别开玩笑了"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "你没事吧？"
+        ],
+        "orientation": "horizontal",
+        "text": "你没事吧？"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "我们明天",
+          "再来一次吧"
+        ],
+        "orientation": "horizontal",
+        "text": "我们明天再来一次吧"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "小心！"
+        ],
+        "orientation": "vertical",
+        "text": "小心！"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "对不起"
+        ],
+        "orientation": "horizontal",
+        "text": "对不起"
+      }
+    ],
+    "font": "simsun.ttc",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  },
+  "page_03.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "谢谢你"
+        ],
+        "orientation": "horizontal",
+        "text": "谢谢你"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "这个世界真是",
+          "太不公平了"
+        ],
+        "orientation": "horizontal",
+        "text": "这个世界真是太不公平了"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "没问题"
+        ],
+        "orientation": "horizontal",
+        "text": "没问题"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "快救命啊"
+        ],
+        "orientation": "vertical",
+        "text": "快救命啊"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "不要过来！"
+        ],
+        "orientation": "horizontal",
+        "text": "不要过来！"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "你到底",
+          "想说什么"
+        ],
+        "orientation": "horizontal",
+        "text": "你到底想说什么"
+      }
+    ],
+    "font": "msyh.ttc",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  },
+  "page_04.png": {
+    "bubbles": [
+      {
+        "box": [
+          640,
+          80,
+          1120,
+          560
+        ],
+        "lines": [
+          "你是谁？"
+        ],
+        "orientation": "vertical",
+        "text": "你是谁？"
+      },
+      {
+        "box": [
+          80,
+          80,
+          560,
+          560
+        ],
+        "lines": [
+          "真的吗？"
+        ],
+        "orientation": "horizontal",
+        "text": "真的吗？"
+      },
+      {
+        "box": [
+          640,
+          620,
+          1120,
+          1100
+        ],
+        "lines": [
+          "我不想",
+          "再看到你了"
+        ],
+        "orientation": "horizontal",
+        "text": "我不想再看到你了"
+      },
+      {
+        "box": [
+          80,
+          620,
+          560,
+          1100
+        ],
+        "lines": [
+          "太危险了"
+        ],
+        "orientation": "vertical",
+        "text": "太危险了"
+      },
+      {
+        "box": [
+          640,
+          1160,
+          1120,
+          1640
+        ],
+        "lines": [
+          "让我们",
+          "一起去吧"
+        ],
+        "orientation": "horizontal",
+        "text": "让我们一起去吧"
+      },
+      {
+        "box": [
+          80,
+          1160,
+          560,
+          1640
+        ],
+        "lines": [
+          "我回来了"
+        ],
+        "orientation": "horizontal",
+        "text": "我回来了"
+      }
+    ],
+    "font": "simsun.ttc",
+    "glyph_px": 40,
+    "size": [
+      1200,
+      1700
+    ]
+  }
+}
