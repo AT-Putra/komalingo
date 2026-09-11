@@ -89,3 +89,99 @@ def assert_erased(c, src_gray, cleaned_gray, parts, label: str, drop: float = 0.
     c.check(before == 0 or fell >= drop,
             f"{label}: ink inside the parts {before} -> {after} px, fell {fell:.2f} >= {drop}")
     return fell
+
+
+# -- Phase 5: chrF++ and the English function-word gate (AC-4) --------------
+
+# Closed-class English: exactly what a stub that splices Indonesian glossary
+# terms into English sentences cannot remove, and exactly what correct
+# Indonesian never contains -- its closed class (yang, itu, dan, ke, dari,
+# dengan, tidak) shares nothing with this list. A general English wordlist
+# would false-fail on loanwords (data, film, bank, radio, hotel, video); these
+# words have no Indonesian homograph. Whole tokens, case-insensitive. One
+# known collision: "as" is also the abbreviation AS (Amerika Serikat); a
+# reference line that names it lists "AS" in its per-line allowlist.
+ENGLISH_FUNCTION_WORDS = frozenset("""
+the a an is are was were be been being am of and to in that it with for from
+this these those has have had will would shall should not but they their them
+he she his her him we our us you your i my me at on by or if as so than then
+there here what which who whom whose when where why how do does did can could
+may might must into about because while until unless although though after
+before over under between through during without within against
+""".split())
+
+
+def english_function_words(text: str, allow=()) -> list[str]:
+    """The English function words in `text`, as whole tokens, in order."""
+    import re
+
+    allowed = {a.lower() for a in allow}
+    tokens = re.findall(r"[A-Za-z]+", text)
+    return [t for t in tokens if t.lower() in ENGLISH_FUNCTION_WORDS and t.lower() not in allowed]
+
+
+def _ngrams(items, n: int) -> dict:
+    out: dict = {}
+    for i in range(len(items) - n + 1):
+        g = items[i:i + n]
+        out[g] = out.get(g, 0) + 1
+    return out
+
+
+def _words(sent: str) -> tuple:
+    """chrF++'s word tokens: whitespace split, one leading or trailing ASCII
+    punctuation mark split off as its own token (Popovic's chrF++.py, and
+    sacrebleu's _remove_punctuation, issue #124 behaviour included)."""
+    import string
+
+    out = []
+    for w in sent.split():
+        if len(w) > 1 and w[-1] in string.punctuation:
+            out += [w[:-1], w[-1]]
+        elif len(w) > 1 and w[0] in string.punctuation:
+            out += [w[0], w[1:]]
+        else:
+            out.append(w)
+    return tuple(out)
+
+
+def chrf_pp(hyps, refs, n_char: int = 6, n_word: int = 2, beta: float = 2.0) -> float:
+    """Corpus chrF++ (Popovic 2017) over the stdlib, sacrebleu's arithmetic:
+    character 1..6-grams on the text with whitespace removed plus word
+    1..2-grams; precision and recall averaged over the orders both sides
+    have n-grams for (the effective order); F with beta=2. Cross-checked
+    against sacrebleu's CHRF(char_order=6, word_order=2, beta=2) -- see
+    progress.txt, Phase 5 -- rather than depending on it: forty lines of
+    arithmetic do not justify a package. `hyps` and `refs` are parallel lists
+    of strings; a single string on each side is one sentence.
+    """
+    if isinstance(hyps, str):
+        hyps, refs = [hyps], [refs]
+    orders = [("c", n) for n in range(1, n_char + 1)] + [("w", n) for n in range(1, n_word + 1)]
+    match = {o: 0 for o in orders}
+    hyp_total = {o: 0 for o in orders}
+    ref_total = {o: 0 for o in orders}
+    for hyp, ref in zip(hyps, refs):
+        for kind, n in orders:
+            h = tuple(hyp.replace(" ", "")) if kind == "c" else _words(hyp)
+            r = tuple(ref.replace(" ", "")) if kind == "c" else _words(ref)
+            hg, rg = _ngrams(h, n), _ngrams(r, n)
+            match[(kind, n)] += sum(min(c, rg.get(g, 0)) for g, c in hg.items())
+            hyp_total[(kind, n)] += sum(hg.values())
+            ref_total[(kind, n)] += sum(rg.values())
+    live = [o for o in orders if hyp_total[o] and ref_total[o]]
+    if not live:
+        return 0.0
+    p = sum(match[o] / hyp_total[o] for o in live) / len(live)
+    r = sum(match[o] / ref_total[o] for o in live) / len(live)
+    if p == 0 or r == 0:
+        return 0.0
+    return (1 + beta * beta) * p * r / (beta * beta * p + r)
+
+
+assert chrf_pp("Tanaka-san, pulang bareng, yuk.", "Tanaka-san, pulang bareng, yuk.") == 1.0
+assert chrf_pp("", "Tanaka-san, pulang bareng, yuk.") == 0.0
+assert english_function_words("the cat") == ["the"]
+assert english_function_words("data film bank radio hotel video") == []
+assert english_function_words("Main game pakai VR itu mewah banget, ya.") == []
+assert english_function_words("Go to the guild", allow=["the"]) == ["to"]

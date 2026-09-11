@@ -1,0 +1,171 @@
+{
+  "_comment": "Phase 5, AC-4. The Japanese-to-Indonesian glossary as DATA: llm.py quotes these lines into the prompt verbatim for lang='id' and check_id asserts the output against them. docs/honorifics.md is the prose statement of the same policy; check_id asserts the two agree. Edit both.",
+  "policy": [
+    "Write natural, idiomatic Indonesian as a published manga translation would: short spoken sentences, no English scaffolding, no word-by-word gloss.",
+    "Register follows the speaker: casual dialogue uses aku/kau/kamu and dropped particles; formal or deferential speech uses saya/Anda; narration boxes use standard written Indonesian.",
+    "Japanese honorific suffixes are KEPT in romaji, attached to the name with a hyphen, exactly as the table below renders them; never translate -san as Bapak/Ibu and never drop a suffix the source has.",
+    "先輩 and 先生 as forms of address are rendered per the table, and the same way every time they occur for the same speaker.",
+    "Brand names, abbreviations and Latin-script tokens in the source stay as they are; sound effects are rendered as Indonesian onomatopoeia, not left in kana.",
+    "Do not add translator notes, explanations, or brackets."
+  ],
+  "honorifics": [
+    {
+      "ja": "さん",
+      "id": "-san",
+      "use": "neutral politeness; kept as a suffix on the name"
+    },
+    {
+      "ja": "ちゃん",
+      "id": "-chan",
+      "use": "affectionate, children and close friends; kept"
+    },
+    {
+      "ja": "くん",
+      "id": "-kun",
+      "use": "younger males and juniors; kept"
+    },
+    {
+      "ja": "様",
+      "id": "-sama",
+      "use": "deference; kept"
+    },
+    {
+      "ja": "殿",
+      "id": "-dono",
+      "use": "archaic deference; kept"
+    },
+    {
+      "ja": "先輩",
+      "id": "senpai",
+      "use": "senior at school or work; as address or suffix, always senpai, never Kak"
+    },
+    {
+      "ja": "後輩",
+      "id": "kouhai",
+      "use": "junior; as a noun, kouhai"
+    },
+    {
+      "ja": "先生",
+      "id": "sensei",
+      "use": "teacher, doctor, artist; as address or suffix, always sensei, never Pak/Bu Guru"
+    },
+    {
+      "ja": "(bare name)",
+      "id": "(bare name)",
+      "use": "a name with no suffix stays bare: intimacy or contempt, and the reader must see which"
+    }
+  ],
+  "terms": [
+    {
+      "ja": "魔法",
+      "id": "sihir"
+    },
+    {
+      "ja": "魔王",
+      "id": "Raja Iblis"
+    },
+    {
+      "ja": "勇者",
+      "id": "sang Pahlawan"
+    },
+    {
+      "ja": "冒険者",
+      "id": "petualang"
+    },
+    {
+      "ja": "ギルド",
+      "id": "guild"
+    },
+    {
+      "ja": "転生",
+      "id": "reinkarnasi"
+    },
+    {
+      "ja": "異世界",
+      "id": "dunia lain"
+    },
+    {
+      "ja": "残業",
+      "id": "lembur"
+    },
+    {
+      "ja": "会社",
+      "id": "perusahaan"
+    },
+    {
+      "ja": "部活",
+      "id": "klub"
+    },
+    {
+      "ja": "文化祭",
+      "id": "festival sekolah"
+    },
+    {
+      "ja": "体育祭",
+      "id": "pekan olahraga"
+    },
+    {
+      "ja": "生徒会",
+      "id": "OSIS"
+    },
+    {
+      "ja": "委員長",
+      "id": "ketua kelas"
+    },
+    {
+      "ja": "お弁当",
+      "id": "bekal"
+    },
+    {
+      "ja": "おにぎり",
+      "id": "onigiri"
+    },
+    {
+      "ja": "お疲れ様",
+      "id": "terima kasih sudah bekerja keras"
+    },
+    {
+      "ja": "いただきます",
+      "id": "selamat makan"
+    },
+    {
+      "ja": "ただいま",
+      "id": "aku pulang"
+    },
+    {
+      "ja": "おかえり",
+      "id": "selamat datang kembali"
+    },
+    {
+      "ja": "よろしく",
+      "id": "mohon bantuannya"
+    },
+    {
+      "ja": "すみません",
+      "id": "maaf / permisi, by context"
+    },
+    {
+      "ja": "頑張って",
+      "id": "semangat"
+    },
+    {
+      "ja": "バカ",
+      "id": "bodoh"
+    }
+  ],
+  "keep": [
+    "VR",
+    "OK",
+    "TV",
+    "SNS",
+    "PC",
+    "AI",
+    "ID",
+    "MP",
+    "HP",
+    "LV",
+    "EXP",
+    "NG",
+    "KO"
+  ]
+}

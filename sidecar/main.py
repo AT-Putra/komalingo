@@ -77,6 +77,7 @@ app = FastAPI(title="MangaTranslator sidecar", lifespan=lifespan)
 
 
 Source = Literal["ja", "zh", "ko"]  # pipeline.SOURCES, as a type pydantic can check
+Target = Literal["en", "id"]  # llm.TARGET_NAMES' keys; Phase 5 adds Indonesian
 
 
 class Settings(BaseModel):
@@ -92,6 +93,7 @@ class TranslateRequest(BaseModel):
     dest_dir: str
     page: int = 1
     source: Source = pipeline.DEFAULT_SOURCE  # the language the page is written in
+    lang: Target = pipeline.DEFAULT_LANG  # the language the reader wants
     settings: Settings | None = None  # absent -> offline placeholder path
 
 
@@ -109,7 +111,7 @@ class ItemRequest(BaseModel):
     dest_dir: str
     job_id: str
     item_id: str | None = None
-    lang: str = pipeline.DEFAULT_LANG
+    lang: Target = pipeline.DEFAULT_LANG
     # Phase 4: which OCR reads the page. Validated here, so a typo is a 422
     # with the accepted set in it rather than a ValueError halfway through
     # an archive. RerenderRequest has no source: it never OCRs.
@@ -132,7 +134,7 @@ class RerenderRequest(BaseModel):
     region_id: int
     text: str
     dest_dir: str
-    lang: str = pipeline.DEFAULT_LANG
+    lang: Target = pipeline.DEFAULT_LANG
     settings: Settings | None = None
 
 
@@ -264,7 +266,8 @@ def translate(req: TranslateRequest):
         # (US-P1-11). The one failure the user could have fixed in two seconds
         # cost them a restart.
         client = _client(req.settings)
-        record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client, req.source)
+        record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client, req.source,
+                                   req.lang)
     except ProviderError as e:
         return _provider_response(e)
     except SettingsError as e:

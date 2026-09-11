@@ -23,6 +23,7 @@ import asyncio
 import base64
 import http.client
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -30,6 +31,38 @@ from dataclasses import dataclass, field
 MAX_CONCURRENT = 3
 MAX_REGIONS = 40  # above this a page is split across requests
 TIMEOUT = 120
+
+# Phase 5: the prompt is ASSEMBLED from the job's source and target rather
+# than hardcoding "Japanese to English". The names are what the model reads;
+# the codes are what the pipeline, the cache and the API carry.
+SOURCE_NAMES = {"ja": "Japanese", "zh": "Chinese", "ko": "Korean"}
+TARGET_NAMES = {"en": "English", "id": "Indonesian"}
+
+# Per-target glossary files, quoted into the prompt as data. Indonesian is
+# the only one today; a second target adds a file and a line here, not prose
+# in _messages. The rules themselves live in the JSON (and docs/honorifics.md
+# states them for a reader) so check_id can grade the output against the
+# same table the model was shown.
+GLOSSARIES = {"id": os.path.join(os.path.dirname(os.path.abspath(__file__)), "glossary_id.json")}
+_GLOSSARY_CACHE: dict[str, str] = {}
+
+
+def glossary_text(lang: str) -> str:
+    """The glossary block for `lang`, or "" when the target has none."""
+    path = GLOSSARIES.get(lang)
+    if not path:
+        return ""
+    if lang not in _GLOSSARY_CACHE:
+        with open(path, encoding="utf-8") as fh:
+            g = json.load(fh)
+        lines = ["Rules:"] + [f"- {rule}" for rule in g["policy"]]
+        lines.append("Honorifics, source -> rendering: "
+                     + "; ".join(f"{h['ja']} -> {h['id']}" for h in g["honorifics"]))
+        lines.append("Terms, source -> rendering: "
+                     + "; ".join(f"{t['ja']} -> {t['id']}" for t in g["terms"]))
+        lines.append("Keep as they are: " + ", ".join(g["keep"]))
+        _GLOSSARY_CACHE[lang] = "\n".join(lines) + "\n"
+    return _GLOSSARY_CACHE[lang]
 
 
 class SettingsError(ValueError):
@@ -147,12 +180,22 @@ class LLMClient:
 
     # -- translation -------------------------------------------------------
 
-    def _messages(self, regions, page_png: bytes | None):
+    def _messages(self, regions, page_png: bytes | None, lang: str = "en", source: str = "ja"):
+        if lang not in TARGET_NAMES:
+            raise SettingsError(f"target language {lang!r} is not one of {sorted(TARGET_NAMES)}")
+        if source not in SOURCE_NAMES:
+            raise SettingsError(f"source language {source!r} is not one of {sorted(SOURCE_NAMES)}")
+        target = TARGET_NAMES[lang]
+        # The glossary sits between the instruction and the regions, and the
+        # regions stay LAST: the stub provider and check_id read the request
+        # back from the text after the final "regions " marker.
         instruction = (
-            "Translate the Japanese in each region to English. "
-            "Reply with JSON: {\"translations\":[{\"id\":<id>,\"text\":<english>}]}. "
+            f"Translate the {SOURCE_NAMES[source]} in each region to {target}. "
+            f"Reply with JSON: {{\"translations\":[{{\"id\":<id>,\"text\":<{target.lower()}>}}]}}. "
             "Use the whole page as context.\n"
-            "regions " + json.dumps([{"id": r.id, "text": r.text} for r in regions])
+            + glossary_text(lang)
+            + "regions " + json.dumps([{"id": r.id, "text": r.text} for r in regions],
+                                      ensure_ascii=False)
         )
         if page_png and not self.text_only:
             b64 = base64.b64encode(page_png).decode()
@@ -175,19 +218,22 @@ class LLMClient:
         parsed = json.loads(raw[start : end + 1])
         return {int(t["id"]): t["text"] for t in parsed.get("translations", [])}
 
-    async def translate_page(self, regions, page_png: bytes | None = None) -> dict:
+    async def translate_page(self, regions, page_png: bytes | None = None, *,
+                             lang: str = "en", source: str = "ja") -> dict:
         """All regions of one page. One request unless the page is huge.
 
-        Returns {region_id: english}. Batching is why a 5-bubble page costs one
-        request rather than five, and why the model can see bubble 3 when it
-        translates bubble 4.
+        Returns {region_id: text in `lang`}. Batching is why a 5-bubble page
+        costs one request rather than five, and why the model can see bubble 3
+        when it translates bubble 4. `source` names the language the OCR read
+        and `lang` the one the reader wants; both go into the instruction.
         """
         if not regions:
             return {}
 
         batches = [regions[i : i + MAX_REGIONS] for i in range(0, len(regions), MAX_REGIONS)]
         payloads = [
-            {"model": self.model, "messages": self._messages(b, page_png)} for b in batches
+            {"model": self.model, "messages": self._messages(b, page_png, lang, source)}
+            for b in batches
         ]
         replies = await asyncio.gather(
             *(self._call("/chat/completions", p) for p in payloads)
@@ -213,9 +259,13 @@ class LLMClient:
         """
         if not items:
             return {}
+        # Language-neutral on purpose: the text may be English or Indonesian,
+        # and "each English text" once told the model to switch languages on
+        # an Indonesian page.
         instruction = (
-            "Rewrite each English text to the SAME MEANING in at most max_chars "
-            "characters. Do not translate to another language; do not add notes. "
+            "Rewrite each text to the SAME MEANING in at most max_chars characters, "
+            "in the same language the text is already in. Do not translate to "
+            "another language; do not add notes. "
             "Reply with JSON: {\"translations\":[{\"id\":<id>,\"text\":<shorter>}]}.\n"
             "regions "
             + json.dumps(

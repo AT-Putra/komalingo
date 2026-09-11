@@ -142,7 +142,7 @@ export const api = {
     dest_dir: string;
     job_id: string;
     item_id?: string;
-    lang?: string;
+    lang?: Target;
     /** The language the pages are written in: which OCR reads them. Phase 4. */
     source?: Source;
     settings?: ProviderSettings;
@@ -162,7 +162,7 @@ export const api = {
     region_id: number;
     text: string;
     dest_dir: string;
-    lang?: string;
+    lang?: Target;
     settings?: ProviderSettings;
   }) => call<PageRecord>("/api/rerender", "POST", req),
 };
@@ -172,6 +172,12 @@ export const SOURCES: { value: Source; label: string }[] = [
   { value: "ja", label: "Japanese" },
   { value: "zh", label: "Chinese" },
   { value: "ko", label: "Korean" },
+];
+/** The language the reader wants. Phase 5 adds Indonesian (AC-4). */
+export type Target = "en" | "id";
+export const TARGETS: { value: Target; label: string }[] = [
+  { value: "en", label: "English" },
+  { value: "id", label: "Indonesian" },
 ];
 
 export interface ModelInfo {

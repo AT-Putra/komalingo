@@ -62,12 +62,21 @@ RANK = {FAIL: 3, INCONCLUSIVE: 2, SKIP: 1, PASS: 0}
 # fixture that silently stopped forcing would read 4 -> 3 as an improvement.
 # Both directions are wrong. The per-fixture asserts in check_typeset, and its
 # drift detector, are what guard those numbers.
+#
+# id_chrf is recorded and NOT ratcheted, for a third reason: it is a live
+# model's prose scored against forty lines, and two runs of the same model on
+# the same lines came back 0.6596 and 0.6386 (Phase 5). METRIC_EPS is for
+# float noise, and a ratchet that reads a 0.02 swing in a language model as a
+# regression goes red on the weather. check_id's own floor (>= 0.45) is the
+# gate; the record is the history. id_function_word_hits IS ratcheted -- it
+# is a count that should be zero and stay zero.
 LOWER_IS_BETTER = {
     "max_overflow_pct",
     "clipped_glyph_count",
     "mean_cer",
     "ring_assert_skipped",
     "cjk_mean_cer",
+    "id_function_word_hits",
 }
 HIGHER_IS_BETTER = {"min_font_px", "exact_match", "cjk_exact_match"}
 METRIC_EPS = 1e-9  # float noise, not tolerance: any real movement counts
@@ -93,6 +102,7 @@ PHASE_ORDER = [
     "check_spotfix",
     "check_group",
     "check_cjk",
+    "check_id",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -265,7 +275,7 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "4",
+        "phase": "5",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
@@ -296,6 +306,12 @@ def main() -> int:
             # would let it drift with nothing going red.
             "cjk_mean_cer": None,
             "cjk_exact_match": None,
+            # Phase 5: check_id's live half. Null on a run without MT_BASE_URL
+            # and MT_MODEL, where check_id skips; the skip set then differs
+            # from a live run's and the two are never compared -- which is
+            # the scoping the store was given in Phase 0.
+            "id_chrf": None,
+            "id_function_word_hits": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline

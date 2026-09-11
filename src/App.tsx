@@ -8,10 +8,12 @@ import {
   onLog,
   onProgress,
   SOURCES,
+  TARGETS,
   type ItemResult,
   type PageRecord,
   type Progress,
   type Source,
+  type Target,
 } from "./lib/api";
 import "./App.css";
 
@@ -36,6 +38,7 @@ export default function App() {
   const [src, setSrc] = useState("");
   const [dest, setDest] = useState("");
   const [source, setSource] = useState<Source>("ja");
+  const [lang, setLang] = useState<Target>("en");
   const [job, setJob] = useState<ItemResult | null>(null);
   const [page, setPage] = useState<PageRecord | null>(null);
   const [busy, setBusy] = useState(false);
@@ -69,6 +72,7 @@ export default function App() {
         // only learns from a response it might not receive is an orphan.
         job_id: `job-${Date.now()}`,
         source,
+        lang,
         settings: settings.base_url && settings.model ? settings : undefined,
       });
       setJob(result);
@@ -131,6 +135,7 @@ export default function App() {
             job={job.job_id}
             page={page}
             destDir={dest}
+            lang={lang}
             onPage={updatePage}
           />
         </>
@@ -160,6 +165,17 @@ export default function App() {
               {SOURCES.map((s) => (
                 <option key={s.value} value={s.value}>
                   {s.label}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="target language"
+              value={lang}
+              onChange={(e) => setLang(e.target.value as Target)}
+            >
+              {TARGETS.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
                 </option>
               ))}
             </select>

@@ -27,6 +27,7 @@ import {
   loadSettings,
   type PageRecord,
   type Region,
+  type Target,
 } from "../lib/api";
 
 /** Even-odd ray casting, in page coordinates. */
@@ -58,11 +59,15 @@ export default function SpotFix({
   job,
   page,
   destDir,
+  lang,
   onPage,
 }: {
   job: string;
   page: PageRecord;
   destDir: string;
+  /** The job's target language. A re-render under another one is a cache
+   *  miss by design (the mixed-language guard), so it must be the job's. */
+  lang: Target;
   /** Called with the server's fresh record after every successful re-render. */
   onPage: (p: PageRecord) => void;
 }) {
@@ -142,6 +147,7 @@ export default function SpotFix({
         region_id: selected,
         text: draft,
         dest_dir: destDir,
+        lang,
         // Sent only when configured. An empty base URL is "not configured
         // yet", and the sidecar answers 400 for it rather than running a
         // silent offline placeholder the user did not ask for.

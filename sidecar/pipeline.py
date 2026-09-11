@@ -87,6 +87,7 @@ def detect(img: Image.Image, page: int) -> list[dict]:
 # ko are PP-OCRv5's, per text line. Phase 4, AC-3.
 SOURCES = ("ja", "zh", "ko")
 DEFAULT_SOURCE = "ja"
+DEFAULT_LANG = "en"
 
 
 def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_SOURCE) -> int:
@@ -110,11 +111,14 @@ def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_
     return len(regions)
 
 
-def translate(regions: list[dict], page: int, client=None) -> None:
-    """English per region. One LLM request for the whole page when configured.
+def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_LANG,
+              source: str = DEFAULT_SOURCE) -> None:
+    """Target-language text per region. One LLM request for the whole page.
 
     client is injected -- there is no default and no module-level base URL. The
     credentials come from the Settings UI at runtime, never from this file.
+    Phase 5: `lang` and `source` reach the prompt. Until then the job's lang
+    was a cache key and nothing else, and the prompt said English regardless.
     """
     if client is None:
         # ponytail: offline placeholder so the skeleton runs with no provider.
@@ -127,7 +131,8 @@ def translate(regions: list[dict], page: int, client=None) -> None:
         from .llm import Region
 
         out = asyncio.run(
-            client.translate_page([Region(id=r["id"], text=r["text"]) for r in regions])
+            client.translate_page([Region(id=r["id"], text=r["text"]) for r in regions],
+                                  lang=lang, source=source)
         )
         for r in regions:
             r["translation"] = out.get(r["id"], "")
@@ -229,7 +234,8 @@ def encode_and_write(img: Image.Image, src_path, dest_dir, page: int) -> str:
 # -- the run ---------------------------------------------------------------
 
 
-def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAULT_SOURCE) -> dict:
+def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAULT_SOURCE,
+             lang: str = DEFAULT_LANG) -> dict:
     """One page through all seven stages, in order. Returns the regions record."""
     with Image.open(atomic.long_path(src_path)) as src:
         src.load()
@@ -237,7 +243,7 @@ def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAU
 
         regions = detect(src, page)
         ocr_calls = ocr(regions, src, page, source)
-        translate(regions, page, client)
+        translate(regions, page, client, lang, source)
         cleaned, inpaint_calls = inpaint(original, regions, page)
         drawn, fit_summary = render(cleaned, regions, page, client)
         out_path = encode_and_write(drawn, src_path, dest_dir, page)
@@ -275,7 +281,6 @@ def write_regions(record: dict, dest_dir) -> str:
 # The cache enters here instead, where an ITEM -- an archive with an id and page
 # ordinals -- is the thing being run.
 
-DEFAULT_LANG = "en"
 
 # Serialises the detector and OCR across concurrent jobs. See run_item.
 _MODEL_LOCK = threading.Lock()
@@ -511,7 +516,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
             if _load_translations(regions, h, lang, model):
                 emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
             else:
-                translate(regions, ordinal, client)
+                translate(regions, ordinal, client, lang, source)
                 cache.write_translation(
                     h, lang, model, {r["id"]: r.get("translation", "") for r in regions}
                 )
