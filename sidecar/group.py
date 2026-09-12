@@ -53,6 +53,20 @@ caller has the pixels. Page 012's clock reads "23:45" in white on black one
 glyph to the left of a bubble, and by geometry alone its digits are another
 column of that bubble. Nothing in one bubble is set in both polarities.
 
+INK between two boxes is the fourth guard, and like polarity the caller
+supplies it because only the caller has the pixels. GAP measures distance
+and a bubble border is thin: on a real page (the stairwell, 006) the last
+column of one bubble stood 28px above the first column of the bubble in the
+NEXT PANEL, same x, a glyph of 45px -- through a bubble outline, a panel
+border, the gutter, another border and another outline -- and the stacked
+rule read it as one column split in two. Two panels' dialogue became one
+bubble's, and the second panel was left blank. Same page, other corner: a
+line of narration 45px left of a bubble merged into the bubble through its
+outline. No distance separates those cases from a genuine split column;
+the ink does. `separated(i, j)` answers whether ink runs across the gap
+between two adjacent boxes -- detect.py casts rays across it -- and a pair
+it says yes to may nest, never neighbour.
+
 Groups are the transitive closure -- union-find over every pair -- followed
 by one absorb pass for a group whose bbox mostly sits inside another's, which
 catches a fragment that failed every pairwise rule against its neighbours
@@ -160,12 +174,17 @@ def convex_hull(points) -> list[tuple[float, float]]:
     return lower[:-1] + upper[:-1]
 
 
-def group(polygons, inverse=None) -> list[list[int]]:
+def group(polygons, inverse=None, separated=None) -> list[list[int]]:
     """Partition polygon indices into text blocks. Order: by first member index.
 
     `inverse[i]` is True for a quad of light glyphs on a dark ground; two
     quads of different polarity never neighbour (they may still nest). None
     means unknown for all, and polarity is not consulted.
+
+    `separated(i, j)` is True when ink runs across the gap between two
+    boxes -- a bubble outline, a panel border. Such a pair never neighbours
+    either; it may still nest, because a quad inside another is inside it
+    whatever is drawn around them. None means no pixels were consulted.
 
     Returns index lists rather than merged polygons so the caller can carry
     whatever else it holds per member -- detect.py keeps the strongest
@@ -187,8 +206,14 @@ def group(polygons, inverse=None) -> list[list[int]]:
     for i in range(n):
         for j in range(i + 1, n):
             apart = tilted[i] or tilted[j] or (inverse is not None and inverse[i] != inverse[j])
-            if neighbours(boxes[i], boxes[j], unit, apart):
-                parent[find(i)] = find(j)
+            if not neighbours(boxes[i], boxes[j], unit, apart):
+                continue
+            # Adjacent, not nested, and drawn apart: the ink guard. Consulted
+            # last because it is the only rule that costs pixels.
+            if (separated is not None and _inside(boxes[i], boxes[j]) < CONTAIN
+                    and separated(i, j)):
+                continue
+            parent[find(i)] = find(j)
 
     members: dict[int, list[int]] = {}
     for i in range(n):
@@ -215,7 +240,7 @@ def group(polygons, inverse=None) -> list[list[int]]:
     return [sorted(g) for k, g in enumerate(groups) if k not in absorbed]
 
 
-def merge(polygons, inverse=None) -> list[tuple[list[tuple[float, float]], list[int]]]:
+def merge(polygons, inverse=None, separated=None) -> list[tuple[list[tuple[float, float]], list[int]]]:
     """(hull polygon, member indices) per text block."""
     return [(convex_hull([pt for i in g for pt in polygons[i]]), g)
-            for g in group(polygons, inverse)]
+            for g in group(polygons, inverse, separated)]

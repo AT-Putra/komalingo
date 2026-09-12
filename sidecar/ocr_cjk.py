@@ -111,15 +111,34 @@ def _recogniser(lang: str) -> _Recogniser:
     return _RECOGNISERS[lang]
 
 
+# A part holding smaller parts is a LINE over its words when it is no thicker
+# than this many median part thicknesses, and a BLOCK over its lines beyond.
+LINE_THICKNESS = 1.5
+
+
 def lines(parts) -> list:
-    """The parts that are text LINES: drop any part holding most of another.
+    """The parts that are text LINES, each read once.
 
     The detector answers per line and, at the same scale, once more per block
-    around them; grouping keeps both as parts. Reading the block quad as a
-    line would read the bubble twice. Returned in reading order -- columns
-    right to left, rows top to bottom -- decided by the majority orientation.
+    around them; grouping keeps both as parts, and reading the block quad as
+    a line would read the bubble twice. So a part holding most of another is
+    resolved -- but which way depends on what the holder is:
+
+      a BLOCK over its lines (thicker than LINE_THICKNESS lines) is dropped:
+        the recogniser reads one line at a time, and a two-line crop is not
+        a line;
+      a LINE over its words (one line thick) is kept and the words dropped:
+        the fine detector scale answers per word as often as per line, and a
+        crop cut at a word boundary starts on the neighbouring glyph's stem
+        -- "| 않을 거야" for 않을 거야 -- where the whole line, which the
+        coarse scale drew and every gate was measured against, reads clean.
+
+    Returned in reading order -- columns right to left, rows top to bottom,
+    and along each -- decided by the majority orientation.
     """
     boxes = [bbox(p) for p in parts]
+    if not boxes:
+        return []
 
     def area(b):
         return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
@@ -128,15 +147,64 @@ def lines(parts) -> list:
         ov = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
         return ov / area(a) if area(a) else 0.0
 
-    kept = [i for i, b in enumerate(boxes)
-            if not any(j != i and area(boxes[j]) < area(b) and inside(boxes[j], b) >= CONTAIN
-                       for j in range(len(boxes)))]
-    vertical = sum((boxes[i][3] - boxes[i][1]) > (boxes[i][2] - boxes[i][0]) for i in kept) * 2 > len(kept)
-    if vertical:
-        kept.sort(key=lambda i: -(boxes[i][0] + boxes[i][2]))
-    else:
-        kept.sort(key=lambda i: boxes[i][1] + boxes[i][3])
-    return [parts[i] for i in kept]
+    vertical = sum((b[3] - b[1]) > (b[2] - b[0]) for b in boxes) * 2 > len(boxes)
+
+    def thickness(b) -> float:
+        return (b[2] - b[0]) if vertical else (b[3] - b[1])
+
+    sizes = sorted(thickness(b) for b in boxes)
+    line = sizes[len(sizes) // 2]
+    dropped: set[int] = set()
+    for i, b in enumerate(boxes):
+        held = [j for j, o in enumerate(boxes)
+                if j != i and area(o) < area(b) and inside(o, b) >= CONTAIN]
+        if not held:
+            continue
+        if thickness(b) <= LINE_THICKNESS * line:
+            dropped.update(held)  # a line over its words: the line reads
+        else:
+            dropped.add(i)  # a block over its lines: the lines read
+    kept = [i for i in range(len(boxes)) if i not in dropped]
+    return [parts[i] for i in _reading_order(kept, boxes, vertical)]
+
+
+def _reading_order(kept: list, boxes: list, vertical: bool) -> list:
+    """Rows top to bottom (columns right to left), and WITHIN a row, left to
+    right (within a column, top to bottom).
+
+    The detector's fine scale answers per word as often as per line, so one
+    line of Korean can arrive as two parts a pixel apart in y. Sorted on y
+    alone they landed in whichever order that pixel fell -- "위험하니까 너무
+    조심해" for a line that reads "너무 위험하니까 조심해" -- because the old
+    key had no second axis: at the coarse scale a line was always one part.
+    A row is the parts whose centres on the stacking axis lie within half a
+    line of the row's first; the line is the median part thickness.
+    """
+    if not kept:
+        return []
+
+    def centre(i: int) -> float:
+        b = boxes[i]
+        return (b[0] + b[2]) / 2 if vertical else (b[1] + b[3]) / 2
+
+    def thickness(i: int) -> float:
+        b = boxes[i]
+        return (b[2] - b[0]) if vertical else (b[3] - b[1])
+
+    sizes = sorted(thickness(i) for i in kept)
+    line = sizes[len(sizes) // 2]
+    order = sorted(kept, key=lambda i: -centre(i) if vertical else centre(i))
+    rows: list[tuple[float, list]] = []
+    for i in order:
+        if rows and abs(centre(i) - rows[-1][0]) <= 0.5 * line:
+            rows[-1][1].append(i)
+        else:
+            rows.append((centre(i), [i]))
+    out: list = []
+    for _, row in rows:
+        # Along the line: x for horizontal text, y for vertical.
+        out.extend(sorted(row, key=lambda i: boxes[i][1] if vertical else boxes[i][0]))
+    return out
 
 
 def ocr(img, parts, lang: str) -> str:

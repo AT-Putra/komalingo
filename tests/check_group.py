@@ -44,7 +44,7 @@ from PIL import Image, ImageDraw  # noqa: E402
 from lib.asserts import cer  # noqa: E402
 from lib.result import Checks, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider  # noqa: E402
-from sidecar import group, pipeline, typeset  # noqa: E402
+from sidecar import group, pipeline, room, typeset  # noqa: E402
 from sidecar import detect as detector  # noqa: E402
 from sidecar.llm import LLMClient  # noqa: E402
 
@@ -57,6 +57,10 @@ PANELS = os.path.join(TATEDIR, "expected.json")
 PAGE_010 = os.path.join(TATEDIR, "Isekai Tensei de Kenja ni Natte v01s", "010.jpg")
 # The 「史実」 bubble on that page: six column quads, one sentence.
 PAGE_010_BUBBLE = (140, 720, 325, 915)
+# The stairwell page (1280x1808). Git-ignored; asserted on only when present.
+# The page that forced running both detector scales and the ink guard: see
+# _page_stairwell for the three blocks it lost.
+PAGE_STAIRS = os.path.join(ROOT, "fixtures", "real", "stairwell_006.webp")
 
 # The gate's own numbers. INK_COVERAGE below 1.0 only because the detector's
 # quads sit a pixel or two inside the outermost antialiased glyph edges.
@@ -183,6 +187,21 @@ def _geometry(c) -> None:
     hull = group.convex_hull([(0, 0), (10, 0), (10, 10), (0, 10), (5, 5), (5, 0)])
     c.check(sorted(hull) == [(0.0, 0.0), (0.0, 10.0), (10.0, 0.0), (10.0, 10.0)],
             f"[geometry hull] interior and collinear points are dropped: {hull}")
+
+    # The ink guard: the caller says what lies between two boxes. Two columns
+    # 28px apart, stacked -- the stairwell's two bubbles in two panels -- are
+    # one block by distance and two when a border runs between them; a quad
+    # nested in another joins it whatever is drawn around them.
+    stacked = [_rect(1232, 22, 1275, 238), _rect(1234, 266, 1279, 501)]
+    c.check(group.group(stacked) == [[0, 1]],
+            f"[geometry ink] two stacked columns 28px apart are one block by distance: "
+            f"{group.group(stacked)}")
+    got = group.group(stacked, separated=lambda i, j: True)
+    c.check(got == [[0], [1]],
+            f"[geometry ink] ...and two blocks when ink runs between them: {got}")
+    got = group.group(nested, separated=lambda i, j: True)
+    c.check(got == [[0, 1, 2]],
+            f"[geometry ink] a nested quad still joins its block through ink: {got}")
 
 
 # -- [fixture] ---------------------------------------------------------------
@@ -410,11 +429,86 @@ def _page_010(c) -> None:
     in_bubble = [r for r in regions
                  if bx0 <= sum(p[0] for p in r.polygon) / len(r.polygon) <= bx1
                  and by0 <= sum(p[1] for p in r.polygon) / len(r.polygon) <= by1]
-    c.check(len(regions) <= 10,
-            f"[page010 count] {len(raw)} quads -> {len(regions)} regions <= 10")
+    # 12, not the 10 the coarse-only detector gave: running the fine scale too
+    # (detect.py, the stairwell page) finds the whiteboard's 「閉4」 at
+    # (84, 660) -- real text the coarse pass never saw -- and a small-kana
+    # fragment of the カチャッ sound effect that RATIO keeps out of its block.
+    # The bound is against over-splitting; the bubble assert below is the one
+    # that says the grouping still holds.
+    c.check(len(regions) <= 12,
+            f"[page010 count] {len(raw)} quads -> {len(regions)} regions <= 12")
     c.check(len(in_bubble) == 1,
             f"[page010 bubble] the 「史実」 bubble's columns are {len(in_bubble)} region(s), "
             f"want 1")
+
+
+def _page_stairwell(c) -> None:
+    """The page that lost three blocks to the coarse-only detector and GAP alone.
+
+    Blocks by their bbox on the page, from the detector's own quads:
+      caption 「喜ぶ二人」 (973, 363, 54x166)  -- found at 1984 only, 0.99
+      bubble  「バレないよう」 (1235, 11)      -- panel 1
+      bubble  「ありがとう!!」 (1236, 269)      -- panel 2, 28px below, same x
+      caption 「だから…」 (104, 1594)          -- 49px left of the bubble below
+      bubble  「先に入ってて／飲み物…」 (201..289, 1404) -- two columns
+    """
+    if not os.path.exists(PAGE_STAIRS):
+        print("  [stairwell] skipped: the real page is not on disk")
+        return
+    with Image.open(PAGE_STAIRS) as im:
+        im.load()
+        src = im.convert("RGB")
+    regions = detector.detect(src)
+
+    def at(x, y):
+        """Regions whose bbox contains the point."""
+        out = []
+        for r in regions:
+            xs = [p[0] for p in r.polygon]
+            ys = [p[1] for p in r.polygon]
+            if min(xs) <= x <= max(xs) and min(ys) <= y <= max(ys):
+                out.append(r.id)
+        return out
+
+    caption = at(1000, 445)
+    c.check(len(caption) == 1,
+            f"[stairwell caption] 「喜ぶ二人」 beside the black hair is a region: {caption} "
+            f"({len(regions)} regions on the page)")
+    p1, p2 = at(1255, 120), at(1257, 380)
+    c.check(len(p1) == 1 and len(p2) == 1 and p1 != p2,
+            f"[stairwell panels] the columns 28px apart in two panels are two regions: "
+            f"panel 1 {p1}, panel 2 {p2}")
+    narration, bubble_a, bubble_b = at(128, 1670), at(223, 1600), at(266, 1520)
+    c.check(len(narration) == 1 and len(bubble_a) == 1 and narration != bubble_a,
+            f"[stairwell narration] 「だから…」 49px left of a bubble is not part of it: "
+            f"{narration} vs {bubble_a}")
+    c.check(bubble_a == bubble_b,
+            f"[stairwell bubble] ...while the bubble's own two columns stay one region: "
+            f"{bubble_a} vs {bubble_b}")
+
+    # The room, on the same page: four of its five bubbles are drawn against
+    # a page edge, and room.py declined every one until the page edge stopped
+    # counting as the window. The caption in the open panel beside the last
+    # bubble must still be declined -- it touches the page edge too, and
+    # without the fill test it became a 174x403 room set at 60px.
+    dicts = [{"id": r.id, "polygon": r.polygon, "parts": r.parts} for r in regions]
+    cleaned, _ = pipeline.inpaint(src, dicts, 1)
+    points = [[tuple(p) for p in r.polygon] for r in regions]
+
+    def room_of(rid):
+        i = next(k for k, r in enumerate(regions) if r.id == rid)
+        return room.room(cleaned, points[i], [pts for k, pts in enumerate(points) if k != i])
+
+    quiet = at(1006, 120)  # 「静かにしてね」, the bubble against the top edge
+    top_bubble = room_of(quiet[0]) if len(quiet) == 1 else None
+    tb = group.bbox(top_bubble) if top_bubble else None
+    c.check(tb is not None and tb[2] - tb[0] > 45 and tb[1] < 20,
+            f"[stairwell room] the bubble cut by the top page edge gets a room wider than "
+            f"its column, reaching the edge: {tb}")
+    open_panel = room_of(narration[0]) if len(narration) == 1 else "n/a"
+    c.check(open_panel is None,
+            f"[stairwell room] ...and the caption in the open panel beside a page edge is "
+            f"declined: {open_panel if open_panel is None else group.bbox(open_panel)}")
 
 
 def main():
@@ -437,6 +531,7 @@ def main():
     _pipeline(c, entry, src, by_bubble)
     metrics = _panels(c) if os.path.exists(PANELS) else {}
     _page_010(c)
+    _page_stairwell(c)
 
     if metrics:
         print("METRICS " + json.dumps(metrics))

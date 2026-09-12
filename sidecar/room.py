@@ -19,6 +19,28 @@ a room. `room()` then returns None and the caller keeps the region it had.
 Every check_typeset fixture takes that branch, which is why none of them
 moved when this landed.
 
+The PAGE edge is not the window. A bubble drawn against the edge of the page
+is cut off by it -- the stairwell page has four of its five in that state,
+at the top, the right and the bottom -- and its interior runs to the edge
+because the artist ran it there, not because a border is missing. The first
+version declined those too, on the theory that an interior running off the
+page was more likely an open border; measured, it was four real bubbles
+declined for none saved. So a flood may touch a window side that IS the page
+edge; what it may not do is reach a window side inside the page, where a
+border was expected and none was found. The erosion, solidity and area tests
+below still stand between a page-edge flood and a leak into the margin, and
+one more does, for page-edge floods only: the text must FILL the flood along
+its own long axis (EDGE_FILL_MIN). A bubble is drawn around its text, so a
+column runs nearly the bubble's height; a caption sitting in the open white
+of a panel that ends at the page edge -- 「だから…」 on the same page, 152px
+of text at the bottom of a 403px flood -- does not, and without this test it
+was set at 60px across the panel.
+
+A room that is no wider and no taller than the block is not returned
+either: the margin erosion can leave a narrow bubble's room a pixel inside
+the column it grew from, and a room exists to give the ladder width, not
+take it.
+
 **Screentone is a wall.** A halftone is dots with white between them, and a
 flood over "not ink" walks straight through the gaps. The ink mask is
 dilated first so dots close ranks; the cost is that a border thinner than the
@@ -56,6 +78,7 @@ CONTAIN_MIN = 0.80  # the traced room must still hold this much of the text bloc
 SOLIDITY_MIN = 0.80  # body area over its convex hull's: a bubble is round, a leak is not
 AREA_MAX = 20.0  # body area over the block's: past this the flood found a panel, not a bubble
 SIMPLIFY_FRAC = 0.01  # approxPolyDP epsilon, of the contour's perimeter
+EDGE_FILL_MIN = 0.6  # a page-edge flood: the block's share of it along the text's long axis
 
 
 def room(page, points, others=()) -> list[tuple[float, float]] | None:
@@ -105,14 +128,32 @@ def room(page, points, others=()) -> list[tuple[float, float]] | None:
     touched = set(np.unique(labels[seed])) - {0}
     flooded = np.isin(labels, list(touched))
 
-    # A flood that reached the window found no border: not a room. A window
-    # side that is also the page edge is treated the same way -- a bubble
-    # interior that runs off the page is far more likely a missing border.
-    if flooded[0, :].any() or flooded[-1, :].any() or flooded[:, 0].any() or flooded[:, -1].any():
+    # A flood that reached the window found no border: not a room -- unless
+    # that window side is the page edge, where a bubble the artist drew off
+    # the page has nothing else to end at. See the module docstring.
+    touched = (flooded[0, :].any(), flooded[-1, :].any(),
+               flooded[:, 0].any(), flooded[:, -1].any())
+    page_edge = (wy0 == 0, wy1 == page_h, wx0 == 0, wx1 == page_w)
+    if any(hit and not edge for hit, edge in zip(touched, page_edge, strict=True)):
         return None
+    # A bubble is cut by ONE page edge, or two at a corner. A flood on the
+    # page edge top AND bottom, or on three sides, found no bubble at all --
+    # a blank page whose window is the page itself, the check_typeset
+    # fixtures among them -- and is declined the way the window rule always
+    # declined it.
+    top, bottom, left, right = touched
+    if sum(touched) > 2 or (top and bottom) or (left and right):
+        return None
+    at_page_edge = any(touched)
 
     ys, xs = np.nonzero(flooded)
     rw, rh = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+    if at_page_edge:
+        # Along the text's long axis the block must fill the flood: a bubble
+        # is drawn around its text, open panel space is not.
+        fill = h / rh if h >= w else w / rw
+        if fill < EDGE_FILL_MIN:
+            return None
     margin = max(MARGIN_MIN_PX, int(round(MARGIN_FRAC * min(rw, rh))))
     km = 2 * margin + 1
     eroded = cv2.erode(flooded.astype(np.uint8), np.ones((km, km), np.uint8))
@@ -146,5 +187,9 @@ def room(page, points, others=()) -> list[tuple[float, float]] | None:
     poly = cv2.approxPolyDP(contour, eps, True).reshape(-1, 2)
     if len(poly) < 3:
         return None
+    px0, py0 = poly[:, 0].min(), poly[:, 1].min()
+    px1, py1 = poly[:, 0].max(), poly[:, 1].max()
+    if px1 - px0 <= w and py1 - py0 <= h:
+        return None  # no more room than the block itself: keep the block
     return [(float(px + wx0), float(py + wy0)) for px, py in poly]
 
