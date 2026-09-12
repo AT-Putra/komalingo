@@ -54,7 +54,7 @@ from PIL import Image, ImageDraw  # noqa: E402
 
 from lib.result import Checks, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider  # noqa: E402
-from sidecar import pipeline, typeset  # noqa: E402
+from sidecar import cache, pipeline, typeset  # noqa: E402
 from sidecar.llm import LLMClient  # noqa: E402
 
 PAGE = os.path.join(ROOT, "fixtures", "smoke", "tategaki_01.png")
@@ -413,6 +413,77 @@ def _room_ok(c, r, src, src_gray, fixture) -> list:
     return room
 
 
+def _dismissed(c, src, src_gray, regions) -> None:
+    """A region the vision model answers null for is never erased.
+
+    The erasure clause has a converse: the detector fires on artwork -- a
+    hand's five fingers, at the confidence of a hand-drawn sound effect --
+    and until this the inpainter painted the art white and the typesetter
+    put "No..." on it. The vision model answers null for such a region
+    (llm.NOT_TEXT_INSTRUCTION); the pipeline drops it before inpaint. Three
+    things are asserted, on the smoke page with the FIRST region declared
+    art: the pixels under it are the source's, untouched; it is off the
+    record's regions and on its `dismissed` list with the OCR text it had;
+    the other regions were erased and typeset as before. Then the cache: a
+    stored null reads back as the same dismissal, so a cache hit does not
+    quietly paint the art white on the second run. And the offline path,
+    which never asked a model, dismisses nothing.
+    """
+    first, rest = regions[0]["id"], [r["id"] for r in regions[1:]]
+    replies = {rid: STUB_TEXT for rid in rest}
+    replies[first] = None
+    with tempfile.TemporaryDirectory() as dest, StubProvider(replies=replies, delay=0) as stub:
+        client = LLMClient(stub.url, "k", "stub-model")
+        record = pipeline.run_page(PAGE, dest, 1, client)
+        with Image.open(record["output"]) as im:
+            out_gray = np.array(im.convert("L"), dtype=np.float64)
+
+    kept = [r["id"] for r in record["regions"]]
+    gone = record.get("dismissed", [])
+    c.check(first not in kept and kept == rest,
+            f"[dismissed] region {first} left the page's regions, the rest stayed: {kept}")
+    c.check(len(gone) == 1 and gone[0]["id"] == first and bool(gone[0].get("text")),
+            f"[dismissed] ...and is on the record as dismissed, with what the OCR read: {gone}")
+    inside = _mask(src.size, regions[0]["polygon"])
+    delta = float(np.abs(out_gray[inside] - src_gray[inside]).max()) if inside.any() else 0.0
+    c.check(delta == 0.0,
+            f"[dismissed] every pixel under it is the source's -- not erased, not typeset "
+            f"(max |delta| {delta:.0f})")
+    # Typeset, which only happens to a region that went through the whole
+    # pipeline. The erasure itself is measured on the CLEANED page by the
+    # composite section above; on the final page the English drawn on top
+    # would be counted as ink that was never removed.
+    c.check(all(r["typeset"] == STUB_TEXT for r in record["regions"]),
+            "[dismissed] the other regions were erased and typeset as before")
+
+    # The cache round trip, on the translation file alone: null in, dismissed out.
+    with tempfile.TemporaryDirectory() as root:
+        saved = os.environ.get("MT_CACHE_DIR")
+        os.environ["MT_CACHE_DIR"] = root
+        try:
+            h = "0" * 64
+            os.makedirs(cache.page_dir(h), exist_ok=True)
+            cache.write_translation(h, "en", "stub-model", {1: None, 2: STUB_TEXT})
+            fake = [{"id": 1, "polygon": regions[0]["polygon"], "text": "ダ"},
+                    {"id": 2, "polygon": regions[0]["polygon"], "text": "x"}]
+            covered = pipeline._load_translations(fake, h, "en", "stub-model")
+            kept2, gone2 = pipeline.dismiss(fake)
+        finally:
+            if saved is None:
+                os.environ.pop("MT_CACHE_DIR", None)
+            else:
+                os.environ["MT_CACHE_DIR"] = saved
+    c.check(covered and [r["id"] for r in kept2] == [2] and [g["id"] for g in gone2] == [1],
+            f"[dismissed cache] a stored null reads back as the same dismissal "
+            f"(covered={covered}, kept={[r['id'] for r in kept2]}, gone={[g['id'] for g in gone2]})")
+
+    with tempfile.TemporaryDirectory() as dest:
+        offline = pipeline.run_page(PAGE, dest, 1, None)
+    c.check(len(offline["regions"]) == len(regions) and not offline.get("dismissed"),
+            f"[dismissed offline] with no model asked, nothing is dismissed "
+            f"({len(offline['regions'])} regions, {offline.get('dismissed')})")
+
+
 def _composite(c) -> None:
     """The gate nothing else provides: translated text landing on a real page.
 
@@ -642,6 +713,7 @@ def main():
     _selftest_ring(c)
     _selftest_reference(c)
     _composite(c)
+    _dismissed(c, src, src_gray, regions)
 
     if skips:
         print(f"  summary: assert 1 skipped on {len(skips)} region(s) for reduced "

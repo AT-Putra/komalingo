@@ -179,8 +179,30 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
                                   lang=lang, source=source)
         )
         for r in regions:
-            r["translation"] = out.get(r["id"], "")
+            text = out.get(r["id"], "")
+            # None is the vision model's "nothing is written there" -- see
+            # llm.NOT_TEXT_INSTRUCTION. Flagged here, removed by dismiss()
+            # before the inpainter runs, and stored as null in the
+            # translation cache so a cache hit makes the same call.
+            r["not_text"] = text is None
+            r["translation"] = text or ""
     emit("translate", f"{len(regions)} regions", page, 50)
+
+
+def dismiss(regions: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(kept, dismissed): the regions the vision model said hold no text.
+
+    Called after translate and before inpaint, on the fresh path and the
+    cached one alike. A dismissed region is not inpainted, not typeset, not
+    in the page's fit summary and not in its regions -- the art under it
+    stays as drawn. It is kept on the record under `dismissed`, with what the
+    OCR read there, so a page that lost a real bubble to a wrong null can be
+    seen to have lost it rather than never having found it.
+    """
+    kept = [r for r in regions if not r.get("not_text")]
+    gone = [{"id": r["id"], "polygon": r["polygon"], "text": r.get("text")}
+            for r in regions if r.get("not_text")]
+    return kept, gone
 
 
 def inpaint(img: Image.Image, regions: list[dict], page: int) -> tuple[Image.Image, int]:
@@ -301,6 +323,7 @@ def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAU
             regions = detect(src, page)
             ocr_calls = ocr(regions, src, page, source)
         translate(regions, page, client, lang, source, img=original)
+        regions, dismissed = dismiss(regions)
         cleaned, inpaint_calls = inpaint(original, regions, page)
         drawn, fit_summary = render(cleaned, regions, page, client)
         out_path = encode_and_write(drawn, src_path, dest_dir, page)
@@ -319,6 +342,7 @@ def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAU
         # where to look, and the spot-fix editor sorts on exactly this list.
         "fit_summary": fit_summary,
         "regions": regions,
+        "dismissed": dismissed,
     }
 
 
@@ -424,7 +448,9 @@ def _load_translations(regions: list[dict], h: str, lang: str, model: str) -> bo
         if entry is None:
             covered = False
             continue
-        r["translation"] = entry.get("text", "")
+        text = entry.get("text", "")
+        r["not_text"] = text is None  # stored null: dismissed on the first run
+        r["translation"] = text or ""
         r["edited"] = bool(entry.get("edited"))
     return covered
 
@@ -749,7 +775,8 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         _check_cancel(cancel, item_id, pages_done)
         translate(regions, ordinal, client, lang, source, img=img)
         cache.write_translation(
-            h, lang, model, {r["id"]: r.get("translation", "") for r in regions}
+            h, lang, model,
+            {r["id"]: None if r.get("not_text") else r.get("translation", "") for r in regions},
         )
         # Read back, deliberately. write_translation refuses to
         # overwrite an `edited` entry, so the file it just wrote and
@@ -761,6 +788,7 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         # just not on the page. Reachable when coverage was partial (a
         # half-written translation file) and an edit exists.
         _load_translations(regions, h, lang, model)
+    regions, dismissed = dismiss(regions)
 
     if cached is not None:
         cleaned, inpaint_calls = cache.read_raster(h), 0
@@ -786,6 +814,7 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         "inpaint_calls": inpaint_calls,
         "fit_summary": fit_summary,
         "regions": regions,
+        "dismissed": dismissed,
     }
     if src_fmt == pdf.PDF:
         # Which path the page took, so check_pdf can assert the

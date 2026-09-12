@@ -89,6 +89,23 @@ def probe_png(token: str) -> bytes:
 def probe_token() -> str:
     return "".join(random.choices(PROBE_ALPHABET, k=4))
 
+# Only when the page image travels. A text-only model cannot see whether a
+# region is lettering or a hand, and asked anyway it would guess -- and a
+# guess of null erases a bubble. The detector (PP-OCR's DBNet, trained on
+# documents and street signs) fires on fingers: five parallel strokes, at the
+# same confidence as a hand-drawn sound effect, so no threshold separates
+# them (measured over five real pages: hands 0.94-0.965, ポッ 0.953, カチャ
+# 0.933, dialogue 0.98+). The vision model already looks at the page for
+# context; it is the one party that can say "there is nothing written
+# there". null, not "": an empty string is a translation that came out empty
+# and reaches the page as a visible fit_failed; null is a region that never
+# was one, and the pipeline drops it before the inpainter paints over the art.
+NOT_TEXT_INSTRUCTION = (
+    "If a region's text is not actually written on the page at that spot -- the "
+    "detector marked artwork, not lettering -- answer {\"id\":<id>,\"text\":null} "
+    "for that region and translate nothing there.\n"
+)
+
 # Phase 5: the prompt is ASSEMBLED from the job's source and target rather
 # than hardcoding "Japanese to English". The names are what the model reads;
 # the codes are what the pipeline, the cache and the API carry.
@@ -264,6 +281,7 @@ class LLMClient:
         if source not in SOURCE_NAMES:
             raise SettingsError(f"source language {source!r} is not one of {sorted(SOURCE_NAMES)}")
         target = TARGET_NAMES[lang]
+        with_image = bool(page_png) and not self.text_only
         # The glossary sits between the instruction and the regions, and the
         # regions stay LAST: the stub provider and check_id read the request
         # back from the text after the final "regions " marker.
@@ -271,11 +289,12 @@ class LLMClient:
             f"Translate the {SOURCE_NAMES[source]} in each region to {target}. "
             f"Reply with JSON: {{\"translations\":[{{\"id\":<id>,\"text\":<{target.lower()}>}}]}}. "
             "Use the whole page as context.\n"
+            + (NOT_TEXT_INSTRUCTION if with_image else "")
             + glossary_text(lang)
             + "regions " + json.dumps([{"id": r.id, "text": r.text} for r in regions],
                                       ensure_ascii=False)
         )
-        if page_png and not self.text_only:
+        if with_image:
             b64 = base64.b64encode(page_png).decode()
             content = [
                 {"type": "text", "text": instruction},
@@ -287,6 +306,15 @@ class LLMClient:
 
     @staticmethod
     def _parse(reply) -> dict:
+        """{region_id: text}. A JSON null stays None -- see NOT_TEXT_INSTRUCTION.
+
+        None and "" are different answers and must stay different: None is
+        "there is no text there", "" is "I translated it to nothing", and the
+        pipeline drops the first before inpaint while the second reaches the
+        page as a visible fit_failed. Anything that is not a string or null
+        is treated as "" rather than raising -- a provider that answers with a
+        number for one region does not get to fail the page.
+        """
         raw = reply["choices"][0]["message"]["content"]
         if isinstance(raw, list):  # some providers return content parts
             raw = "".join(p.get("text", "") for p in raw)
@@ -294,7 +322,11 @@ class LLMClient:
         if start < 0 or end < 0:
             raise ProviderError(200, f"reply was not JSON: {raw[:400]}")
         parsed = json.loads(raw[start : end + 1])
-        return {int(t["id"]): t["text"] for t in parsed.get("translations", [])}
+        out = {}
+        for t in parsed.get("translations", []):
+            text = t.get("text", "")
+            out[int(t["id"])] = text if text is None or isinstance(text, str) else ""
+        return out
 
     async def translate_page(self, regions, page_png: bytes | None = None, *,
                              lang: str = "en", source: str = "ja") -> dict:
