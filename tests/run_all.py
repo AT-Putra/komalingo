@@ -70,6 +70,15 @@ RANK = {FAIL: 3, INCONCLUSIVE: 2, SKIP: 1, PASS: 0}
 # regression goes red on the weather. check_id's own floor (>= 0.45) is the
 # gate; the record is the history. id_function_word_hits IS ratcheted -- it
 # is a count that should be zero and stay zero.
+#
+# archive_peak_rss_mb is in NEITHER set for the same class of reason: it is a
+# whole-process RSS reading taken on whatever box happens to run it, it moves
+# with the interpreter build and the allocator, and a ratchet that reads a few
+# MB of drift as a memory regression goes red on the weather. check_archives'
+# own 400MB gate is what holds AC-12; the record is the history.
+# archive_hostile_rejected IS ratcheted -- it counts AC-11 rules observed
+# firing on a real fixture, and that count going down means a rule stopped
+# working or a fixture stopped being hostile.
 LOWER_IS_BETTER = {
     "max_overflow_pct",
     "clipped_glyph_count",
@@ -78,7 +87,8 @@ LOWER_IS_BETTER = {
     "cjk_mean_cer",
     "id_function_word_hits",
 }
-HIGHER_IS_BETTER = {"min_font_px", "exact_match", "cjk_exact_match"}
+HIGHER_IS_BETTER = {"min_font_px", "exact_match", "cjk_exact_match",
+                    "archive_hostile_rejected"}
 METRIC_EPS = 1e-9  # float noise, not tolerance: any real movement counts
 
 # Phase order, not alphabetical: a foundational failure should be read first.
@@ -103,6 +113,7 @@ PHASE_ORDER = [
     "check_group",
     "check_cjk",
     "check_id",
+    "check_archives",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -275,7 +286,7 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "5",
+        "phase": "6",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
@@ -312,6 +323,14 @@ def main() -> int:
             # the scoping the store was given in Phase 0.
             "id_chrf": None,
             "id_function_word_hits": None,
+            # Phase 6: check_archives. peak_rss_mb is the AC-12 measurement,
+            # recorded and NOT ratcheted -- see the comment above
+            # LOWER_IS_BETTER. hostile_rejected counts the AC-11 rules seen
+            # firing on a real fixture, and IS ratcheted: that count going down
+            # means a rule stopped working or a fixture stopped being hostile,
+            # and neither is something a green run should be able to hide.
+            "archive_peak_rss_mb": None,
+            "archive_hostile_rejected": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline

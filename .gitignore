@@ -38,6 +38,16 @@ fixtures/ko/**/*.jpg
 fixtures/ko/**/*.jpeg
 fixtures/ko/**/*.webp
 fixtures/real/
+# Phase 6 archive fixtures that are regenerable in seconds and have no business
+# in git history: 200 pages, 5001 members, and 8MB of zeros. Every other
+# fixtures/archives/ file is committed -- benign.cbr because nothing can author
+# it, the rest because they are small and the safety gate reads them in CI.
+fixtures/archives/big.cbz
+fixtures/archives/members.cbz
+fixtures/archives/bomb.cbz
+fixtures/archives/bomb.cbt
+fixtures/archives/bomb.cb7
+
 src-tauri/binaries/*.exe
 
 # graphify: the graph itself is committed (graph.json, GRAPH_REPORT.md,

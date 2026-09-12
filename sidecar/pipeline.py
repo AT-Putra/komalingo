@@ -23,9 +23,9 @@ from dataclasses import asdict
 
 from PIL import Image, ImageDraw
 
-from . import atomic, cache, imaging, ocr_cjk, ocr_ja, typeset
+from . import atomic, cache, imaging, ocr_cjk, ocr_ja, safety, typeset
 from . import detect as detector
-from .containers import read_cbz
+from .containers import archive
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
 
@@ -396,8 +396,45 @@ def _safe_segment(seg: str) -> str:
     return f"{clean_stem or '_'}-{digest}{clean_ext}"
 
 
+_LANG_RE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")
+
+
+def _check_lang(lang: str) -> None:
+    """Reject a target language that is not a language tag.
+
+    `lang` is substituted into the user's ComicInfo.xml as raw bytes, because
+    AC-6 requires every other byte of that file back verbatim and no XML
+    library preserves an input it has parsed. Raw substitution means a `lang`
+    carrying `<`, `&` or a quote writes malformed XML into a file the AC
+    promises is otherwise untouched. `source` was validated here from Phase 4
+    and `lang` never was; it is the one that reaches a file.
+    """
+    if not _LANG_RE.fullmatch(str(lang)):
+        raise ValueError(f"lang {lang!r} is not a language tag")
+
+
+def item_dir(dest_dir, item_id) -> str:
+    r"""The per-ITEM output directory. Every file an item produces lands here.
+
+    AC-7's batch puts several items into one `dest_dir`, and both output names
+    were keyed on the input's basename and the member's name alone -- so two
+    volumes called `vol1.cbz` from different folders wrote the same
+    `vol1_translated.cbz`, and any two archives carrying `ch1/p1.png` (which is
+    most of them) wrote the same `ch1/p1_translated.png`. The second item
+    silently destroyed the first, and the cache's placement records went on
+    pointing at files another item had rewritten, which corrupts AC-13's resume
+    as well as the output. Measured, not theorised.
+
+    `_safe_segment` because `item_id` is a FILENAME from the user's disk and
+    this is the one place it becomes a directory name.
+    """
+    return os.path.join(os.fspath(dest_dir), _safe_segment(str(item_id)))
+
+
 def _member_dest(dest_dir, member: str) -> str:
     r"""Where one archive member's translated page lands, under `dest_dir`.
+
+    `dest_dir` here is the ITEM's directory, not the job's -- see `item_dir`.
 
     The member's DIRECTORY structure is preserved, and it has to be: an archive
     with `ch1/p1.png` and `ch10/p1.png` -- which the CBZ fixture has, because
@@ -462,13 +499,26 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     """
     if source not in SOURCES:
         raise ValueError(f"source {source!r} is not one of {SOURCES}")
+    _check_lang(lang)
     item_id = item_id or os.path.basename(os.fspath(src_path))
     model = _model_id(client)
     cache.mark_running(job_id)
     records: list[dict] = []
     warning = None
+    # Phase 6: every format AC-6 names, read through the AC-11 budget. The
+    # budget's destination is dest_dir because that is where a member WOULD
+    # land -- the escape rule is only meaningful relative to the root the
+    # repack would write under, and taking the real one means the rule is
+    # evaluated against the path the writer builds rather than a placeholder.
+    src_fmt = archive.detect_format(src_path)
+    out_dir = item_dir(dest_dir, item_id)
+    # The budget's root is the ITEM's directory, which is where a member would
+    # actually land -- the escape rule has to be evaluated against the path the
+    # writer builds, not against the job root one level above it.
+    budget = safety.Budget(out_dir)
+    format_warning = archive.CBR_WARNING if src_fmt == archive.RAR else None
     try:
-        for ordinal, member, img in read_cbz.pages(src_path):
+        for ordinal, member, img in archive.pages(src_path, budget):
             h = cache.page_hash(img)
             cache.put_placement(job_id, item_id, ordinal, h, member)
             cached = cache.read_regions(h) if cache.has_page(h) else None
@@ -539,7 +589,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
                 cache.write_raster(h, cleaned, src=img)
 
             drawn, fit_summary = render(cleaned, regions, ordinal, client)
-            out_path = _deliver(drawn, dest_dir, member, fmt, cleaned, ordinal)
+            out_path = _deliver(drawn, out_dir, member, fmt, cleaned, ordinal)
 
             record = {
                 "page": ordinal,
@@ -569,6 +619,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
         # item. It runs inside the try so the job is still marked running:
         # its pages are what the cap must not touch.
         warning = cache.enforce_cap(job_id)
+        out_archive = _repack(src_path, out_dir, src_fmt, records, lang, budget)
     finally:
         cache.clear_running(job_id)
 
@@ -577,7 +628,62 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
         "item_id": item_id,
         "pages": records,
         "cache_warning": warning,
+        "archive": out_archive,
+        "src_format": src_fmt,
+        "format_warning": format_warning,
     }
+
+
+def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,
+            budget) -> str:
+    """AC-6's round trip: the delivered pages, back into the input's format.
+
+    **The loose pages stay.** They are what the spot-fix editor re-renders into
+    and what AC-13's resume reads, and the archive is built FROM them rather
+    than instead of them -- so a cancelled job leaves the pages it finished
+    where the next run can use them, which an archive-only output cannot do
+    (a half-written archive is not half a job, it is nothing). The duplication
+    is the price of both properties and it is paid on disk, not in RSS: the
+    repack streams one page at a time.
+
+    Member names are the INPUT's, verbatim, so the member set round-trips
+    identically. The delivered file's name carries `_translated`; the member
+    inside the archive does not, because a reader app shows member names and
+    two hundred pages all saying `_translated` is noise the user did not ask
+    for.
+    """
+    if not records:
+        # Nothing decoded. An empty archive is worse than no archive: it looks
+        # to the user like the job succeeded and produced a volume of nothing.
+        return ""
+
+    out_fmt = archive.OUTPUT_FORMAT[src_fmt]
+    dest = archive.output_path(src_path, dest_dir)
+
+    def entries():
+        for record in records:
+            with open(atomic.long_path(record["output"]), "rb") as fh:
+                yield record["member"], fh.read()
+
+    # A FRESH budget for the re-read below, not the one the page loop
+    # exhausted: that one has already counted every page of this archive, so
+    # reusing it would charge the same bytes twice and refuse a legitimate
+    # volume on its own second pass. Same rules, same caps, new archive-scoped
+    # accounting -- which is what a second read of the archive is.
+    #
+    # And ONE re-read, through repack_extras. Calling comicinfo() and extras()
+    # separately ran two admission passes over this one budget, which counted
+    # every member twice and refused `member-count` at half the advertised cap
+    # -- after every page had been translated, and with job.run_item then
+    # deleting the output as an unsafe archive's. See repack_extras.
+    reread = safety.Budget(dest_dir, max_members=budget.max_members,
+                           max_ratio=budget.max_ratio,
+                           max_file_bytes=budget.max_file_bytes,
+                           max_total_bytes=budget.max_total_bytes)
+    comic, extra = archive.repack_extras(src_path, reread)
+    return archive.write_archive(
+        dest, entries(), out_fmt, comic, lang, extra_entries=extra,
+    )
 
 
 def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
@@ -637,7 +743,8 @@ def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
     # it, so taking it from there delivers this edit over the other ordinal's
     # file. That is the placement assert's whole subject.
     out_path = _deliver(
-        drawn, dest_dir, placed.get("member") or f"{item_id}_{ordinal:04d}.png",
+        drawn, item_dir(dest_dir, item_id),
+        placed.get("member") or f"{item_id}_{ordinal:04d}.png",
         record.get("src_format", "PNG"), cleaned, ordinal,
     )
 
@@ -658,6 +765,12 @@ def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
         regions=regions,
         edited_region=region_id,
         edit_on_other_model=cache.has_edit_for_other_model(h, lang, model),
+        # The repacked volume on disk no longer contains this page. Re-packing
+        # here is not an option -- rebuilding a 200-page archive is minutes
+        # against AC-10's 3-second budget -- so the honest move is to SAY the
+        # archive is behind rather than leave the user holding a file that
+        # silently disagrees with the editor. run_item rebuilds it.
+        archive_stale=True,
     )
     _persist(h, record)
     record["cache_warning"] = cache.enforce_cap(job_id)

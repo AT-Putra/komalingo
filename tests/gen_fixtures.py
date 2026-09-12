@@ -26,10 +26,13 @@ tree, byte-identical). Three sources of nondeterminism are closed here:
 bodies are Phase 0 deliverables (build order, section E).
 """
 
+import gzip
+import hashlib
 import io
 import json
 import shutil
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -42,6 +45,7 @@ FIXTURES = ROOT / "fixtures"
 
 sys.path.insert(0, str(ROOT))
 
+from sidecar.containers import archive  # noqa: E402
 from sidecar.containers.read_cbz import _natural_key  # noqa: E402
 from sidecar.region import ellipse_points  # noqa: E402
 
@@ -663,6 +667,264 @@ def gen_cbz():
     }
 
 
+# --------------------------------------------------------------------------
+# Phase 6 -- fixtures/archives/
+#
+# Written through sidecar.containers.archive's OWN writers, not through a
+# second implementation here. The determinism pinning (zip date_time, tar
+# mtime/uid/uname, the 7z lastwritetime that py7zr offers no argument for) is
+# exactly the pinning the product uses to repack a translated volume, so a
+# regression in one is a red determinism gate rather than a fixture that
+# quietly stops matching what the app writes.
+# --------------------------------------------------------------------------
+
+ARCHIVE_W, ARCHIVE_H = 600, 900
+
+# p1, p2, p10: natural order is p1 p2 p10 and lexicographic order is p1 p10 p2,
+# so a reader that sorted the wrong way is visible on three members.
+ARCHIVE_PAGES = ["ch1/p1.png", "ch1/p2.png", "ch1/p10.png"]
+
+# A member that is neither a page nor the ComicInfo. Every benign archive
+# carries one, because "the member set round-trips" is a claim whose only
+# counter-example is a member the repack forgets -- and an archive made
+# entirely of pages cannot produce one. The first draft of _repack dropped
+# exactly this file and every assert stayed green.
+EXTRA_NAME = "credits.txt"
+_CRLF = bytes((13, 10))  # written as codes: this file is read back byte-exactly
+EXTRA_BYTES = (b"Translated with MangaTranslator." + _CRLF
+               + b"Source: synthetic fixture." + _CRLF)
+
+COMICINFO_NAME = "ComicInfo.xml"
+# CRLF line endings, an XML declaration, an attribute, and a self-closing tag,
+# all deliberately: AC-6 requires this file back VERBATIM except LanguageISO,
+# and every one of these is something an XML round-trip normalises away. A
+# repack that parsed and re-serialised passes a "contents match" assert and
+# fails this one.
+COMICINFO = (
+    b'<?xml version="1.0" encoding="utf-8"?>\r\n'
+    b'<ComicInfo xmlns:xsd="http://www.w3.org/2001/XMLSchema">\r\n'
+    b'  <Title>benign</Title>\r\n'
+    b"  <Series/>\r\n"
+    b"  <LanguageISO>ja</LanguageISO>\r\n"
+    b"  <PageCount>3</PageCount>\r\n"
+    b"</ComicInfo>\r\n"
+)
+
+# One benign archive per format AC-6 names. The extension is what the user's
+# reader keys on and the container family is what our reader keys on, so both
+# spellings of each family are generated -- a .cbz and a .zip differ in nothing
+# but the name, and that is the point.
+BENIGN_FORMATS = [
+    ("benign.cbz", "zip"), ("benign.zip", "zip"),
+    ("benign.cb7", "sevenzip"), ("benign.7z", "sevenzip"),
+    ("benign.cbt", "tar"), ("benign.tar", "tar"),
+]
+
+# Hostile fixtures, one per AC-11 rule that an archive can actually carry. The
+# two byte caps are NOT here: a fixture that trips a 256MB per-file cap is a
+# 256MB fixture, so check_archives trips them with a tightened Budget on
+# bomb.cbz instead -- same rule, same code path, no quarter-gigabyte in the
+# tree. commonpath-escape is unreachable by construction (see
+# safety.BACKSTOP_REASONS) and is asserted through Budget.escapes.
+HOSTILE = ["slip.cbz", "absolute.cbz", "drive.cbz", "symlink.cbt",
+           "bomb.cbz", "bomb.cbt", "bomb.cb7", "members.cbz"]
+
+# Not committed: 200 pages, 5001 members, and 8MB of zeros are regenerable in
+# seconds and have no business in git history. Named here and in .gitignore.
+UNCOMMITTED = ["big.cbz", "members.cbz", "bomb.cbz", "bomb.cbt", "bomb.cb7"]
+
+BIG_PAGES = 200
+BOMB_BYTES = 8 * 1024 * 1024      # deflates to ~8KB: about 1000:1, over the 200:1 rule
+MEMBERS_COUNT = 5001              # one past safety.MAX_MEMBERS
+
+
+def _archive_page(i: int, w: int = ARCHIVE_W, h: int = ARCHIVE_H) -> bytes:
+    """One page: a panel border and a page number. Deterministic, and UNIQUE.
+
+    Unique per page because the page cache keys on decoded pixels: two hundred
+    byte-identical pages would collapse to one cache entry and the memory gate
+    would measure an archive of one page two hundred times.
+    """
+    img = Image.new("RGB", (w, h), "white")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((15, 15, w - 15, h - 15), outline="black", width=4)
+    font = load_font(LATIN_FONTS, 48)
+    draw.text((60, 80), f"PAGE {i}", font=font, fill="black")
+    draw.ellipse((80, 260, w - 80, 620), fill="white", outline="black", width=3)
+    draw.text((140, 400), f"{i:04d}", font=load_font(LATIN_FONTS, 64), fill="black")
+    buf = io.BytesIO()
+    img.save(buf, "PNG", pnginfo=PngInfo(), optimize=False, compress_level=6)
+    return buf.getvalue()
+
+
+def _write(path: Path, entries, fmt: str, comicinfo=None):
+    """One archive, through the product's writer. Returns its sha256.
+
+    `entries` is consumed lazily, so members.cbz's 5001 payloads and big.cbz's
+    200 pages are generated one at a time rather than held as a list.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_archive(path, entries, fmt, comicinfo)
+    return sha256_file(path)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_symlink_tar(path: Path):
+    """A tar carrying a real symlink member. Hand-rolled, and it has to be.
+
+    `archive.write_archive` writes regular files only -- it is the repack path
+    and the product never creates a link -- so the one fixture that must carry
+    one builds its own tar. The pinning is the same: GNU format, mtime 0, no
+    ownership, sorted members.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as tf:
+        payload = _archive_page(1)
+        info = tarfile.TarInfo("ch1/p1.png")
+        info.size = len(payload)
+        info.mtime = 0
+        info.mode = 0o644
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        tf.addfile(info, io.BytesIO(payload))
+
+        link = tarfile.TarInfo("ch1/p2.png")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../../../Windows/System32/drivers/etc/hosts"
+        link.size = 0
+        link.mtime = 0
+        link.mode = 0o777
+        link.uid = link.gid = 0
+        link.uname = link.gname = ""
+        tf.addfile(link)
+    return sha256_file(path)
+
+
+def gen_archives():
+    out = FIXTURES / "archives"
+    pages = {name: _archive_page(i + 1) for i, name in enumerate(ARCHIVE_PAGES)}
+
+    def benign_entries():
+        for name, payload in sorted(
+                list(pages.items()) + [(EXTRA_NAME, EXTRA_BYTES)]):
+            yield name, payload
+
+    report = {}
+    for filename, fmt in BENIGN_FORMATS:
+        report[filename] = {
+            "format": fmt,
+            "sha256": _write(out / filename, benign_entries(), fmt,
+                             (COMICINFO_NAME, COMICINFO)),
+            "natural_order": ARCHIVE_PAGES,
+            "lexicographic_order": sorted(ARCHIVE_PAGES),
+            "members": sorted([COMICINFO_NAME, EXTRA_NAME, *ARCHIVE_PAGES]),
+            "extra_member": EXTRA_NAME,
+            "page_size": [ARCHIVE_W, ARCHIVE_H],
+        }
+
+    # --- hostile: one per rule an archive can carry -----------------------
+    good = ("ch1/p1.png", pages["ch1/p1.png"])
+
+    hostile = {
+        # '..' as its own component. Backslash on purpose in one of them: zip
+        # says backslash is not a separator and every Windows API says it is.
+        "slip.cbz": ("parent-traversal", [good, ("..\\..\\evil.png", b"\x89PNG owned")]),
+        "absolute.cbz": ("absolute-path", [good, ("/evil.png", b"\x89PNG owned")]),
+        # C:evil.png, not C:/evil.png: drive-RELATIVE, which resolves against
+        # the process's per-drive working directory and is neither absolute nor
+        # under the destination. The rule reads the colon, not the slash.
+        "drive.cbz": ("drive-letter", [good, ("C:evil.png", b"\x89PNG owned")]),
+        "bomb.cbz": ("ratio-cap", [("ch1/p1.png", b"\0" * BOMB_BYTES)]),
+    }
+    for filename, (reason, entries) in hostile.items():
+        report[filename] = {
+            "format": "zip", "rejects_with": reason,
+            "sha256": _write(out / filename, entries, "zip"),
+        }
+
+    # A whole-file-compressed tar whose expansion is a property of the
+    # CONTAINER, not of any member: listing it at all means decompressing all of
+    # it, which is how the first draft accepted an 11.94MB archive declaring
+    # 12GB with the budget counting zero bytes. Small on disk by construction --
+    # that is the attack.
+    #
+    # Named `.cbt`, NOT `.cbt.gz`, and the name is the point. `job.classify`
+    # admits an item by EXTENSION and `.gz` is not one AC-6 names, so a
+    # `.cbt.gz` is refused before a single safety rule runs -- which would make
+    # this fixture test the extension list rather than the budget. The file a
+    # user actually double-clicks is a `.cbt` that happens to be gzip inside,
+    # and `detect_format` reads the signature, so that is what this is.
+    tar_bomb = out / "bomb.cbt"
+    tar_bomb.parent.mkdir(parents=True, exist_ok=True)
+    payload = bytes(BOMB_BYTES)
+    with gzip.GzipFile(filename="", mode="wb", fileobj=open(tar_bomb, "wb"),
+                       mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w|", format=tarfile.GNU_FORMAT) as tf:
+            info = tarfile.TarInfo("ch1/p1.png")
+            info.size = len(payload)
+            info.mtime = 0
+            info.mode = 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            tf.addfile(info, io.BytesIO(payload))
+    report["bomb.cbt"] = {
+        "format": "tar", "rejects_with": "ratio-cap",
+        "sha256": sha256_file(tar_bomb),
+    }
+
+    # The 7z blind spot, built so it is VISIBLE rather than asserted about.
+    # py7zr reports a compressed size for the first member of a solid block and
+    # None for every other member of it, so the bomb is the SECOND member here:
+    # its declared_compressed is 0, the per-member ratio rule cannot fire on it,
+    # and what refuses it is the absolute per-file byte cap. At the default
+    # 128MB cap an 8MB member is legitimate and this archive is accepted --
+    # which is the honest answer and is what check_archives asserts, alongside
+    # the tightened-cap run that refuses it. A rule that cannot fire on a format
+    # should be documented by a fixture, not by a comment.
+    report["bomb.cb7"] = {
+        "format": "sevenzip", "rejects_with": "file-size-cap",
+        "rejects_only_under": "max_file_bytes",
+        "sha256": _write(out / "bomb.cb7",
+                         [("ch1/p0.png", _archive_page(1)),
+                          ("ch1/p1.png", bytes(BOMB_BYTES))], "sevenzip"),
+    }
+
+    report["symlink.cbt"] = {
+        "format": "tar", "rejects_with": "link-entry",
+        "sha256": _write_symlink_tar(out / "symlink.cbt"),
+    }
+
+    def many():
+        for i in range(MEMBERS_COUNT):
+            yield f"ch1/p{i:05d}.png", b"x"
+    report["members.cbz"] = {
+        "format": "zip", "rejects_with": "member-count",
+        "members": MEMBERS_COUNT,
+        "sha256": _write(out / "members.cbz", many(), "zip"),
+    }
+
+    # --- AC-12's fixture --------------------------------------------------
+    def big():
+        for i in range(1, BIG_PAGES + 1):
+            yield f"ch1/p{i}.png", _archive_page(i)
+    report["big.cbz"] = {
+        "format": "zip", "pages": BIG_PAGES,
+        "page_size": [ARCHIVE_W, ARCHIVE_H],
+        "sha256": _write(out / "big.cbz", big(), "zip"),
+    }
+
+    report["_uncommitted"] = UNCOMMITTED
+    report["_comicinfo_sha256"] = hashlib.sha256(COMICINFO).hexdigest()
+    return report
+
+
 def write_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     # sort_keys + fixed separators + trailing newline: byte-identical across runs.
@@ -678,6 +940,13 @@ def write_json(path, obj):
 def main():
     for sub in ("smoke", "bubbles", "cbz", "zh", "ko"):
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
+    # archives/ is cleared by CONTENT, not wholesale: benign.cbr is committed
+    # and cannot be regenerated -- no free tool writes RAR -- so an rmtree here
+    # would delete the one fixture AC-6's .cbr clause is verifiable against and
+    # nothing in this file could put it back.
+    for leftover in sorted((FIXTURES / "archives").glob("*")):
+        if leftover.is_file() and leftover.suffix.lower() not in (".cbr", ".rar"):
+            leftover.unlink()
 
     smoke = gen_smoke()
     smoke.update(gen_smoke_columns())
@@ -685,15 +954,18 @@ def main():
     cbz = gen_cbz()
     zh = gen_cjk("zh", ZH_PHRASES, ZH_FONTS)
     ko = gen_cjk("ko", KO_PHRASES, KO_FONTS)
+    archives = gen_archives()
 
     write_json(FIXTURES / "smoke" / "expected.json", smoke)
     write_json(FIXTURES / "bubbles" / "expected.json", bubbles)
     write_json(FIXTURES / "cbz" / "expected.json", cbz)
     write_json(FIXTURES / "zh" / "expected.json", zh)
     write_json(FIXTURES / "ko" / "expected.json", ko)
+    write_json(FIXTURES / "archives" / "expected.json", archives)
 
-    n = len(smoke) + len(bubbles) + len(cbz) + len(zh) + len(ko)
-    print(f"generated {n} fixtures + 5 expected.json under {FIXTURES}")
+    n = (len(smoke) + len(bubbles) + len(cbz) + len(zh) + len(ko)
+         + len([k for k in archives if not k.startswith("_")]))
+    print(f"generated {n} fixtures + 6 expected.json under {FIXTURES}")
     for lang, pages in (("zh", zh), ("ko", ko)):
         for name in sorted(pages):
             print(f"  {lang}/{name}  {len(pages[name]['bubbles'])} bubbles, {pages[name]['font']}")
@@ -704,6 +976,10 @@ def main():
     for name in sorted(cbz):
         print(f"  cbz/{name}  {len(CBZ_MEMBERS)} pages, "
               f"identical ordinals {cbz[name]['identical_ordinals']}")
+    for name in sorted(k for k in archives if not k.startswith("_")):
+        meta = archives[name]
+        note = meta.get("rejects_with") or f"{meta.get('pages', 3)} pages"
+        print(f"  archives/{name}  {meta['format']}, {note}")
     return 0
 
 

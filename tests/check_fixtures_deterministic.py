@@ -26,7 +26,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "fixtures"
-SUBDIRS = ("smoke", "bubbles", "cbz", "zh", "ko")
+# Phase 6 adds "archives", and the 0a gate re-runs over it for the reason the
+# build order gives: ZipFile stamps the current mtime into every member by
+# default, so the two fixtures carrying AC-11 and AC-12 would be byte-identically
+# irreproducible in exactly the place reproducibility is load-bearing.
+SUBDIRS = ("smoke", "bubbles", "cbz", "zh", "ko", "archives")
+
+# Not regenerated and not compared: no free tool writes RAR, so benign.cbr is a
+# committed binary the generator cannot produce. Deleting it as part of "empty
+# the tree" would destroy the one fixture AC-6's .cbr clause is verifiable
+# against, and comparing it would compare a file nothing in this run wrote.
+KEEP_SUFFIXES = (".cbr", ".rar")
 GENERATOR = ROOT / "tests" / "gen_fixtures.py"
 
 
@@ -43,13 +53,19 @@ def snapshot():
     out = {}
     for sub in SUBDIRS:
         for p in sorted((FIXTURES / sub).rglob("*")):
-            if p.is_file():
+            if p.is_file() and p.suffix.lower() not in KEEP_SUFFIXES:
                 out[p.relative_to(FIXTURES).as_posix()] = sha256(p)
     return out
 
 
 def generate(label):
     for sub in SUBDIRS:
+        if sub == "archives":
+            # By content, so the committed .cbr survives -- see KEEP_SUFFIXES.
+            for p in sorted((FIXTURES / sub).glob("*")):
+                if p.is_file() and p.suffix.lower() not in KEEP_SUFFIXES:
+                    p.unlink()
+            continue
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
     r = subprocess.run([sys.executable, str(GENERATOR)], cwd=ROOT,
                        capture_output=True,

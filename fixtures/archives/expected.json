@@ -1,0 +1,217 @@
+{
+  "_comicinfo_sha256": "ce8164d3ce22aa16504a6afddc58034a6ee4cdf19c655f170304fffb0e9980de",
+  "_uncommitted": [
+    "big.cbz",
+    "members.cbz",
+    "bomb.cbz",
+    "bomb.cbt",
+    "bomb.cb7"
+  ],
+  "absolute.cbz": {
+    "format": "zip",
+    "rejects_with": "absolute-path",
+    "sha256": "3eb7bce183cbea11106d4f049c5cc9c5edbc0000cad9e8694a445cd538b010d3"
+  },
+  "benign.7z": {
+    "extra_member": "credits.txt",
+    "format": "sevenzip",
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png"
+    ],
+    "members": [
+      "ComicInfo.xml",
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png",
+      "credits.txt"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "page_size": [
+      600,
+      900
+    ],
+    "sha256": "e68a656a978fb83ac9489278c7d754863b76940ad115d26c7c55f9cb3c86778d"
+  },
+  "benign.cb7": {
+    "extra_member": "credits.txt",
+    "format": "sevenzip",
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png"
+    ],
+    "members": [
+      "ComicInfo.xml",
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png",
+      "credits.txt"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "page_size": [
+      600,
+      900
+    ],
+    "sha256": "e68a656a978fb83ac9489278c7d754863b76940ad115d26c7c55f9cb3c86778d"
+  },
+  "benign.cbt": {
+    "extra_member": "credits.txt",
+    "format": "tar",
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png"
+    ],
+    "members": [
+      "ComicInfo.xml",
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png",
+      "credits.txt"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "page_size": [
+      600,
+      900
+    ],
+    "sha256": "9fdcad8ae90be2d3980def087cbd91baad9d48e5efa4a707357567cfbb9bef99"
+  },
+  "benign.cbz": {
+    "extra_member": "credits.txt",
+    "format": "zip",
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png"
+    ],
+    "members": [
+      "ComicInfo.xml",
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png",
+      "credits.txt"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "page_size": [
+      600,
+      900
+    ],
+    "sha256": "72eea58c3fe5b8b31f3ecd9ab6bb37ff3f0181a9964a15073acf0581de71e0ee"
+  },
+  "benign.tar": {
+    "extra_member": "credits.txt",
+    "format": "tar",
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png"
+    ],
+    "members": [
+      "ComicInfo.xml",
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png",
+      "credits.txt"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "page_size": [
+      600,
+      900
+    ],
+    "sha256": "9fdcad8ae90be2d3980def087cbd91baad9d48e5efa4a707357567cfbb9bef99"
+  },
+  "benign.zip": {
+    "extra_member": "credits.txt",
+    "format": "zip",
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png"
+    ],
+    "members": [
+      "ComicInfo.xml",
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png",
+      "credits.txt"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "page_size": [
+      600,
+      900
+    ],
+    "sha256": "72eea58c3fe5b8b31f3ecd9ab6bb37ff3f0181a9964a15073acf0581de71e0ee"
+  },
+  "big.cbz": {
+    "format": "zip",
+    "page_size": [
+      600,
+      900
+    ],
+    "pages": 200,
+    "sha256": "9187cfcb94ffe57e02c3dcedc4401b32690e6dd1f4f9e29812278ad63f9cd4cc"
+  },
+  "bomb.cb7": {
+    "format": "sevenzip",
+    "rejects_only_under": "max_file_bytes",
+    "rejects_with": "file-size-cap",
+    "sha256": "8741653ddfcdb6faaaac394d1190225d7eb8b15b044267307bf8fb1a084d703b"
+  },
+  "bomb.cbt": {
+    "format": "tar",
+    "rejects_with": "ratio-cap",
+    "sha256": "eaa9a60231b93fe5dac0fece358d70b0d9925686fad21661e2a3ef2327470372"
+  },
+  "bomb.cbz": {
+    "format": "zip",
+    "rejects_with": "ratio-cap",
+    "sha256": "b0fce56979da1f72f4e0bb7ec1323ef0762e40c4e619774d4799fc6542418cae"
+  },
+  "drive.cbz": {
+    "format": "zip",
+    "rejects_with": "drive-letter",
+    "sha256": "91f4a13f42f45e1f048f9e52f64a45a9a101e8a6756b84c3defe1b221b46e02d"
+  },
+  "members.cbz": {
+    "format": "zip",
+    "members": 5001,
+    "rejects_with": "member-count",
+    "sha256": "54ec0438cdc9e9fec04e220a883fda931b741420ddb887eb87b93966ec5a3b66"
+  },
+  "slip.cbz": {
+    "format": "zip",
+    "rejects_with": "parent-traversal",
+    "sha256": "5a9cba319f7a77d1cef970d806a293aa9dc1c51b4b1b019c881f532253c6ff23"
+  },
+  "symlink.cbt": {
+    "format": "tar",
+    "rejects_with": "link-entry",
+    "sha256": "b5a0feec6ec8d4f4204f63796576a291c3070a74089d6fbbb17752edf127363f"
+  }
+}

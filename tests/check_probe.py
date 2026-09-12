@@ -31,7 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from lib.result import Checks, run, skip
+from lib.result import Checks, run
 
 BASE = os.environ.get("MT_BASE_URL", "").rstrip("/")
 KEY = os.environ.get("MT_API_KEY", "")
