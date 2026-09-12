@@ -49,6 +49,10 @@ class StubProvider:
         self._in_flight = 0
         self._lock = threading.Lock()
         self.last_payload = None
+        # Every payload, in arrival order. last_payload answers "what did the
+        # most recent request carry"; a section asking "did ANY request carry
+        # an image" needs all of them.
+        self.payloads = []
 
         stub = self
         fixtures = _load_fixtures()
@@ -90,6 +94,7 @@ class StubProvider:
                         stub.last_payload = json.loads(raw or b"{}")
                     except ValueError:
                         stub.last_payload = None
+                    stub.payloads.append(stub.last_payload)
                 try:
                     if stub.delay:
                         threading.Event().wait(stub.delay)
@@ -200,3 +205,22 @@ def _chat_reply(payload, replies=None) -> bytes:
             ],
         }
     ).encode()
+
+
+def vision_capable(stub, model: str) -> None:
+    """Stipulate that (stub.url, model) reads images, so a job does not probe.
+
+    The stub cannot read pixels: it replays canned text. Since US-C-02 a Job
+    with a client probes the provider once before its first page and latches
+    text-only when the token does not come back -- which, against this stub,
+    it never does. That is the product behaving correctly, and it would put
+    every job-running section in the suite behind a text-only client and a
+    warning they are not about. This seeds the client-side success cache the
+    way a real vision-capable endpoint would have, so those sections assert
+    what they were written to assert. The probe itself is asserted in
+    check_batch's [probe] section, which does NOT call this.
+    """
+    from sidecar import llm  # noqa: PLC0415
+
+    with llm._VISION_LOCK:
+        llm._VISION_OK.add((stub.url, model))

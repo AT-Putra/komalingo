@@ -15,6 +15,7 @@ half-page on disk.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -120,9 +121,42 @@ def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_
     return len(regions)
 
 
+# The page image the provider sees for context, bounded. A raw scan is
+# 1500-2500px on the long edge and a few MB as PNG; base64 in a JSON body on
+# every page of a 200-page volume is a payload the request timeout was never
+# sized for. 1280px keeps every bubble legible to a vision model and a
+# mostly-white manga page compresses to well under 500KB.
+PAGE_CONTEXT_LONG_EDGE = 1280
+
+
+def page_context_png(img: Image.Image) -> bytes:
+    """The page, downscaled to PAGE_CONTEXT_LONG_EDGE, as PNG bytes."""
+    # Convert BEFORE resizing: on a palette or 1-bit source PIL silently
+    # downgrades LANCZOS to NEAREST, and a nearest-neighbour downscale of a
+    # screentoned page is moire the model has to read through.
+    rgb = img.convert("RGB")
+    w, h = rgb.size
+    scale = PAGE_CONTEXT_LONG_EDGE / max(w, h)
+    small = rgb if scale >= 1 else rgb.resize(
+        (max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+    buf = io.BytesIO()
+    small.save(buf, "PNG", optimize=False, compress_level=6)
+    return buf.getvalue()
+
+
 def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_LANG,
-              source: str = DEFAULT_SOURCE) -> None:
+              source: str = DEFAULT_SOURCE, img: Image.Image | None = None) -> None:
     """Target-language text per region. One LLM request for the whole page.
+
+    `img` is the page the regions came from, and it TRAVELS with the request
+    when the client has vision -- that is the page context AC-9 is about, and
+    what makes a vision-capable model worth probing for. Until US-C-02 this
+    function never passed it: the client accepted page_png, honoured
+    text_only, and check_provider proved both against a direct call, while
+    the pipeline sent text alone on every page. A vision model saw nothing.
+    The client drops the image itself when text_only is latched, so this
+    passes it unconditionally and the latch stays the single point of
+    decision.
 
     client is injected -- there is no default and no module-level base URL. The
     credentials come from the Settings UI at runtime, never from this file.
@@ -141,6 +175,7 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
 
         out = asyncio.run(
             client.translate_page([Region(id=r["id"], text=r["text"]) for r in regions],
+                                  page_png=page_context_png(img) if img is not None else None,
                                   lang=lang, source=source)
         )
         for r in regions:
@@ -265,7 +300,7 @@ def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAU
         with _MODEL_LOCK:
             regions = detect(src, page)
             ocr_calls = ocr(regions, src, page, source)
-        translate(regions, page, client, lang, source)
+        translate(regions, page, client, lang, source, img=original)
         cleaned, inpaint_calls = inpaint(original, regions, page)
         drawn, fit_summary = render(cleaned, regions, page, client)
         out_path = encode_and_write(drawn, src_path, dest_dir, page)
@@ -712,7 +747,7 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         # ocr are not yet persisted here (_persist is at the end), so the
         # cost is one page's re-detect on the next run.
         _check_cancel(cancel, item_id, pages_done)
-        translate(regions, ordinal, client, lang, source)
+        translate(regions, ordinal, client, lang, source, img=img)
         cache.write_translation(
             h, lang, model, {r["id"]: r.get("translation", "") for r in regions}
         )

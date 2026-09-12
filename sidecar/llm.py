@@ -31,8 +31,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import http.client
+import io
 import json
 import os
+import random
 import threading
 import urllib.error
 import urllib.request
@@ -45,6 +47,47 @@ MAX_CONCURRENT = 3
 _GATE = threading.BoundedSemaphore(MAX_CONCURRENT)
 MAX_REGIONS = 40  # above this a page is split across requests
 TIMEOUT = 120
+
+# -- the vision probe (AC-9) -----------------------------------------------
+#
+# No 0/O, 1/I, 5/S, 8/B or 2/Z. The reply test is an exact substring match,
+# so a model that reads O as 0 would fail a probe it in fact passed -- and
+# with the full alphabet a 4-char token carried a confusable pair about 73%
+# of the time. 32**4 is still ~1.05M tokens.
+PROBE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+# (base_url, model) pairs a probe has SUCCEEDED against, for this process.
+# Successes only. A cached failure would turn one gateway hiccup into
+# text-only for every later job until the sidecar restarts, with nothing in
+# the UI that could retry it; a failure is re-probed by the next job, which
+# costs one request. D.4 asks for the result to be stored per pair and
+# invalidated on either change -- keying on the pair is the invalidation.
+_VISION_OK: set[tuple[str, str]] = set()
+_VISION_LOCK = threading.Lock()
+
+
+def probe_png(token: str) -> bytes:
+    """A PNG with `token` painted large and black on white. No prompt text.
+
+    Built HERE, in the product, and imported by check_probe rather than
+    re-painted there: the live gate then exercises the image the app sends,
+    not a look-alike. 64px -- PIL's default bitmap font is ~11px and at that
+    size the probe measured glyph resolution rather than whether the model
+    reads pixels, flipping red and green across runs against a healthy
+    endpoint.
+    """
+    from PIL import Image, ImageDraw, ImageFont  # noqa: PLC0415 -- probe-only
+
+    img = Image.new("RGB", (320, 120), "white")
+    ImageDraw.Draw(img).text((20, 20), token, fill="black",
+                             font=ImageFont.load_default(size=64))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def probe_token() -> str:
+    return "".join(random.choices(PROBE_ALPHABET, k=4))
 
 # Phase 5: the prompt is ASSEMBLED from the job's source and target rather
 # than hardcoding "Japanese to English". The names are what the model reads;
@@ -122,6 +165,10 @@ class LLMClient:
         # A client that starts text-only silently gives up OCR correction.
         self.text_only = False
         self.text_only_reason = ""
+        # Why the last probe could not run, when it could not. Distinct from
+        # text_only_reason: one says "this model cannot read images", the
+        # other says "nobody found out".
+        self.probe_error = ""
 
     # -- transport ---------------------------------------------------------
 
@@ -298,12 +345,28 @@ class LLMClient:
 
     # -- vision probe ------------------------------------------------------
 
+    # Statuses that are EVIDENCE the model cannot take an image: the request
+    # was understood and the image part was refused. Everything else -- 0
+    # (unreachable), 401/403 (a key problem, not a vision one), 408, 429, 5xx
+    # -- says nothing about vision and must not latch: a 429 on the one probe
+    # request would otherwise put a 200-page job text-only and write every
+    # page's translation into the cache under a key that does not record it,
+    # so a later vision-capable run hits those pages and never sends the image.
+    # Loud beats silent here: an unlatched client whose provider is really
+    # down fails each item with the provider's own body (AC-8), which the user
+    # can read; a wrongly latched one degrades every page and says so once.
+    _IMAGE_REFUSED = (400, 413, 415, 422)
+
     async def probe_vision(self, png: bytes, expect: str) -> bool:
         """Ask the model to read a token painted into an image.
 
-        On failure this latches text-only mode with a reason. The latch is
-        never set speculatively -- only by an observed failure, so a working
-        vision model is never downgraded.
+        Latches text-only ONLY on evidence of a text-only model: a reply that
+        was produced and does not contain the token, or a status that says
+        the image part was refused (_IMAGE_REFUSED). A probe that could not
+        run -- unreachable, rate-limited, a proxy answering 200 with HTML, an
+        empty choices list -- returns False WITHOUT latching and records why
+        in `probe_error`, so the caller can warn "the probe could not run"
+        rather than "the model is text-only". The latch is never speculative.
         """
         payload = {
             "model": self.model,
@@ -323,17 +386,71 @@ class LLMClient:
                 }
             ],
         }
+        self.probe_error = ""
         try:
             reply = await self._call("/chat/completions", payload)
+        except ProviderError as e:
+            if e.status in self._IMAGE_REFUSED:
+                self.text_only = True
+                self.text_only_reason = (
+                    f"vision probe failed; the image part was refused "
+                    f"(HTTP {e.status}: {e.body[:200]!r})"
+                )[:400]
+            else:
+                self.probe_error = f"vision probe could not run (HTTP {e.status}: {e.body[:200]!r})"[:400]
+            return False
+        except (SettingsError, ValueError) as e:
+            # A base URL without a scheme, or a 200 whose body is not JSON (a
+            # captive portal, a proxy error page). Neither is a fact about the
+            # model. Until this branch existed either one escaped the probe
+            # entirely and, called from a worker thread, killed the worker.
+            self.probe_error = f"vision probe could not run ({type(e).__name__}: {str(e)[:200]})"[:400]
+            return False
+
+        try:
             content = reply["choices"][0]["message"]["content"]
             if isinstance(content, list):
                 content = "".join(p.get("text", "") for p in content)
-            ok = expect.lower() in content.lower()
-        except ProviderError as e:
-            ok = False
-            content = f"HTTP {e.status}: {e.body[:200]}"
+            if not isinstance(content, str):
+                raise TypeError(f"content is {type(content).__name__}")
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
+            self.probe_error = (f"vision probe could not run (unexpected reply shape: "
+                                f"{type(e).__name__}: {e})")[:400]
+            return False
 
-        if not ok:
-            self.text_only = True
-            self.text_only_reason = f"vision probe failed; expected {expect!r}, got {content!r}"[:400]
-        return ok
+        if expect.lower() in content.lower():
+            return True
+        self.text_only = True
+        self.text_only_reason = f"vision probe failed; expected {expect!r}, got {content!r}"[:400]
+        return False
+
+    def ensure_vision(self) -> tuple[bool, str]:
+        """Probe once per (base_url, model) per process; latch on evidence.
+
+        The call the product was missing. probe_vision existed and text_only
+        was honoured in translate_page, but nothing outside check_probe ever
+        ran the probe -- so a text-only model was never detected in the app
+        and every page went out with an image the provider could not read.
+        Job._ensure_vision calls this on the first worker before any item is
+        claimed; /api/item and /api/translate call it after building their
+        client, because the image is sent on every route and a route that
+        never probed would send it blind.
+
+        Returns (ok, reason). A latched client returns its existing reason
+        without a request; a pair cached as vision-capable returns True
+        without a request; a probe that could not run returns False with
+        probe_error and does NOT latch -- the next call tries again.
+        """
+        if self.text_only:
+            return False, self.text_only_reason
+        key = (self.base_url, self.model)
+        with _VISION_LOCK:
+            if key in _VISION_OK:
+                return True, ""
+        token = probe_token()
+        ok = asyncio.run(self.probe_vision(probe_png(token), token))
+        if ok:
+            with _VISION_LOCK:
+                _VISION_OK.add(key)
+            return True, ""
+        return False, self.text_only_reason or self.probe_error

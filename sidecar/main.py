@@ -226,6 +226,24 @@ def unhandled(request: Request, e: Exception) -> Response:
     )
 
 
+def _probed(client):
+    """Run the vision probe for a route-built client; return its warning or "".
+
+    The page image goes out on every route (pipeline.translate), and the
+    only thing that stops it going out to a model that cannot take it is the
+    client's text_only latch -- which only a probe sets. Job runs one per
+    batch. These two routes build a fresh client per request and, until this
+    existed, went straight to translate: a text-only model that had worked
+    all along failed on its first page with the provider's 400 and nothing
+    in the UI said why. Cached per (base_url, model), so the cost is one
+    request per pair per process, not per item.
+    """
+    if client is None:
+        return ""
+    ok, reason = client.ensure_vision()
+    return "" if ok else reason
+
+
 def _client(settings: Settings | None):
     """Build an LLMClient, or None for the offline placeholder path.
 
@@ -285,8 +303,10 @@ def translate(req: TranslateRequest):
         # (US-P1-11). The one failure the user could have fixed in two seconds
         # cost them a restart.
         client = _client(req.settings)
+        vision_warning = _probed(client)
         record = pipeline.run_page(req.src_path, req.dest_dir, req.page, client, req.source,
                                    req.lang)
+        record["vision_warning"] = vision_warning
     except ProviderError as e:
         return _provider_response(e)
     except SettingsError as e:
@@ -332,10 +352,13 @@ def translate_item(req: ItemRequest):
     page directory is keyed on content and on nothing about the run.
     """
     try:
+        client = _client(req.settings)
+        vision_warning = _probed(client)
         record = pipeline.run_item(
             req.src_path, req.dest_dir, req.job_id, req.item_id,
-            _client(req.settings), req.lang, req.source,
+            client, req.lang, req.source,
         )
+        record["vision_warning"] = vision_warning
     except ProviderError as e:
         return _provider_response(e)
     except SettingsError as e:

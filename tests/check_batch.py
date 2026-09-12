@@ -58,7 +58,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 from sidecar import atomic, cache, job, llm, pipeline, safety  # noqa: E402
 from sidecar.llm import LLMClient, Region  # noqa: E402
 from lib.result import Checks, run, skip  # noqa: E402
-from lib.stub_provider import StubProvider  # noqa: E402
+from lib.stub_provider import StubProvider, vision_capable  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(ROOT, "fixtures")
@@ -149,6 +149,7 @@ def check_scan(c, src):
 
 
 def check_statuses(c, src, out, stub):
+    vision_capable(stub, "stub-model")  # this section is about statuses, not the probe
     client = LLMClient(stub.url, "", "stub-model")
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
@@ -307,6 +308,194 @@ def check_warning_once(c, src, out):
             f"and exactly one item carries it ({[i['item_id'] for i in carried]})")
 
 
+def _chats_with_image(stub):
+    """(chat payloads, those carrying an image_url part). Three asserts ask this."""
+    chats = [p for p in stub.payloads if p and p.get("messages")]
+    with_image = [
+        p for p in chats
+        if any(part.get("type") == "image_url"
+               for m in p["messages"]
+               for part in (m.get("content") if isinstance(m.get("content"), list) else []))
+    ]
+    return chats, with_image
+
+
+def check_probe_wiring(c, src, out, stub):
+    """[probe] AC-9's other half: the JOB runs the vision probe, once.
+
+    check_probe proves the latch against a live model. This proves the
+    product reaches it -- which, until US-C-02, nothing did: probe_vision
+    existed, translate_page honoured text_only, and no caller in the app ran
+    the probe, so a text-only model was never detected and every page went
+    out carrying an image the provider could not read.
+
+    probe_vision is patched to count and to answer a scripted verdict, the
+    same way check_cancel patches detect and ocr: the question is whether the
+    job calls it, how many times, and what happens downstream -- not whether
+    a stub can read a picture, which it cannot.
+    """
+    calls = []
+    verdict = {"ok": False}
+    original = LLMClient.probe_vision
+
+    async def scripted(self, png, expect):
+        calls.append(expect)
+        if not verdict["ok"]:
+            self.text_only = True
+            self.text_only_reason = f"vision probe failed; expected {expect!r}, got 'SCRIPTED'"
+        return verdict["ok"]
+
+    LLMClient.probe_vision = scripted
+    try:
+        paths = [os.path.join(src, n) for n in ("vol1.cbz", "vol2.cb7")]
+
+        # -- a text-only provider: one probe, one warning, no images -------
+        stub.payloads.clear()
+        client = LLMClient(stub.url, "", "probe-model-a")
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = job.run_job(paths, os.path.join(out, "probe-a"),
+                                 "check-batch-probe-a", client, workers=2)
+        c.check(len(calls) == 1,
+                f"[probe] a two-item, two-worker job probes exactly ONCE "
+                f"(probed {len(calls)} times)")
+        reasons = [w for w in status["warnings"] if "vision probe failed" in w]
+        c.check(len(reasons) == 1 and "SCRIPTED" in reasons[0],
+                f"[probe] the text-only reason surfaces as ONE job warning "
+                f"({status['warnings']})")
+        c.check(all(i["status"] == job.OK for i in status["items"]),
+                f"[probe] and the job still completes text-only "
+                f"({[(i['item_id'], i['status']) for i in status['items']]})")
+        chats, with_image = _chats_with_image(stub)
+        c.check(chats and not with_image,
+                f"[probe] after the latch, NO translate request carried an image "
+                f"({len(with_image)} of {len(chats)} did)")
+
+        # -- a vision-capable provider: probe once, cache, images travel ---
+        calls.clear()
+        verdict["ok"] = True
+        stub.payloads.clear()
+        client = LLMClient(stub.url, "", "probe-model-b")
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = job.run_job(paths, os.path.join(out, "probe-b"),
+                                 "check-batch-probe-b", client, workers=2)
+        c.check(len(calls) == 1,
+                f"[probe] a vision-capable provider is probed once ({len(calls)})")
+        c.check(not any("vision probe" in w for w in status["warnings"]),
+                f"[probe] and raises no text-only warning ({status['warnings']})")
+        chats, with_image = _chats_with_image(stub)
+        c.check(chats and len(with_image) == len(chats),
+                f"[probe] every translate request carried the page image "
+                f"({len(with_image)} of {len(chats)})")
+
+        # -- the per-(base_url, model) cache: same pair, no second probe ---
+        calls.clear()
+        client = LLMClient(stub.url, "", "probe-model-b")
+        with contextlib.redirect_stdout(io.StringIO()):
+            job.run_job(paths, os.path.join(out, "probe-b2"),
+                        "check-batch-probe-b2", client, workers=2)
+        c.check(len(calls) == 0,
+                f"[probe] a second job on the same (base_url, model) does not "
+                f"re-probe -- the success is cached ({len(calls)} calls)")
+
+        # -- a different model is a different pair --------------------------
+        calls.clear()
+        client = LLMClient(stub.url, "", "probe-model-c")
+        with contextlib.redirect_stdout(io.StringIO()):
+            job.run_job(paths, os.path.join(out, "probe-c"),
+                        "check-batch-probe-c", client, workers=2)
+        c.check(len(calls) == 1,
+                f"[probe] a different model on the same base_url is probed "
+                f"afresh ({len(calls)} calls)")
+
+        # -- a failure is NOT cached: the next job on that pair tries again --
+        calls.clear()
+        client = LLMClient(stub.url, "", "probe-model-a")
+        with contextlib.redirect_stdout(io.StringIO()):
+            job.run_job(paths, os.path.join(out, "probe-a2"),
+                        "check-batch-probe-a2", client, workers=2)
+        c.check(len(calls) == 1,
+                f"[probe] a pair whose probe FAILED earlier is probed again by "
+                f"the next job -- one hiccup is not text-only until restart "
+                f"({len(calls)} calls)")
+
+        # -- a probe that RAISES must not kill the worker -------------------
+        # The architect's reproduction: _ensure_vision ran outside the
+        # per-item boundary, a one-item job has one worker, and anything the
+        # probe let escape left that job at done=false forever.
+        async def exploding(self, png, expect):
+            raise RuntimeError("proxy answered with a captive-portal page")
+
+        LLMClient.probe_vision = exploding
+        client = LLMClient(stub.url, "", "probe-model-x")
+        with contextlib.redirect_stdout(io.StringIO()):
+            batch = job.Job("check-batch-probe-x", paths[:1], os.path.join(out, "probe-x"),
+                            client, workers=1).start()
+            finished = batch.wait(15)
+            status = batch.status()
+        c.check(finished and status["done"],
+                f"[probe] a one-item job whose probe RAISES still reaches done "
+                f"(finished={finished}, done={status['done']})")
+        c.check(any("vision probe error" in w and "RuntimeError" in w for w in status["warnings"]),
+                f"[probe] and the job warns with the exception's name ({status['warnings']})")
+        c.check(all(i["status"] in (job.OK, job.FAILED) for i in status["items"]),
+                f"[probe] and the item reached a terminal status "
+                f"({[(i['item_id'], i['status']) for i in status['items']]})")
+    finally:
+        LLMClient.probe_vision = original
+
+    # -- the REAL probe against a base URL with no scheme -------------------
+    # SettingsError out of _request, not ProviderError: the case that killed
+    # the worker before probe_vision caught it. Real probe_vision, one item.
+    client = LLMClient("localhost:1/v1", "", "probe-model-y")
+    with contextlib.redirect_stdout(io.StringIO()):
+        batch = job.Job("check-batch-probe-y", paths[:1], os.path.join(out, "probe-y"),
+                        client, workers=1).start()
+        finished = batch.wait(15)
+        status = batch.status()
+    c.check(finished and status["done"],
+            f"[probe] a scheme-less base URL: the job still reaches done "
+            f"(finished={finished})")
+    c.check(not client.text_only and any("could not run" in w for w in status["warnings"]),
+            f"[probe] and it did NOT latch text-only -- a probe that could not run "
+            f"is not evidence about the model (text_only={client.text_only}, "
+            f"warnings={status['warnings']})")
+
+    # -- a 5xx on the probe does not latch either ---------------------------
+    with StubProvider(status=500, delay=0) as down:
+        client = LLMClient(down.url, "", "probe-model-z")
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = job.run_job(paths[:1], os.path.join(out, "probe-z"),
+                                 "check-batch-probe-z", client, workers=1)
+    c.check(not client.text_only,
+            f"[probe] HTTP 500 on the probe does not latch text-only "
+            f"(text_only={client.text_only})")
+    c.check(any("could not run (HTTP 500" in w for w in status["warnings"]),
+            f"[probe] and the warning says the probe could not RUN, not that the "
+            f"model is text-only ({status['warnings']})")
+    c.check(all(i["status"] == job.FAILED for i in status["items"]),
+            f"[probe] and the item fails with the provider's own error rather "
+            f"than degrading silently ({[(i['status'], i['reason'][:50]) for i in status['items']]})")
+
+    # -- the single-file routes probe too -----------------------------------
+    # The image goes out on every route; only Job probed. /api/item is the
+    # UI's primary flow. main._probed is what the two routes call.
+    from sidecar import main as sidecar_main
+
+    client = LLMClient(stub.url, "", "probe-model-r")   # a fresh pair, never probed
+    reason = sidecar_main._probed(client)
+    c.check(client.text_only and "vision probe failed" in reason,
+            f"[probe] main._probed latches against the text-only stub and returns "
+            f"the reason ({reason[:60]!r})")
+    stub.payloads.clear()   # the probe's own request carried the image, by design
+    with contextlib.redirect_stdout(io.StringIO()):
+        record = pipeline.run_item(os.path.join(src, "vol1.cbz"), os.path.join(out, "probe-r"),
+                                   "check-batch-probe-r", None, client)
+    chats, with_image = _chats_with_image(stub)
+    c.check(chats and not with_image and len(record["pages"]) == 3,
+            f"[probe] and the item's pages then go out without an image "
+            f"({len(with_image)} of {len(chats)} carried one)")
+
+
 def check_same_hash(c, src, out):
     """The same pages from two containers, four workers, cold cache, x3.
 
@@ -443,6 +632,7 @@ def main():
         check_same_hash_files(c)
         check_running_refcount(c, src, out)
         check_cancel(c, src, out)
+        check_probe_wiring(c, src, out, stub)
 
     # Recorded, not ratcheted: the peak is a timing under a hard cap the
     # asserts above hold, and the item count is decided by the folder.

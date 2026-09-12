@@ -60,7 +60,7 @@ from PIL import Image  # noqa: E402
 from sidecar import cache, job  # noqa: E402
 from sidecar.llm import LLMClient  # noqa: E402
 from lib.result import Checks, run, skip  # noqa: E402
-from lib.stub_provider import StubProvider  # noqa: E402
+from lib.stub_provider import StubProvider, vision_capable  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(ROOT, "fixtures")
@@ -121,6 +121,7 @@ def events_of(text):
 
 def check_cancel(c, src, out, stub):
     """Cancel the moment page 1 is on disk; the item must stop short."""
+    vision_capable(stub, "stub-model")  # about cancel, not the probe
     client = LLMClient(stub.url, "", "stub-model")
     captured = io.StringIO()
     paths = [os.path.join(src, "vol1.cbz"), os.path.join(src, "scan.pdf")]

@@ -16,7 +16,6 @@ Run: uv run --project sidecar python tests/check_probe.py
 """
 
 import base64
-import io
 import json
 import os
 import random
@@ -25,7 +24,6 @@ import asyncio
 import urllib.error
 import urllib.request
 
-from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -73,40 +71,17 @@ def post(path, payload=None):
         return 0, f"{type(e.reason).__name__}: {e.reason}"
 
 
-# No 0/O, 1/I, 5/S, 8/B or 2/Z. `tok.lower() in reply.lower()` is an exact
-# substring test, so a model that reads O as 0 goes red at any font size --
-# and with ascii_uppercase + digits a 4-char draw contains at least one
-# confusable about 73% of the time. 32**4 is still ~1.05M, so the assert
-# keeps its strength; it stops measuring typography instead of vision.
-ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+# The alphabet and the image are the PRODUCT's, imported rather than
+# re-painted here. Until the job path was wired (US-C-02) this file painted
+# its own token and the app painted nothing, so the gate exercised a picture
+# the app never sent. Now sidecar.llm owns both and Job._ensure_vision sends
+# the same bytes this check does.
+from sidecar.llm import PROBE_ALPHABET as ALPHABET, probe_png  # noqa: E402
 
 
 def redact(text):
     """Never echo the live key, whatever the gateway reflected back."""
     return text.replace(KEY, "***") if KEY else text
-
-
-def token_image(tok):
-    """Paint a 4-char token large and black on white. No prompt text.
-
-    "Large" was a lie until the live sign-off ran this for the first time:
-    the token went out in PIL's default bitmap font, about 11px tall on a
-    320x120 canvas, and the assert then went red on roughly every other run
-    against a healthy endpoint. What that measures is whether a vision model
-    can resolve 11px glyphs, not whether it can read pixels at all, which is
-    what AC-9 asks. Rendered at 64px it is unambiguous.
-
-    Making the token legible cannot make a blind model pass: assert [5]
-    demands that a probe for a token that was NEVER painted still fails, so
-    a model replying with plausible noise is caught there, and assert [8]
-    demands the positive case succeed on the same image.
-    """
-    img = Image.new("RGB", (320, 120), "white")
-    ImageDraw.Draw(img).text((20, 20), tok, fill="black",
-                             font=ImageFont.load_default(size=64))
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return base64.b64encode(buf.getvalue()).decode()
 
 
 def attempt():
@@ -119,7 +94,8 @@ def attempt():
             "role": "user",
             "content": [
                 {"type": "text", "text": "Reply with only the characters written in this image."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{token_image(tok)}"}},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,"
+                                                     + base64.b64encode(probe_png(tok)).decode()}},
             ],
         }],
     }
@@ -181,7 +157,7 @@ def main():
 
     absent = "".join(random.choices(ALPHABET, k=8))
     painted = "".join(random.choices(ALPHABET, k=4))
-    png = base64.b64decode(token_image(painted))
+    png = probe_png(painted)
 
     ok = asyncio.run(client.probe_vision(png, absent))
     c.check(not ok, f"a probe for text that is not in the image fails ({painted!r} painted, {absent!r} demanded)")

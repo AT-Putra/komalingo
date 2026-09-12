@@ -339,6 +339,11 @@ class Job:
         self._pending: deque[Item] = deque()
         self._running: set[str] = set()
         self._cancel = threading.Event()
+        # The vision probe runs once per job, on whichever worker starts
+        # first; the others block on this lock until it has, so no page
+        # goes out before the client knows whether an image can go with it.
+        self._vision_lock = threading.Lock()
+        self._vision_done = False
         self._done = threading.Event()
         self._threads: list[threading.Thread] = []
         self._started = False
@@ -380,7 +385,44 @@ class Job:
 
     # -- the workers -------------------------------------------------------
 
+    def _ensure_vision(self) -> None:
+        """AC-9, the half the product had never wired: probe once per job.
+
+        Before this, LLMClient.probe_vision existed, translate_page honoured
+        text_only, and check_probe proved the latch -- and nothing in the app
+        called the probe, so a text-only model was never detected and every
+        page went out with an image it could not read. The result is per job
+        and surfaces ONCE, through the same `warned` set the cbr->cbz notice
+        uses: D.4 asks for one UI notice per job, not one per page.
+
+        Not in start(): POST /api/job answers with the first status snapshot
+        immediately, and a probe is a provider round trip.
+        """
+        if self.client is None or self._cancel.is_set():
+            return
+        with self._vision_lock:
+            if self._vision_done:
+                return
+            self._vision_done = True
+            try:
+                ok, reason = self.client.ensure_vision()
+            except Exception as e:  # noqa: BLE001 -- the boundary; see below
+                # This runs on a worker thread OUTSIDE the per-item boundary
+                # in _worker, and before this except existed anything the
+                # probe let escape killed the thread before it claimed an
+                # item. A one-item job has one worker: it never set _done,
+                # GET /api/job reported done=false forever, and a retry
+                # under the same job_id got 409. The probe now catches its
+                # own known failures (llm.probe_vision), so this is for the
+                # ones nobody predicted -- and the item's own translate will
+                # raise the same error inside a boundary that names it.
+                ok, reason = False, f"vision probe error ({type(e).__name__}: {str(e)[:200]})"[:400]
+        if not ok:
+            with self._lock:
+                self.warned.add(reason)
+
     def _worker(self) -> None:
+        self._ensure_vision()
         while True:
             # Claim and register under ONE lock. A claim outside the lock
             # leaves a moment where the queue is empty and the item is in

@@ -97,6 +97,8 @@ export interface PageRecord {
   };
   /** Present when the page cache is over its cap and could not evict. */
   cache_warning?: string | null;
+  /** Set by /api/translate: see ItemResult.vision_warning. */
+  vision_warning?: string;
   /** True when an edit for this page exists under a different model. */
   edit_on_other_model?: boolean;
   edited_region?: number;
@@ -107,6 +109,13 @@ export interface ItemResult {
   item_id: string;
   pages: PageRecord[];
   cache_warning: string | null;
+  /**
+   * Non-empty when the vision probe found the model text-only (every page
+   * was translated without its image) or could not run (the reason says
+   * which). The batch view carries the same sentence in JobStatus.warnings;
+   * this is the single-file flow's copy of it.
+   */
+  vision_warning?: string;
 }
 
 /** One row of AC-7's queue: what became of one file in the folder. */

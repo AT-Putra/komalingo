@@ -229,6 +229,7 @@ export default function App() {
           </div>
 
           {job?.cache_warning && <p className="warn">{job.cache_warning}</p>}
+          {job?.vision_warning && <p className="warn">{job.vision_warning}</p>}
 
           {progress ? (
             <p>
