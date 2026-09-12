@@ -244,8 +244,15 @@ def encode_and_write(img: Image.Image, src_path, dest_dir, page: int) -> str:
 
 
 def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAULT_SOURCE,
-             lang: str = DEFAULT_LANG) -> dict:
-    """One page through all seven stages, in order. Returns the regions record."""
+             lang: str = DEFAULT_LANG, cancel=None) -> dict:
+    """One page through all seven stages, in order. Returns the regions record.
+
+    `cancel` (Phase 9) is checked ONCE, before the first stage: a loose
+    image is one page, and one page is delivered whole or not at all -- a
+    check between stages would stop after detect with nothing on disk to
+    show for it, which is the same outcome as not starting.
+    """
+    _check_cancel(cancel, os.path.basename(os.fspath(src_path)), 0)
     with Image.open(atomic.long_path(src_path)) as src:
         src.load()
         original = src.convert("RGB").copy()
@@ -299,6 +306,29 @@ def write_regions(record: dict, dest_dir) -> str:
 
 # Serialises the detector and OCR across concurrent jobs. See run_item.
 _MODEL_LOCK = threading.Lock()
+
+
+class Cancelled(Exception):
+    """AC-13: the job's cancel token was set and this item stopped at a page
+    boundary. `pages_done` is how many pages were DELIVERED -- complete files
+    on disk, cached pages in the store -- before the stop.
+
+    Raised, not returned, because the item did not finish: the repack must
+    not run, and the Item boundary in job.py is what turns it into the
+    CANCELLED status with this count in the reason.
+    """
+
+    def __init__(self, item_id: str, pages_done: int):
+        super().__init__(f"cancelled after {pages_done} pages of {item_id!r}")
+        self.item_id, self.pages_done = item_id, pages_done
+
+
+def _check_cancel(cancel, item_id: str, pages_done: int) -> None:
+    """Raise Cancelled if the token is set. `cancel` is anything with
+    is_set() -- a threading.Event from job.Job -- or None for the routes
+    that have no job to be cancelled from."""
+    if cancel is not None and cancel.is_set():
+        raise Cancelled(item_id, pages_done)
 
 
 class CacheMiss(Exception):
@@ -514,8 +544,22 @@ def _container(src_path) -> str:
 
 
 def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT_LANG,
-             source=DEFAULT_SOURCE):
+             source=DEFAULT_SOURCE, cancel=None):
     """Every page of one archive or PDF, through the cache. Returns the record.
+
+    `cancel` (Phase 9, AC-13) is the job's token. It is checked at the top of
+    every page and once more inside the page, immediately before translate --
+    so a cancel that landed during detect/OCR does not go on to spend a
+    provider request; a request already in flight is not interrupted and the
+    token is seen at the next page. A set token raises Cancelled with the count of pages
+    DELIVERED so far; the enforce_cap warning and the repack do not run,
+    clear_running still does. No partial file can result, by construction
+    rather than by care: every write in this module lands through
+    atomic_write, so a page is either whole on disk or absent, and the
+    archive is never begun. The pages already delivered STAY -- they are
+    complete files, the next run reads the cache rather than them, and
+    _repack's docstring has promised since Phase 6 that a cancelled job
+    leaves the pages it finished where the next run can use them.
 
     The cache hit here is what AC-13's "a re-run skips completed pages" cashes
     out to, and it is keyed on the page's decoded pixels -- so a SECOND job with
@@ -555,12 +599,13 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     cache.mark_running(job_id)
     try:
         for ordinal, member, img in read_pages(src_path, budget):
+            _check_cancel(cancel, item_id, len(records))
             h = cache.page_hash(img)
             cache.put_placement(job_id, item_id, ordinal, h, member)
             with _page_lock(h):
                 record = _run_cached_page(
                     h, img, member, ordinal, item_id, out_dir, client, lang,
-                    source, model, src_fmt)
+                    source, model, src_fmt, cancel, len(records))
             records.append(record)
         # Once, at the end, and not per page. The plan says disk is "never
         # evicted mid-job", and per page it could not have reclaimed this job's
@@ -601,7 +646,7 @@ def _page_lock(page_hash_: str) -> threading.Lock:
 
 
 def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
-                     source, model, src_fmt) -> dict:
+                     source, model, src_fmt, cancel=None, pages_done=0) -> dict:
     """One page of an item, through the cache. Called under `_page_lock(h)`.
 
     The seven stages in STAGES order, each emitting exactly once -- on the
@@ -658,6 +703,15 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
     if _load_translations(regions, h, lang, model):
         emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
     else:
+        # The second check, before the stage that talks to the provider.
+        # It does NOT interrupt a call already in flight -- a token set
+        # during translate is seen at the next page, up to llm.TIMEOUT
+        # later. What it buys is narrower and real: a cancel that arrived
+        # while detect and OCR were running (seconds per page on CPU, under
+        # _MODEL_LOCK) does not go on to spend a provider request. detect and
+        # ocr are not yet persisted here (_persist is at the end), so the
+        # cost is one page's re-detect on the next run.
+        _check_cancel(cancel, item_id, pages_done)
         translate(regions, ordinal, client, lang, source)
         cache.write_translation(
             h, lang, model, {r["id"]: r.get("translation", "") for r in regions}
