@@ -195,7 +195,7 @@ def translation_name(lang: str, model: str) -> str:
 
 def _read_json(path, default=None):
     try:
-        with open(atomic.long_path(path), encoding="utf-8") as fh:
+        with atomic.open_retry(atomic.long_path(path), encoding="utf-8") as fh:
             return json.load(fh)
     except (FileNotFoundError, NotADirectoryError):
         return default
@@ -311,24 +311,43 @@ def clear_tier() -> None:
 # nothing to repair: every id a killed job left behind names a job directory
 # that very much exists, so a prune that only dropped unknown ids would pass
 # over the one leak it was written for.
-_running: set[str] = set()
+# A COUNT per job, not a set, since Phase 8: a job's items run on several
+# workers at once and each item marks and clears the same job id. With a
+# set, the first item to finish unpinned every page the other three were
+# still writing, and another job's enforce_cap could evict them mid-item.
+# `in _running` still reads as membership; the count is what makes the
+# marker file come off only when the last item is done.
+_running: dict[str, int] = {}
+_running_lock = threading.Lock()
 _warned: set[str] = set()
 
 
 def mark_running(job_id: str) -> None:
     job_id = _job_key(job_id)
-    _running.add(job_id)
-    _write_json(os.path.join(job_dir(job_id), RUNNING), {"pid": os.getpid()})
+    # The file op INSIDE the lock, with the count: A clearing to zero and
+    # pausing before its os.remove while B marks to one and writes the
+    # marker leaves A removing B's marker -- an item running with no
+    # crash-recovery evidence on disk (review, S1). The lock is held for a
+    # few hundred bytes of JSON; that is cheaper than the window.
+    with _running_lock:
+        _running[job_id] = _running.get(job_id, 0) + 1
+        if _running[job_id] == 1:
+            _write_json(os.path.join(job_dir(job_id), RUNNING), {"pid": os.getpid()})
 
 
 def clear_running(job_id: str) -> None:
     job_id = _job_key(job_id)
-    _running.discard(job_id)
-    _warned.discard(job_id)
-    try:
-        os.remove(atomic.long_path(os.path.join(job_dir(job_id), RUNNING)))
-    except OSError:
-        pass  # never written, or the job directory is already gone
+    with _running_lock:
+        left = _running.get(job_id, 0) - 1
+        if left > 0:
+            _running[job_id] = left
+            return
+        _running.pop(job_id, None)
+        _warned.discard(job_id)
+        try:
+            os.remove(atomic.long_path(os.path.join(job_dir(job_id), RUNNING)))
+        except OSError:
+            pass  # never written, or the job directory is already gone
 
 
 # -- references ------------------------------------------------------------
@@ -568,7 +587,9 @@ def read_raster(page_hash_: str):
     path = atomic.long_path(os.path.join(page_dir(page_hash_), RASTER))
     if not os.path.exists(path):
         return None
-    with Image.open(path) as img:
+    # Through open_retry, for the reason _read_json is: a raster being
+    # replaced by a batch worker the instant the editor reads it.
+    with atomic.open_retry(path, "rb") as fh, Image.open(fh) as img:
         img.load()
         out = img.convert("RGB")
     _tier.put(page_hash_, out)
@@ -753,9 +774,13 @@ def enforce_cap(job_id: str | None = None) -> str | None:
     if size <= target:
         return None
     key = _job_key(job_id) if job_id is not None else "*"
-    if key in _warned:
-        return None
-    _warned.add(key)
+    # Check-then-add under the lock: two items of one job finishing their
+    # enforce_cap together would otherwise both surface the warning, the
+    # same race job.py closes for the cbr warning (review, S2).
+    with _LOCK:
+        if key in _warned:
+            return None
+        _warned.add(key)
     held = " and ".join(sorted(set(reasons))) or "pages in use"
     return (
         f"page cache is {size / 1024 / 1024:.1f}MB, over its "

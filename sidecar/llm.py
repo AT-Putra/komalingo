@@ -2,9 +2,18 @@
 
 Three things here are load-bearing and must not be softened:
 
-  * Semaphore(3) is the SINGLE choke point. Every call acquires it. A second
-    code path that talks to the provider without acquiring it silently doubles
-    the cap the user configured.
+  * _GATE, a BoundedSemaphore(3), is the SINGLE choke point. Every request
+    acquires it. A second code path that talks to the provider without
+    acquiring it silently doubles the cap the user configured.
+    It is a THREADING semaphore at module level, not an asyncio one per
+    client, since Phase 8: the queue runs items on worker threads and
+    pipeline.translate runs asyncio.run per page, so every worker has its own
+    event loop -- and an asyncio.Semaphore is bound to whichever loop first
+    waits on it. Measured before the change, 8 threads each translating a
+    41-region page against the stub: 7 of 8 raised "is bound to a different
+    event loop" and the eighth hung forever on a waiter no loop would wake.
+    Not 3xN; a crash and a deadlock. The cap is the app's, so the gate is the
+    process's: two LLMClients do not get two caps.
   * Batching is per PAGE, not per bubble. One request carries the whole page
     image plus an ordered region list, so the model can use neighbouring
     dialogue as context. Splitting only above MAX_REGIONS.
@@ -24,11 +33,16 @@ import base64
 import http.client
 import json
 import os
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
 MAX_CONCURRENT = 3
+# The choke point. Acquired in _request, the sync transport every provider
+# call goes through, so it holds across threads, loops and client instances.
+# Module-level on purpose: see the docstring.
+_GATE = threading.BoundedSemaphore(MAX_CONCURRENT)
 MAX_REGIONS = 40  # above this a page is split across requests
 TIMEOUT = 120
 
@@ -104,7 +118,6 @@ class LLMClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or ""  # optional and may be empty: local servers
         self.model = model
-        self._sem = asyncio.Semaphore(MAX_CONCURRENT)
         # Latched only by an observed vision failure, never on by default.
         # A client that starts text-only silently gives up OCR correction.
         self.text_only = False
@@ -131,13 +144,17 @@ class LLMClient:
             # can tell it apart from a ValueError raised by the pipeline.
             raise SettingsError(f"invalid base URL {url!r}: {e}") from None
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            # Read the body BEFORE raising. This is the whole of AC-8: the
-            # status alone tells the user nothing actionable.
-            body = e.read().decode("utf-8", "replace")
-            raise ProviderError(e.code, body, url) from None
+            with _GATE:
+                try:
+                    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                        return json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    # Read the body BEFORE raising -- and inside the gate,
+                    # so the whole exchange, error body included, is one
+                    # held slot. This is the whole of AC-8: the status
+                    # alone tells the user nothing actionable.
+                    body = e.read().decode("utf-8", "replace")
+                    raise ProviderError(e.code, body, url) from None
         except urllib.error.URLError as e:
             raise ProviderError(0, f"{type(e.reason).__name__}: {e.reason}", url) from None
         except http.client.InvalidURL as e:
@@ -162,9 +179,9 @@ class LLMClient:
             raise ProviderError(0, f"{type(e).__name__}: {e}", url) from None
 
     async def _call(self, path, payload):
-        """The only way out to the provider. Holds the semaphore for the call."""
-        async with self._sem:
-            return await asyncio.to_thread(self._request, path, payload, "POST")
+        """The only way out to the provider. _request holds the gate for the
+        call, on the thread that makes it; the loop is free meanwhile."""
+        return await asyncio.to_thread(self._request, path, payload, "POST")
 
     # -- model listing -----------------------------------------------------
 
@@ -254,7 +271,7 @@ class LLMClient:
 
         Batched for the same reason translate_page is: a page of hard bubbles
         must cost ONE extra request, not one per bubble. It goes through _call
-        like everything else, so it acquires the same Semaphore(3); a shortcut
+        like everything else, so it acquires the same gate; a shortcut
         straight to _request here would silently double the cap the user set.
         """
         if not items:

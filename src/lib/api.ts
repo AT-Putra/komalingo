@@ -109,6 +109,35 @@ export interface ItemResult {
   cache_warning: string | null;
 }
 
+/** One row of AC-7's queue: what became of one file in the folder. */
+export interface JobItem {
+  path: string;
+  item_id: string;
+  kind: "archive" | "pdf" | "image" | "unsupported";
+  status: "pending" | "ok" | "skipped" | "failed";
+  /** Why it was skipped or failed, in the user's words. Empty when ok. */
+  reason: string;
+  /** A per-job warning this item raised first (cbr->cbz). */
+  warning: string;
+  output: string;
+  pages: number;
+}
+
+/** The job's status snapshot, as job.Job.status() returns it. */
+export interface JobStatus {
+  job_id: string;
+  items: JobItem[];
+  /** Once per job, never once per item. */
+  warnings: string[];
+  ok: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  running: number;
+  done: boolean;
+  cancelled: boolean;
+}
+
 async function call<T>(
   path: string,
   method: "GET" | "POST" = "GET",
@@ -165,6 +194,23 @@ export const api = {
     lang?: Target;
     settings?: ProviderSettings;
   }) => call<PageRecord>("/api/rerender", "POST", req),
+
+  /** AC-7: a folder through the queue. `start` answers at once; poll `status`. */
+  job: {
+    start: (req: {
+      job_id: string;
+      dest_dir: string;
+      dir?: string;
+      paths?: string[];
+      lang?: Target;
+      source?: Source;
+      settings?: ProviderSettings;
+    }) => call<JobStatus>("/api/job", "POST", req),
+    status: (jobId: string) => call<JobStatus>(`/api/job/${encodeURIComponent(jobId)}`),
+    /** Items not yet started are skipped; a running item finishes (Phase 9 stops it). */
+    cancel: (jobId: string) =>
+      call<JobStatus>(`/api/job/${encodeURIComponent(jobId)}/cancel`, "POST"),
+  },
 };
 
 export type Source = "ja" | "zh" | "ko";

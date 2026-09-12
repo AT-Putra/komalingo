@@ -36,11 +36,20 @@ def emit(stage: str, item: str, page: int, pct: int) -> None:
     Tauri reads this pipe line by line. Without the flush, Python's block
     buffering holds every line until the process exits and the UI sits at 0%
     for the whole run, then jumps to 100%.
+
+    Under a lock since Phase 8: four workers emit at once, and Tauri parses
+    one JSON object per line. CPython happens to write the line and its
+    newline without releasing the GIL between them; the lock makes what was
+    an implementation accident a guarantee.
     """
-    print(
-        json.dumps({"stage": stage, "item": item, "page": page, "pct": pct}),
-        flush=True,
-    )
+    with _EMIT_LOCK:
+        print(
+            json.dumps({"stage": stage, "item": item, "page": page, "pct": pct}),
+            flush=True,
+        )
+
+
+_EMIT_LOCK = threading.Lock()
 
 
 def _bbox(polygon):
@@ -241,8 +250,14 @@ def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAU
         src.load()
         original = src.convert("RGB").copy()
 
-        regions = detect(src, page)
-        ocr_calls = ocr(regions, src, page, source)
+        # Under the same lock as run_item's pages, since Phase 8: a folder of
+        # loose images runs on four workers, and two of them in detect at
+        # once is the DetectError run_item's comment records -- plus a raced
+        # lazy load in ocr_ja that built the OCR model twice (review,
+        # measured: "Loading OCR model" logged twice in one millisecond).
+        with _MODEL_LOCK:
+            regions = detect(src, page)
+            ocr_calls = ocr(regions, src, page, source)
         translate(regions, page, client, lang, source)
         cleaned, inpaint_calls = inpaint(original, regions, page)
         drawn, fit_summary = render(cleaned, regions, page, client)
@@ -514,7 +529,6 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     _check_lang(lang)
     item_id = item_id or os.path.basename(os.fspath(src_path))
     model = _model_id(client)
-    cache.mark_running(job_id)
     records: list[dict] = []
     warning = None
     # Phase 6: every format AC-6 names, read through the AC-11 budget. The
@@ -533,111 +547,20 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     # writer builds, not against the job root one level above it.
     budget = safety.Budget(out_dir)
     format_warning = archive.CBR_WARNING if src_fmt == archive.RAR else None
+    # Marked HERE, immediately before the try whose finally clears it, and
+    # not at the top of the function: _container raises UnsupportedArchive
+    # on a .cbz that is not one, and a mark with no matching clear left the
+    # refcount at 1 for the process lifetime -- the job's pages pinned
+    # against enforce_cap and its marker file on disk (review, measured).
+    cache.mark_running(job_id)
     try:
         for ordinal, member, img in read_pages(src_path, budget):
             h = cache.page_hash(img)
             cache.put_placement(job_id, item_id, ordinal, h, member)
-            cached = cache.read_regions(h) if cache.has_page(h) else None
-            if cached is not None and cache.read_raster(h) is None:
-                # has_page said yes and the raster is gone. Reachable: another
-                # job's enforce_cap can evict between the two calls, and across
-                # PROCESSES the reference writes are still last-writer-wins, so
-                # the in-process lock does not close it entirely. A cache is
-                # allowed to lose an entry; it is not allowed to hand the
-                # renderer a None and call it a page. Treated as a miss, which
-                # costs a re-detect -- the cost the module docstring claims, on
-                # the path where it is actually true.
-                cached = None
-            if cached is not None and cached.get("source", DEFAULT_SOURCE) != source:
-                # Read under another source language: the cached text is the
-                # other engine's. A miss, so this run's engine reads the page.
-                cached = None
-
-            # The seven stages, in STAGES order, each emitting exactly once --
-            # on the hit path too. The UI draws one bar segment per stage and
-            # reads the names, so a cached page that skipped a stage silently
-            # would leave the bar stuck at the one before it; a cached page
-            # that emitted a stage twice would run the bar backwards. Every
-            # branch below emits its stage, once, and says whether it did work.
-            if cached is not None:
-                regions = cached["regions"]
-                fmt, ocr_calls = cached.get("src_format", "PNG"), 0
-                if src_fmt == pdf.PDF and fmt not in ("JPEG", "PNG"):
-                    # The page was first seen as, say, a WEBP member of a
-                    # CBZ and cached under that format; delivered as WEBP
-                    # bytes the PDF repack would fail at img2pdf after every
-                    # page was processed. A PDF page is JPEG or PNG, by the
-                    # reader's own naming.
-                    fmt = img.format or "PNG"
-                emit("detect", f"{len(regions)} regions (cached)", ordinal, 10)
-                emit("ocr", "0 calls (cached)", ordinal, 25)
-            else:
-                fmt = img.format or "PNG"
-                # The models are not thread-safe and the route is. Three
-                # concurrent run_item calls on an EMPTY cache all raised
-                # DetectError out of OpenCV's forward pass (measured in
-                # review) -- loud, not lossy, but cache.py now promises that
-                # two jobs in one sidecar is the ordinary case, and the lock
-                # in front of the cache is worth nothing if the detector
-                # behind it falls over. manga-ocr under concurrency is
-                # unmeasured and is serialised on the same principle. Phase
-                # 8's queue will make this lock idle; today it is load-bearing.
-                with _MODEL_LOCK:
-                    regions = detect(img, ordinal)
-                    ocr_calls = ocr(regions, img, ordinal, source)
-
-            if _load_translations(regions, h, lang, model):
-                emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
-            else:
-                translate(regions, ordinal, client, lang, source)
-                cache.write_translation(
-                    h, lang, model, {r["id"]: r.get("translation", "") for r in regions}
-                )
-                # Read back, deliberately. write_translation refuses to
-                # overwrite an `edited` entry, so the file it just wrote and
-                # the regions in memory can disagree about exactly the regions
-                # the user corrected -- and the regions in memory are what gets
-                # RENDERED. Without this the page would show the fresh
-                # translation while the cache said the edit was kept, which is
-                # the worst of both: the correction is not discarded, it is
-                # just not on the page. Reachable when coverage was partial (a
-                # half-written translation file) and an edit exists.
-                _load_translations(regions, h, lang, model)
-
-            if cached is not None:
-                cleaned, inpaint_calls = cache.read_raster(h), 0
-                emit("inpaint", "0 calls (cached)", ordinal, 65)
-            else:
-                cleaned, inpaint_calls = inpaint(img, regions, ordinal)
-                cache.write_raster(h, cleaned, src=img)
-
-            drawn, fit_summary = render(cleaned, regions, ordinal, client)
-            out_path = _deliver(drawn, out_dir, member, fmt, cleaned, ordinal)
-
-            record = {
-                "page": ordinal,
-                "page_hash": h,
-                "item_id": item_id,
-                "member": member,
-                "src_format": fmt,
-                "source": source,
-                "output": out_path,
-                "cached": cached is not None,
-                "detections": len(regions),
-                "ocr_calls": ocr_calls,
-                "inpaint_calls": inpaint_calls,
-                "fit_summary": fit_summary,
-                "regions": regions,
-            }
-            if src_fmt == pdf.PDF:
-                # Which path the page took, so check_pdf can assert the
-                # render fallback was NOT taken without re-reading the PDF.
-                record["pdf_extract"] = img.info.get("pdf_extract")
-            # Written back on EVERY pass, hit or miss. The fit flags are derived
-            # by render, so a cached record whose region was edited shorter must
-            # not keep last run's fit_compromised. Nothing here reads a stored
-            # flag back in as input -- see cache.py's closing paragraph.
-            _persist(h, record)
+            with _page_lock(h):
+                record = _run_cached_page(
+                    h, img, member, ordinal, item_id, out_dir, client, lang,
+                    source, model, src_fmt)
             records.append(record)
         # Once, at the end, and not per page. The plan says disk is "never
         # evicted mid-job", and per page it could not have reclaimed this job's
@@ -659,6 +582,132 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
         "src_format": src_fmt,
         "format_warning": format_warning,
     }
+
+
+# Per-page-hash locks, striped so the table stays bounded. Two workers on the
+# same hash -- two formats of one chapter, two volumes sharing a blank page
+# or a publisher's credits -- both MISS the cache and both write the same
+# regions, raster and translation files, and on Windows os.replace onto a
+# file another thread holds open is PermissionError [WinError 5], which the
+# Item boundary reports as a FAILED item (review: 2 threads x 300 write+read
+# pairs on one hash, 291 OSErrors; one FAILED item in a cold-cache batch of
+# two identical archives). Under the lock the second worker waits, then
+# HITS, which is also the cheaper outcome.
+_PAGE_STRIPES = [threading.Lock() for _ in range(64)]
+
+
+def _page_lock(page_hash_: str) -> threading.Lock:
+    return _PAGE_STRIPES[int(page_hash_[:8], 16) % len(_PAGE_STRIPES)]
+
+
+def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
+                     source, model, src_fmt) -> dict:
+    """One page of an item, through the cache. Called under `_page_lock(h)`.
+
+    The seven stages in STAGES order, each emitting exactly once -- on the
+    hit path too. The UI draws one bar segment per stage and reads the
+    names, so a cached page that skipped a stage silently would leave the
+    bar stuck at the one before it, and one that emitted a stage twice
+    would run the bar backwards. Every branch emits its stage, once, and
+    says whether it did work.
+    """
+    cached = cache.read_regions(h) if cache.has_page(h) else None
+    if cached is not None and cache.read_raster(h) is None:
+        # has_page said yes and the raster is gone. Reachable: another
+        # job's enforce_cap can evict between the two calls, and across
+        # PROCESSES the reference writes are still last-writer-wins, so
+        # the in-process lock does not close it entirely. A cache is
+        # allowed to lose an entry; it is not allowed to hand the
+        # renderer a None and call it a page. Treated as a miss, which
+        # costs a re-detect -- the cost the module docstring claims, on
+        # the path where it is actually true.
+        cached = None
+    if cached is not None and cached.get("source", DEFAULT_SOURCE) != source:
+        # Read under another source language: the cached text is the
+        # other engine's. A miss, so this run's engine reads the page.
+        cached = None
+
+    if cached is not None:
+        regions = cached["regions"]
+        fmt, ocr_calls = cached.get("src_format", "PNG"), 0
+        if src_fmt == pdf.PDF and fmt not in ("JPEG", "PNG"):
+            # The page was first seen as, say, a WEBP member of a
+            # CBZ and cached under that format; delivered as WEBP
+            # bytes the PDF repack would fail at img2pdf after every
+            # page was processed. A PDF page is JPEG or PNG, by the
+            # reader's own naming.
+            fmt = img.format or "PNG"
+        emit("detect", f"{len(regions)} regions (cached)", ordinal, 10)
+        emit("ocr", "0 calls (cached)", ordinal, 25)
+    else:
+        fmt = img.format or "PNG"
+        # The models are not thread-safe and the route is. Three
+        # concurrent run_item calls on an EMPTY cache all raised
+        # DetectError out of OpenCV's forward pass (measured in
+        # review) -- loud, not lossy, but cache.py now promises that
+        # two jobs in one sidecar is the ordinary case, and the lock
+        # in front of the cache is worth nothing if the detector
+        # behind it falls over. manga-ocr under concurrency is
+        # unmeasured and is serialised on the same principle. Phase 8's
+        # queue made this lock MORE load-bearing, not idle: four workers
+        # reach detect at once, and run_page takes the same lock.
+        with _MODEL_LOCK:
+            regions = detect(img, ordinal)
+            ocr_calls = ocr(regions, img, ordinal, source)
+
+    if _load_translations(regions, h, lang, model):
+        emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
+    else:
+        translate(regions, ordinal, client, lang, source)
+        cache.write_translation(
+            h, lang, model, {r["id"]: r.get("translation", "") for r in regions}
+        )
+        # Read back, deliberately. write_translation refuses to
+        # overwrite an `edited` entry, so the file it just wrote and
+        # the regions in memory can disagree about exactly the regions
+        # the user corrected -- and the regions in memory are what gets
+        # RENDERED. Without this the page would show the fresh
+        # translation while the cache said the edit was kept, which is
+        # the worst of both: the correction is not discarded, it is
+        # just not on the page. Reachable when coverage was partial (a
+        # half-written translation file) and an edit exists.
+        _load_translations(regions, h, lang, model)
+
+    if cached is not None:
+        cleaned, inpaint_calls = cache.read_raster(h), 0
+        emit("inpaint", "0 calls (cached)", ordinal, 65)
+    else:
+        cleaned, inpaint_calls = inpaint(img, regions, ordinal)
+        cache.write_raster(h, cleaned, src=img)
+
+    drawn, fit_summary = render(cleaned, regions, ordinal, client)
+    out_path = _deliver(drawn, out_dir, member, fmt, cleaned, ordinal)
+
+    record = {
+        "page": ordinal,
+        "page_hash": h,
+        "item_id": item_id,
+        "member": member,
+        "src_format": fmt,
+        "source": source,
+        "output": out_path,
+        "cached": cached is not None,
+        "detections": len(regions),
+        "ocr_calls": ocr_calls,
+        "inpaint_calls": inpaint_calls,
+        "fit_summary": fit_summary,
+        "regions": regions,
+    }
+    if src_fmt == pdf.PDF:
+        # Which path the page took, so check_pdf can assert the
+        # render fallback was NOT taken without re-reading the PDF.
+        record["pdf_extract"] = img.info.get("pdf_extract")
+    # Written back on EVERY pass, hit or miss. The fit flags are derived
+    # by render, so a cached record whose region was edited shorter must
+    # not keep last run's fit_compromised. Nothing here reads a stored
+    # flag back in as input -- see cache.py's closing paragraph.
+    _persist(h, record)
+    return record
 
 
 def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,

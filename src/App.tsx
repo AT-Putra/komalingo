@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import Job from "./routes/Job";
 import Settings from "./routes/Settings";
 import SpotFix from "./routes/SpotFix";
 import {
@@ -10,6 +11,7 @@ import {
   SOURCES,
   TARGETS,
   type ItemResult,
+  type JobStatus,
   type PageRecord,
   type Progress,
   type Source,
@@ -30,13 +32,15 @@ import "./App.css";
  * one Phase 8 already makes.
  */
 export default function App() {
-  const [view, setView] = useState<"home" | "settings" | "spotfix">("home");
+  const [view, setView] = useState<"home" | "settings" | "spotfix" | "job">("home");
   const [progress, setProgress] = useState<Progress | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [error, setError] = useState("");
 
   const [src, setSrc] = useState("");
+  const [folder, setFolder] = useState("");
   const [dest, setDest] = useState("");
+  const [batch, setBatch] = useState<JobStatus | null>(null);
   const [source, setSource] = useState<Source>("ja");
   const [lang, setLang] = useState<Target>("en");
   const [job, setJob] = useState<ItemResult | null>(null);
@@ -85,6 +89,29 @@ export default function App() {
     }
   }
 
+  /** AC-7: every file in the folder, through the queue; the Job view polls. */
+  async function runFolder() {
+    setBusy(true);
+    setError("");
+    try {
+      const settings = loadSettings();
+      const status = await api.job.start({
+        job_id: `job-${Date.now()}`,
+        dir: folder,
+        dest_dir: dest,
+        source,
+        lang,
+        settings: settings.base_url && settings.model ? settings : undefined,
+      });
+      setBatch(status);
+      setView("job");
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** Replace one page in the job with the server's fresh record after an edit. */
   function updatePage(fresh: PageRecord) {
     setPage(fresh);
@@ -113,10 +140,15 @@ export default function App() {
         >
           Spot-fix
         </button>
+        <button onClick={() => setView("job")} disabled={view === "job" || !batch}>
+          Job
+        </button>
       </nav>
 
       {view === "settings" ? (
         <Settings />
+      ) : view === "job" && batch ? (
+        <Job key={batch.job_id} jobId={batch.job_id} initial={batch} />
       ) : view === "spotfix" && job && page ? (
         <>
           <nav className="row pages">
@@ -181,6 +213,18 @@ export default function App() {
             </select>
             <button onClick={runItem} disabled={busy || !src || !dest}>
               {busy ? "Translating…" : "Translate item"}
+            </button>
+          </div>
+
+          <div className="row">
+            <input
+              value={folder}
+              onChange={(e) => setFolder(e.target.value)}
+              placeholder="path to a folder of images, PDFs and archives"
+              size={40}
+            />
+            <button onClick={runFolder} disabled={busy || !folder || !dest}>
+              Translate folder
             </button>
           </div>
 

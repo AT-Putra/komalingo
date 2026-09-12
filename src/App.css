@@ -166,3 +166,10 @@ button {
   flex-wrap: wrap;
   gap: 0.25em;
 }
+
+/* Phase 8: the queue view. One row per item; the reason column is the point. */
+.job table { width: 100%; border-collapse: collapse; margin-top: 0.5em; }
+.job th, .job td { text-align: left; padding: 0.25em 0.5em; border-bottom: 1px solid #ccc; }
+.job tr.skipped td { color: #e90; }
+.job tr.failed td { color: #d33; }
+.job tr.pending td { color: #888; }

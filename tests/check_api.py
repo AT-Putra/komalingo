@@ -167,6 +167,24 @@ def main():
                 f"NOT reachable on the LAN address {lan} -- 127.0.0.1 only",
             )
 
+        # -- Phase 8: the queue routes refuse what they should ---------------
+        # Over the live process rather than TestClient, like everything here:
+        # the routes hold a module-level job table, and a table that works in
+        # one thread of a test client says nothing about four uvicorn workers.
+        status, _ = call("POST", "/api/job", body=json.dumps({
+            "job_id": "api-both", "dest_dir": EMPTY_MODELS,
+            "dir": EMPTY_MODELS, "paths": [],
+        }))
+        c.check(status == 422, f"POST /api/job with both dir and paths is 422 (got {status})")
+        status, body = call("POST", "/api/job", body=json.dumps({
+            "job_id": "api-nodir", "dest_dir": EMPTY_MODELS,
+            "dir": os.path.join(EMPTY_MODELS, "no-such-folder"),
+        }))
+        c.check(status == 404 and "no-such-folder" in body,
+                f"POST /api/job with a missing folder is 404 naming it (got {status}, {body[:80]!r})")
+        status, _ = call("GET", "/api/job/nope")
+        c.check(status == 404, f"GET /api/job/nope is 404 (got {status})")
+
         # -- a weights failure reaches the UI with its reason intact -------
         # The regression this pins: /api/translate used to catch ProviderError
         # only, so a checksum mismatch or a dead network -- the two failures

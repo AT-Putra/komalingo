@@ -36,7 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from fastapi import FastAPI, Request, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from . import cache, pipeline  # noqa: E402
+from . import cache, job, pipeline  # noqa: E402
 from .detect import DetectError  # noqa: E402
 from .llm import LLMClient, ProviderError, SettingsError  # noqa: E402
 from .models import FetchError  # noqa: E402
@@ -115,6 +115,25 @@ class ItemRequest(BaseModel):
     # Phase 4: which OCR reads the page. Validated here, so a typo is a 422
     # with the accepted set in it rather than a ValueError halfway through
     # an archive. RerenderRequest has no source: it never OCRs.
+    source: Source = pipeline.DEFAULT_SOURCE
+    settings: Settings | None = None
+
+
+class JobRequest(BaseModel):
+    """AC-7: a folder, or an explicit list, through the queue.
+
+    Exactly one of `dir` and `paths`. A folder is what the user points at; a
+    list is what a test or a drag-and-drop hands over. The job runs in the
+    background and this request answers at once with the first status
+    snapshot; the UI polls GET /api/job/{id} for the rest. The id is the
+    caller's for the reason ItemRequest gives.
+    """
+
+    job_id: str
+    dest_dir: str
+    dir: str | None = None
+    paths: list[str] | None = None
+    lang: Target = pipeline.DEFAULT_LANG
     source: Source = pipeline.DEFAULT_SOURCE
     settings: Settings | None = None
 
@@ -328,6 +347,71 @@ def translate_item(req: ItemRequest):
             media_type="application/json",
         )
     return record
+
+
+# The jobs this sidecar has run, by id, for GET /api/job/{id}. In memory:
+# the queue is a property of this process, a restarted sidecar has no
+# running jobs, and a finished job's outputs are on disk where AC-13's
+# resume finds them without this table.
+_jobs: dict[str, job.Job] = {}
+_jobs_lock = threading.Lock()
+# Finished jobs kept for GET /api/job/{id} after the fact. Beyond this many,
+# the oldest finished ones are dropped when a new job starts -- a finished
+# Job holds every item's full record, and a day of batches would otherwise
+# hold a day of page polygons (review, N6). Running jobs are never dropped.
+KEEP_FINISHED_JOBS = 20
+
+
+def _job_response(status: int, error: str) -> Response:
+    return Response(content=json.dumps({"error": error}), status_code=status,
+                    media_type="application/json")
+
+
+@app.post("/api/job")
+def start_job(req: JobRequest):
+    """Start a batch. Answers with the first status snapshot, immediately."""
+    if (req.dir is None) == (req.paths is None):
+        return _job_response(422, "exactly one of dir and paths is required")
+    try:
+        client = _client(req.settings)
+    except SettingsError as e:
+        return _bad_settings_response(e)
+    try:
+        paths = job.scan(req.dir) if req.dir is not None else list(req.paths or [])
+    except NotADirectoryError as e:
+        return _job_response(404, str(e))
+    with _jobs_lock:
+        existing = _jobs.get(req.job_id)
+        if existing is not None and not existing.done:
+            return _job_response(409, f"job {req.job_id!r} is still running")
+        finished = [jid for jid, j in _jobs.items() if j.done and jid != req.job_id]
+        for jid in finished[:max(0, len(finished) - KEEP_FINISHED_JOBS)]:
+            del _jobs[jid]
+        started = job.Job(req.job_id, paths, req.dest_dir, client, req.lang, req.source)
+        _jobs[req.job_id] = started
+    started.start()
+    return started.status()
+
+
+@app.get("/api/job/{job_id}")
+def job_status(job_id: str):
+    with _jobs_lock:
+        found = _jobs.get(job_id)
+    if found is None:
+        return _job_response(404, f"no job {job_id!r} in this sidecar")
+    return found.status()
+
+
+@app.post("/api/job/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """The Phase 8 plumbing point: items not yet started are skipped. An
+    item mid-page finishes; stopping it cleanly is Phase 9's."""
+    with _jobs_lock:
+        found = _jobs.get(job_id)
+    if found is None:
+        return _job_response(404, f"no job {job_id!r} in this sidecar")
+    found.cancel()
+    return found.status()
 
 
 @app.post("/api/rerender")

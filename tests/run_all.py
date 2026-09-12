@@ -80,7 +80,8 @@ RANK = {FAIL: 3, INCONCLUSIVE: 2, SKIP: 1, PASS: 0}
 # firing on a real fixture, and that count going down means a rule stopped
 # working or a fixture stopped being hostile.
 #
-# pdf_render_fallbacks (Phase 7) is in neither set: see the record schema.
+# pdf_render_fallbacks (Phase 7) and batch_peak_llm_concurrency /
+# batch_items_ok (Phase 8) are in neither set: see the record schema.
 LOWER_IS_BETTER = {
     "max_overflow_pct",
     "clipped_glyph_count",
@@ -117,6 +118,7 @@ PHASE_ORDER = [
     "check_id",
     "check_archives",
     "check_pdf",
+    "check_batch",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -289,7 +291,7 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "7",
+        "phase": "8",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
@@ -341,6 +343,12 @@ def main() -> int:
             # its value is decided by which fixtures exist. check_pdf's own
             # asserts hold it at exactly two; the record is the history.
             "pdf_render_fallbacks": None,
+            # Phase 8: check_batch. The peak is a timing under a hard cap the
+            # check's own asserts hold at 3 (a run that saw 2 is not better
+            # than one that saw 3, it was less contended), and the ok count
+            # is decided by the folder the check builds. Neither ratchets.
+            "batch_peak_llm_concurrency": None,
+            "batch_items_ok": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline

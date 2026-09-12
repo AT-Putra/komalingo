@@ -7,11 +7,16 @@ skipped, and here is why". Inventing that here and replacing it in Phase 8
 would mean two error models across three phases, so Phase 8 inherits this one
 and adds only the queue, the scheduling and `Job.tsx` on top.
 
-**AC-7 is still Phase 8's.** What lives here is the boundary, not the queue:
-items are processed in the order given, one at a time, with no concurrency
-decisions of any kind. `run_job` exists so the boundary has a caller in this
-phase and so `check_archives` can assert the boundary holds over a real mixed
-list; it is not the batch runner AC-7 asks for.
+**Phase 8 adds the queue on top of that boundary, unchanged.** `scan` turns a
+folder into the ordered list of things in it; `Job` runs those things on a
+few worker threads, one item at a time each, every item through `run_item`
+exactly as before; `run_job` is now `Job(...).start().wait()` and its callers
+did not change. The queue is WIDER than the LLM cap on purpose -- see
+WORKERS -- because the cap is llm.py's job and the queue's job is to keep the
+models and the provider both busy. Cancellation is a plumbing point here:
+`Job.cancel` stops items that have not started. Interrupting an item that is
+mid-page, and leaving no partial output behind when it does, is Phase 9's
+(AC-13), and this file says so rather than half-doing it.
 
 **The boundary is total.** `run_item` returns an Item for every input, in every
 case: a rejected archive, a file that is not an archive at all, a corrupt one,
@@ -26,11 +31,31 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import threading
 import traceback
-from dataclasses import asdict, dataclass, field
+from collections import deque
+from dataclasses import dataclass, field
 
 from . import atomic, pipeline, safety
 from .containers import archive, pdf
+from .containers.read_cbz import _natural_key
+
+# How many items run at once. One more than llm.MAX_CONCURRENT, and that is
+# the reasoning rather than a coincidence: the provider cap lives in llm.py
+# and is the ONLY thing allowed to bound provider load, so the queue must be
+# able to offer the gate more than it will take -- otherwise a broken gate
+# would be hidden by a narrow queue, and check_batch's "the stub could have
+# seen more than 3" control would be vacuous. Wider than 4 buys nothing: the
+# detector and the OCR are serialised behind pipeline._MODEL_LOCK, so the
+# fourth worker is already mostly waiting for a model.
+WORKERS = 4
+
+CANCELLED_REASON = "cancelled before start"
+
+# The lock run_item's warning dedupe takes when the caller has no Job to
+# lend one: module-level so two lockless callers are still serialised,
+# rather than a throwaway Lock() per call that serialises nothing.
+_WARN_LOCK = threading.Lock()
 
 # The item-level progress contract, the way STAGES is the page-level one.
 # check_archives asserts against these names rather than counting events: a
@@ -68,9 +93,14 @@ class Item:
     record: dict = field(default_factory=dict, repr=False)
 
     def as_dict(self) -> dict:
-        d = asdict(self)
-        d.pop("record", None)
-        return d
+        # The public fields by name, not dataclasses.asdict: that deep-copies
+        # `record` -- every page's polygons -- and then throws it away, on
+        # every item on every 500ms poll of the queue view.
+        return {
+            "path": self.path, "item_id": self.item_id, "kind": self.kind,
+            "status": self.status, "reason": self.reason, "warning": self.warning,
+            "output": self.output, "pages": self.pages,
+        }
 
 
 def classify(path) -> Item:
@@ -119,7 +149,8 @@ def _discard_output(item: Item, dest_dir) -> None:
 def run_item(item: Item, dest_dir, job_id, client=None,
              lang: str = pipeline.DEFAULT_LANG,
              source: str = pipeline.DEFAULT_SOURCE,
-             warned: set | None = None) -> Item:
+             warned: set | None = None,
+             warned_lock: threading.Lock | None = None) -> Item:
     """Process one item. Never raises.
 
     `warned` is the per-JOB warning set. AC-6 says the cbr->cbz warning is
@@ -127,6 +158,9 @@ def run_item(item: Item, dest_dir, job_id, client=None,
     that showed thirty identical dialogs would satisfy a naive count and annoy
     the user thirty times. The set is owned by the caller because the scope the
     word "once" refers to is the job, and this function only sees one item.
+    `warned_lock` is the Job's lock (Phase 8): with four workers the
+    check-then-add on the set is a race, and a race here is exactly the
+    "twice" the word "once" forbids.
     """
     pipeline.emit("item_start", item.item_id, 0, 0)
     try:
@@ -155,34 +189,38 @@ def run_item(item: Item, dest_dir, job_id, client=None,
         warning = record.get("format_warning")
         if warning:
             seen = warned if warned is not None else set()
-            if warning not in seen:
-                seen.add(warning)
-                item.warning = warning
+            with warned_lock or _WARN_LOCK:
+                if warning not in seen:
+                    seen.add(warning)
+                    item.warning = warning
         item.status = OK
         return item
 
+    # Reason BEFORE status in every branch below: a poll between the two
+    # assignments must not see SKIPPED with an empty reason, the state the
+    # Item docstring forbids.
     except safety.UnsafeArchive as e:
         # The one failure with a machine-readable reason. The UI shows
         # e.reason's rule name; the detail stays in the message.
-        item.status = SKIPPED
         item.reason = f"unsafe archive ({e.reason}): {e.member}"
+        item.status = SKIPPED
         _discard_output(item, dest_dir)
         return item
     except archive.UnsupportedArchive as e:
-        item.status = SKIPPED
         item.reason = e.reason
+        item.status = SKIPPED
         return item
     except archive.LibarchiveMissing as e:
-        item.status = SKIPPED
         item.reason = e.reason
+        item.status = SKIPPED
         return item
     except Exception as e:  # noqa: BLE001 -- the boundary; see module docstring
         # Deliberately broad, and deliberately loud on stderr. A library we do
         # not own raising something we did not predict is the case this
         # boundary exists for; narrowing it to the exceptions seen so far means
         # the first unseen one takes the whole job down.
-        item.status = FAILED
         item.reason = f"{type(e).__name__}: {e}"
+        item.status = FAILED
         traceback.print_exc()
         return item
     finally:
@@ -217,24 +255,189 @@ def disambiguate(items: list[Item]) -> list[Item]:
     return items
 
 
+def scan(directory) -> list[str]:
+    """The files in `directory`, top level only, in natural order.
+
+    Top level only: a folder of volumes is what AC-7 describes, and a
+    recursive walk would pick up whatever an earlier job left in a
+    subfolder -- including the per-item output directories this very
+    program writes. Dotfiles and `*.tmp` are skipped for the same reason:
+    `.DS_Store` is not an item, and a `.tmp` is atomic_write's in-flight
+    file. Natural order, shared with the page readers, so `ch10.cbz` sorts
+    after `ch2.cbz` the way the user's file manager shows them.
+    """
+    directory = os.fspath(directory)
+    if not os.path.isdir(atomic.long_path(directory)):
+        raise NotADirectoryError(f"not a directory: {directory}")
+    names = []
+    for name in os.listdir(atomic.long_path(directory)):
+        if name.startswith(".") or name.lower().endswith(".tmp"):
+            continue
+        if os.path.isfile(atomic.long_path(os.path.join(directory, name))):
+            names.append(name)
+    return [os.path.join(directory, n) for n in sorted(names, key=_natural_key)]
+
+
+class Job:
+    """Every item, through the boundary, on `workers` threads. Never raises.
+
+    Construct, `start()`, then either `wait()` or poll `status()` -- the
+    status is a snapshot taken under the job's lock, safe from any thread
+    while the workers run, and is the dict `run_job` always returned plus
+    `pending`, `running` and `done`. The Item objects are the workers'; the
+    snapshot copies them.
+
+    Items are claimed from one queue in the order `scan` gave them, so a
+    four-worker job over ten volumes translates volumes 1-4 first, not a
+    random four. The cbr->cbz warning stays "once per job" under
+    concurrency because the shared `warned` set is guarded here: two workers
+    finishing two `.cbr` items in the same millisecond would otherwise both
+    see an empty set and both surface the warning.
+
+    `cancel()` is the plumbing point Phase 9 threads through the pipeline.
+    Today it means: items that have not started are marked SKIPPED with
+    CANCELLED_REASON and the job runs to `done` without them; an item that is
+    mid-page finishes its item. That is stated, not hidden -- a cancel that
+    stopped mid-page today would leave the partial output AC-13 forbids.
+    """
+
+    def __init__(self, job_id, paths, dest_dir, client=None,
+                 lang: str = pipeline.DEFAULT_LANG,
+                 source: str = pipeline.DEFAULT_SOURCE,
+                 workers: int = WORKERS):
+        self.job_id = str(job_id)
+        self.dest_dir = os.fspath(dest_dir)
+        self.client = client
+        self.lang = lang
+        self.source = source
+        self.workers = max(1, int(workers))
+        self.items = disambiguate([classify(p) for p in paths])
+        self.warned: set[str] = set()
+        self._lock = threading.Lock()
+        # A deque under the job's own lock, not a queue.Queue: every claim
+        # already runs under _lock (see _worker), so a second lock inside the
+        # queue would guard nothing.
+        self._pending: deque[Item] = deque()
+        self._running: set[str] = set()
+        self._cancel = threading.Event()
+        self._done = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._started = False
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> "Job":
+        with self._lock:
+            if self._started:
+                return self
+            self._started = True
+            self._pending.extend(self.items)
+            if not self.items:
+                self._done.set()
+                return self
+            self._threads = [
+                threading.Thread(target=self._worker, name=f"job-{self.job_id}-{n}",
+                                 daemon=True)
+                for n in range(min(self.workers, len(self.items)))
+            ]
+        for t in self._threads:
+            t.start()
+        return self
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until every item has a terminal status. False on timeout."""
+        return self._done.wait(timeout)
+
+    # -- the workers -------------------------------------------------------
+
+    def _worker(self) -> None:
+        while True:
+            # Claim and register under ONE lock. A claim outside the lock
+            # leaves a moment where the queue is empty and the item is in
+            # nobody's hands, and a sibling draining at that moment would
+            # declare the job done with this item still pending.
+            with self._lock:
+                if not self._pending:
+                    finished = not self._running
+                    break
+                item = self._pending.popleft()
+                self._running.add(item.item_id)
+            try:
+                if self._cancel.is_set() and item.status == "pending":
+                    item.reason = CANCELLED_REASON
+                    item.status = SKIPPED
+                    # Still emitted, still reported: a cancelled item is an
+                    # item the user asked about and did not get, and the
+                    # queue view has to say why.
+                    pipeline.emit("item_start", item.item_id, 0, 0)
+                    pipeline.emit("item_done", item.item_id, 0, 100)
+                else:
+                    run_item(item, self.dest_dir, self.job_id, self.client,
+                             self.lang, self.source, self.warned, self._lock)
+            except BaseException as e:  # noqa: BLE001 -- see below
+                # run_item's boundary is total for the pipeline, but not for
+                # its own `finally: emit(...)` on a broken stdout, nor for
+                # the emits above. A worker that died here with the item
+                # still "pending" and nobody left to set done would leave
+                # wait() blocking and GET /api/job reporting a job that
+                # never finishes (review, S4). Report the item, keep going.
+                if item.status == "pending":
+                    item.reason = f"worker error: {type(e).__name__}: {e}"
+                    item.status = FAILED
+                traceback.print_exc()
+            finally:
+                with self._lock:
+                    self._running.discard(item.item_id)
+        # The last worker out -- the one that found the queue empty with
+        # nobody still running -- sets done.
+        if finished:
+            self._done.set()
+
+    # -- reporting ---------------------------------------------------------
+
+    def status(self) -> dict:
+        with self._lock:
+            items = [i.as_dict() for i in self.items]
+            warnings = sorted(self.warned)
+            running = len(self._running)
+        return {
+            "job_id": self.job_id,
+            "items": items,
+            "warnings": warnings,
+            "ok": sum(1 for i in items if i["status"] == OK),
+            "skipped": sum(1 for i in items if i["status"] == SKIPPED),
+            "failed": sum(1 for i in items if i["status"] == FAILED),
+            # Not yet claimed. An item mid-run still carries status
+            # "pending" -- the boundary only writes a terminal status --
+            # so it is subtracted here rather than counted twice.
+            "pending": sum(1 for i in items if i["status"] == "pending") - running,
+            "running": running,
+            "done": self._done.is_set(),
+            "cancelled": self._cancel.is_set(),
+        }
+
+
 def run_job(paths, dest_dir, job_id, client=None,
             lang: str = pipeline.DEFAULT_LANG,
-            source: str = pipeline.DEFAULT_SOURCE) -> dict:
-    """Every path, in order, through the boundary. Returns the job record.
+            source: str = pipeline.DEFAULT_SOURCE,
+            workers: int = WORKERS) -> dict:
+    """Every path through the boundary, and the record when all are done.
 
-    No queue, no concurrency, no cancellation -- those are Phase 8's and naming
-    them here would be the same forward-dependency this file was moved to
-    avoid. What it does provide is the scope the cbr->cbz warning is "once"
-    within, and a shape `Job.tsx` can render without being rewritten.
+    The blocking form of `Job`, kept because it is the shape every check
+    since Phase 6 calls. Same workers, same queue, same "once per job"
+    warning scope.
     """
-    warned: set[str] = set()
-    items = [run_item(item, dest_dir, job_id, client, lang, source, warned)
-             for item in disambiguate([classify(p) for p in paths])]
-    return {
-        "job_id": str(job_id),
-        "items": [i.as_dict() for i in items],
-        "warnings": sorted(warned),
-        "ok": sum(1 for i in items if i.status == OK),
-        "skipped": sum(1 for i in items if i.status == SKIPPED),
-        "failed": sum(1 for i in items if i.status == FAILED),
-    }
+    job = Job(job_id, paths, dest_dir, client, lang, source, workers).start()
+    job.wait()
+    return job.status()
