@@ -167,6 +167,19 @@ def main():
 
     ep, reason = models.select_provider(force_cpu=True)
     c.check(ep == "CPUExecutionProvider" and bool(reason), "forced CPU still explains itself")
+    # The env switch is what a user -- or a check that must not depend on the
+    # box -- reaches for; it must win over a GPU that is present.
+    saved = os.environ.get(models.FORCE_CPU_ENV)
+    os.environ[models.FORCE_CPU_ENV] = "1"
+    try:
+        ep, reason = models.select_provider()
+    finally:
+        if saved is None:
+            os.environ.pop(models.FORCE_CPU_ENV, None)
+        else:
+            os.environ[models.FORCE_CPU_ENV] = saved
+    c.check(ep == "CPUExecutionProvider" and models.FORCE_CPU_ENV in reason,
+            f"{models.FORCE_CPU_ENV}=1 forces CPU and names itself as the reason: {reason!r}")
 
     # --- 8: every manifest entry is actually PINNED -----------------------
     # A manifest whose whole stated purpose is "pinned by digest, not by
@@ -226,8 +239,13 @@ def main():
             f"ocr_ja asks models.ensure for the pinned model (asked for {ensured})")
     c.check(captured.get("path") == sentinel,
             f"ocr_ja hands MangaOcr that path, not a repo id (got {captured.get('path')!r})")
-    c.check(captured.get("force_cpu") is True,
-            f"ocr_ja still forces CPU (got {captured.get('force_cpu')!r})")
+    # CPU unless select_provider says CUDA: on a box with no GPU this is True
+    # as it always was; on the GPU build it is False, and a literal True here
+    # would have pinned manga-ocr to the CPU on the one machine that has one.
+    want_cpu = models.select_provider()[0] != "CUDAExecutionProvider"
+    c.check(captured.get("force_cpu") is want_cpu,
+            f"ocr_ja forces CPU exactly when select_provider does not say CUDA "
+            f"(want force_cpu={want_cpu}, got {captured.get('force_cpu')!r})")
 
     return c.finish()
 

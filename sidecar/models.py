@@ -13,8 +13,10 @@ full disk are three different problems with three different user actions, and
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
+import io
 import os
 import shutil
 import urllib.error
@@ -319,15 +321,27 @@ def ensure(name: str, progress=None) -> str:
     return fetch(entry["url"], dest, entry["sha256"], entry["size"], progress)
 
 
-def select_provider(force_cpu: bool = False) -> tuple[str, str]:
+# The one switch that keeps a GPU machine on the CPU path: set by the user to
+# compare, or by a check that must not depend on which box it runs on.
+FORCE_CPU_ENV = "MT_FORCE_CPU"
+
+
+def select_provider(force_cpu: bool | None = None) -> tuple[str, str]:
     """Return (execution_provider, reason).
 
     The reason is empty ONLY when CUDA was actually selected. Every fallback
     carries a sentence the Settings UI can show, because "running on CPU" with
     no explanation is indistinguishable from a bug to the person waiting.
+
+    `force_cpu` None reads MT_FORCE_CPU; a bool overrides it. The answer is
+    shared by both engines: manga-ocr (torch) takes the CPU whenever this
+    does not say CUDA, and the PP-OCR sessions (onnxruntime) take exactly the
+    provider named here. One decision, one reason, whichever model asks.
     """
+    if force_cpu is None:
+        force_cpu = os.environ.get(FORCE_CPU_ENV, "") == "1"
     if force_cpu:
-        return "CPUExecutionProvider", "CPU forced in settings"
+        return "CPUExecutionProvider", f"CPU forced ({FORCE_CPU_ENV}=1)"
 
     try:
         import onnxruntime  # noqa: PLC0415 -- optional, absent in Phase 0
@@ -349,4 +363,28 @@ def select_provider(force_cpu: bool = False) -> tuple[str, str]:
     except ImportError:
         pass  # onnxruntime says CUDA is there; torch's absence does not veto it
 
+    # onnxruntime's CUDA provider resolves cudart, cublas and cudnn by name
+    # at session creation. The torch wheel carries them in torch/lib and
+    # preload_dlls finds them there (then the nvidia-* packages, then the
+    # system); without this, a zh/ko page on a process that had not yet
+    # imported torch created its session before any of those DLLs were
+    # loaded, and onnxruntime fell back to CPU with a warning nobody reads.
+    global _PRELOADED
+    preload = getattr(onnxruntime, "preload_dlls", None)
+    if preload is not None and not _PRELOADED:
+        # preload_dlls print()s what it did ("Skip loading CUDA and cuDNN
+        # DLLs since torch is imported."). stdout is the progress channel --
+        # one JSON line per stage, nothing else, and check_pipeline holds the
+        # sidecar to that -- so the print is swallowed here and the reason
+        # string carries anything worth knowing.
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                preload()
+        except Exception as e:  # noqa: BLE001 -- a failed preload is a CPU reason, not a crash
+            return "CPUExecutionProvider", f"CUDA libraries did not load ({type(e).__name__}: {e}); using CPU"
+        _PRELOADED = True  # once per process: the DLLs stay loaded
+
     return "CUDAExecutionProvider", ""
+
+
+_PRELOADED = False

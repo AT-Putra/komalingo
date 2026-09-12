@@ -342,9 +342,28 @@ def _missing_source_response(path: str) -> Response | None:
     )
 
 
+# Decided once, on the first health poll: select_provider imports torch and
+# onnxruntime and preloads the CUDA DLLs, which is a second of work that the
+# first OCR would do anyway. Cached so the poll stays cheap afterwards.
+_PROVIDER: tuple[str, str] | None = None
+
+
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "pid": os.getpid()}
+    """Liveness, plus which execution provider this process will run on.
+
+    The provider is the packaged build's own answer, from inside the exe --
+    the one place it can be asked. check_package reads it here rather than
+    calling select_provider in its own process, which for a year said "CPU"
+    about a venv and nothing about the binary.
+    """
+    global _PROVIDER
+    if _PROVIDER is None:
+        from . import models  # noqa: PLC0415
+
+        _PROVIDER = models.select_provider()
+    provider, reason = _PROVIDER
+    return {"status": "ok", "pid": os.getpid(), "provider": provider, "provider_reason": reason}
 
 
 @app.get("/api/models")

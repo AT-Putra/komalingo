@@ -36,10 +36,39 @@ def _get_model():
         # on a cold machine downloads whatever main holds that day.
         path = models.ensure("manga-ocr")
 
+        # CPU unless select_provider says CUDA -- the same answer, and the
+        # same reason, the PP-OCR sessions get. Until the GPU build this was a
+        # literal True: the sidecar pinned a CPU-only torch, so there was no
+        # device to ask about.
+        provider, _ = models.select_provider()
+        if provider == "CUDAExecutionProvider":
+            _tune_cuda()
         # ponytail: the pipeline is single-threaded, so a lock-free lazy global is
         # sufficient. Upgrade path: add a lock if concurrent OCR is introduced.
-        _MODEL = MangaOcr(pretrained_model_name_or_path=path, force_cpu=True)
+        _MODEL = MangaOcr(pretrained_model_name_or_path=path,
+                          force_cpu=provider != "CUDAExecutionProvider")
     return _MODEL
+
+
+def _tune_cuda() -> None:
+    """Keep the cuDNN attention backend out of manga-ocr's decoder.
+
+    Measured on an RTX 5070 Ti (cu130): MangaOcr's constructor -- which runs
+    one warm-up inference -- took 19s on the GPU against 5s on the CPU, every
+    launch, JIT cache or not. CUDA init, the first convolution and the first
+    matmul were each under 0.2s; the whole stall was the first attention
+    call, where torch's scaled-dot-product picks cuDNN on this device and
+    cuDNN 9 compiles its fused attention kernels at runtime, per process.
+    With that backend off the constructor takes 5.0s -- the CPU's figure --
+    and a bubble reads in 30-70ms against 110-160ms on the CPU, with the
+    same text. The other backends (flash, memory-efficient, math) ship
+    compiled.
+    """
+    import torch  # noqa: PLC0415
+
+    tune = getattr(getattr(torch.backends, "cuda", None), "enable_cudnn_sdp", None)
+    if tune is not None:
+        tune(False)
 
 
 def _as_image(img) -> Image.Image:

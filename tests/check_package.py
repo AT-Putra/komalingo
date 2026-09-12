@@ -68,8 +68,11 @@ from lib.stub_provider import StubProvider  # noqa: E402
 from sidecar.models import select_provider  # noqa: E402
 
 EXE_NAME = "sidecar-x86_64-pc-windows-msvc.exe"
-DIST = os.path.join(ROOT, "build", "dist")
+# One-dir since the GPU build: the exe and _internal/ side by side under
+# dist/sidecar/. See build/sidecar.spec for why one-file was retired.
+DIST = os.path.join(ROOT, "build", "dist", "sidecar")
 EXE = os.path.join(DIST, EXE_NAME)
+INTERNAL = os.path.join(DIST, "_internal")
 SPEC = os.path.join(ROOT, "build", "sidecar.spec")
 MANIFEST = os.path.join(ROOT, "build", "longpath.manifest")
 SMOKE = os.path.join(ROOT, "fixtures", "smoke", "tategaki_01.png")
@@ -79,6 +82,10 @@ HEALTH_TIMEOUT = 30.0  # cold start budget; past this we fall back to one-dir
 SHUTDOWN_TIMEOUT = 5.0
 BODY_TIMEOUT = 15.0  # wall-clock budget for reading a response body
 TWO_GB = 2 * 1024**3
+# The one-dir folder, all in. The one-file rule was 2 GB because a one-file
+# exe unpacks itself on every launch; a folder runs in place, and the bound
+# here is a record of what CUDA torch costs, not a launch-time constraint.
+FOLDER_MAX = 4 * 1024**3
 
 
 # -- locating the SDK ------------------------------------------------------
@@ -188,8 +195,23 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def launch(port: int, nonce: str) -> subprocess.Popen:
+def _folder_bytes(path: str) -> int:
+    total = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def launch(port: int, nonce: str, force_cpu: bool = True) -> subprocess.Popen:
     """Start the exe with its output drained from the first byte.
+
+    `force_cpu` sets MT_FORCE_CPU=1 for the child: the default invocation
+    proves the CPU path, which every machine has; --gpu launches without it
+    and asserts the exe chose CUDA on its own.
 
     The drain lives in lib/childio.py now, and the reason it has to exist is
     written there. This check learned it the first time -- a missing
@@ -198,6 +220,10 @@ def launch(port: int, nonce: str) -> subprocess.Popen:
     the second, which is what moved it into shared code.
     """
     env = {**os.environ, "MT_PORT": str(port), "MT_SHUTDOWN_NONCE": nonce}
+    if force_cpu:
+        env["MT_FORCE_CPU"] = "1"
+    else:
+        env.pop("MT_FORCE_CPU", None)
     return launch_drained([EXE], env=env, cwd=DIST)
 
 
@@ -280,13 +306,25 @@ def reap(pids) -> None:
 # -- the GPU variant -------------------------------------------------------
 
 
-def main_gpu():
-    """--gpu: assert onnxruntime actually SELECTED CUDA, not merely offers it.
+def _exe_provider(port: int) -> tuple[str, str]:
+    """(provider, reason) as the running exe reports them on /api/health."""
+    status, body = get(port, "/api/health", timeout=30.0)
+    if status != 200:
+        return "", f"health returned {status}"
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return "", f"health body is not JSON: {body[:80]!r}"
+    return str(payload.get("provider", "")), str(payload.get("provider_reason", ""))
 
-    Exit 3 with a named reason when there is no CUDA device. That is a pass for
-    this story -- this machine has no GPU -- but it must say so rather than
-    reporting green, or the check silently stops meaning anything the day a GPU
-    appears.
+
+def main_gpu():
+    """--gpu: the PACKAGED exe selects CUDA on its own, and translates on it.
+
+    Exit 3 with a named reason when there is no CUDA device: a pass for the
+    story on a box without a GPU, said out loud rather than reported green,
+    or the check silently stops meaning anything the day a GPU appears. Needs
+    the exe the default invocation built; it does not build one itself.
     """
     c = Checks("check_package --gpu")
     try:
@@ -301,7 +339,43 @@ def main_gpu():
     provider, reason = select_provider()
     c.check(provider == "CUDAExecutionProvider", f"select_provider chose CUDA ({provider}: {reason})")
     c.check(reason == "", f"and reports no fallback reason ({reason!r})")
+    if not os.path.exists(EXE):
+        return skip(f"no packaged exe at {EXE}; run check_package.py first")
 
+    port = free_port()
+    nonce = "gpu-nonce-" + os.urandom(8).hex()
+    proc = launch(port, nonce, force_cpu=False)
+    try:
+        elapsed = wait_health(proc, port)
+        if elapsed is None:
+            c.check(False, f"/api/health returns 200 within {HEALTH_TIMEOUT}s:\n{captured(proc)[-800:]}")
+            return c.finish()
+        c.check(True, f"/api/health returns 200 in {elapsed:.1f}s")
+        exe_provider, exe_reason = _exe_provider(port)
+        c.check(exe_provider == "CUDAExecutionProvider" and exe_reason == "",
+                f"the exe selected CUDA on its own ({exe_provider}: {exe_reason!r})")
+        with StubProvider() as stub:
+            out_dir = os.path.join(ROOT, "build", "work", "package-gpu-out")
+            shutil.rmtree(out_dir, ignore_errors=True)
+            status, body = post(port, "/api/translate", {
+                "src_path": SMOKE, "dest_dir": out_dir, "page": 1,
+                "settings": {"base_url": stub.url, "api_key": "", "model": "stub-model"},
+            }, timeout=180)
+        c.check(status == 200, f"a translate through the exe on CUDA returns 200 ({status})")
+        try:
+            rec = json.loads(body)
+        except ValueError:
+            rec = {}
+        c.check(rec.get("ocr_calls", 0) >= 1 and rec.get("detections", 0) >= 1,
+                f"and it detected and read the page ({rec.get('detections')} detections, "
+                f"{rec.get('ocr_calls')} OCR calls)")
+        status, _ = post(port, "/api/shutdown", headers={"X-Shutdown-Nonce": nonce}, timeout=10)
+        c.check(status == 200, f"shutdown with the nonce is accepted ({status})")
+    finally:
+        try:
+            proc.wait(timeout=SHUTDOWN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
     return c.finish()
 
 
@@ -312,7 +386,9 @@ def build(c) -> bool:
     """Build via the spec. False if the build failed."""
     r = subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm",
-         "--distpath", DIST, "--workpath", os.path.join(ROOT, "build", "work"), SPEC],
+         # The parent: PyInstaller appends COLLECT's name, so this is dist/sidecar/.
+         "--distpath", os.path.dirname(DIST),
+         "--workpath", os.path.join(ROOT, "build", "work"), SPEC],
         cwd=ROOT, capture_output=True,
         encoding="utf-8", errors="replace",
     )
@@ -349,7 +425,11 @@ def main():
         return c.finish()
 
     size = os.path.getsize(EXE)
-    c.check(size < TWO_GB, f"the one-file exe is under 2GB ({size / 1024**2:.0f}MB)")
+    c.check(size < TWO_GB, f"the one-dir exe is a bootloader, under 2GB ({size / 1024**2:.0f}MB)")
+    c.check(os.path.isdir(INTERNAL), f"_internal/ sits beside it ({INTERNAL})")
+    folder = _folder_bytes(DIST)
+    c.check(folder < FOLDER_MAX,
+            f"the whole folder is under {FOLDER_MAX / 1024**3:.0f}GB ({folder / 1024**2:.0f}MB)")
 
     # [3] longPathAware is IN THE EXE, not merely in the source manifest.
     #
@@ -469,13 +549,16 @@ def main():
                     f"[cbr] and the cbr->cbz notice is on the record "
                     f"({rec.get('format_warning')!r})")
 
-        # [11] the CPU EP was selected. Goes red on a build where onnxruntime
-        # resolves to nothing at all: select_provider names every fallback it
-        # takes, so an empty provider string means nothing chose anything.
-        provider, reason = select_provider()
+        # [11] the CPU EP was selected -- by the EXE, read off its own health
+        # route. The earlier version called select_provider in this process,
+        # which described the venv and said nothing about the binary. Goes
+        # red on a build where onnxruntime resolves to nothing at all: every
+        # fallback names itself, so an empty provider means nothing chose.
+        provider, reason = _exe_provider(port)
         c.check(
-            provider == "CPUExecutionProvider",
-            f"the CPU execution provider was selected ({provider}: {reason})",
+            provider == "CPUExecutionProvider" and "MT_FORCE_CPU" in reason,
+            f"the exe selected the CPU execution provider, because it was told to "
+            f"({provider}: {reason})",
         )
 
         # -- the two negative shutdown asserts, BEFORE the real one ----------

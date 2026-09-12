@@ -39,7 +39,8 @@
       "binaries/sidecar"
     ],
     "resources": {
-      "../fixtures/smoke/tategaki_01.png": "sample.png"
+      "../fixtures/smoke/tategaki_01.png": "sample.png",
+      "binaries/_internal": "_internal"
     }
   }
 }

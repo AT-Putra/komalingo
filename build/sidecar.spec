@@ -1,7 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""One-file build of the sidecar.
+"""One-dir build of the sidecar: dist/sidecar/<exe> beside dist/sidecar/_internal/.
 
 Run from the repo root:  uv run --project sidecar pyinstaller build/sidecar.spec
+
+One-dir, not one-file, since the GPU build. The build order set the rule
+before the GPU decision: past 2 GB, or past 30 s to /api/health, switch to
+one-dir. CUDA torch put the one-file exe at 2.23 GB, and a one-file exe
+unpacks its whole archive into %TEMP% on every launch -- 15 s of copying
+before the bootloader could start Python, 2 GB of SSD churn per start, and
+a directory left behind by every crash. One-dir runs in place: the exe is a
+bootloader of a few MB, _internal/ holds the rest, and Tauri ships that
+folder as a resource beside the sidecar (tauri.conf.json bundle.resources).
 
 Three things here are load-bearing and easy to undo by accident:
 
@@ -20,14 +29,16 @@ Three things here are load-bearing and easy to undo by accident:
     a real translate.
 
 The longPathAware manifest MUST be applied here, through EXE(manifest=...), and
-NOT merged in afterwards with mt.exe. A one-file exe is a PE followed by an
-appended PKG archive; mt.exe rewrites the resource section, moves everything
-after it, and the bootloader can no longer find the archive it is standing on:
+NOT merged in afterwards with mt.exe. When this was a one-file exe -- a PE
+followed by an appended PKG archive -- mt.exe rewrote the resource section,
+moved everything after it, and the bootloader could no longer find the
+archive it was standing on:
 
     [PYI-3992:ERROR] Could not load PyInstaller's embedded PKG archive
 
-The build then produces an exe that launches and dies. PyInstaller embeds the
-manifest before appending the archive, which is the only ordering that survives.
+The one-dir exe carries no appended archive, but the manifest stays where it
+was: PyInstaller embeds it at build time, and check_package asserts it is in
+the exe rather than in the source file.
 """
 import os
 
@@ -140,9 +151,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="sidecar-x86_64-pc-windows-msvc",
     manifest=os.path.join(ROOT, "build", "longpath.manifest"),
     debug=False,
@@ -150,4 +160,14 @@ exe = EXE(
     upx=False,
     console=True,
     target_arch=None,
+)
+# dist/sidecar/: the exe and _internal/ side by side. The folder name is what
+# tauri.conf.json's resource entry and the binaries README refer to.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="sidecar",
 )

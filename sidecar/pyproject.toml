@@ -14,7 +14,11 @@ dependencies = [
     "uvicorn>=0.34",
     "psutil>=6",
     "manga-ocr>=0.1.14",
-    "onnxruntime>=1.20,<2",
+    # The GPU package carries the CPU provider too, so one build serves both
+    # paths: models.select_provider picks CUDA when torch sees a device and
+    # falls back to CPU, with a reason, when it does not. Built against CUDA
+    # 13 since 1.27, which is what the torch index below ships.
+    "onnxruntime-gpu>=1.27,<2",
     "py7zr>=1.0",
     "libarchive-c>=5.1",
     # Phase 7 (AC-5): pypdfium2 reads and renders, pypdf carries the outline
@@ -32,13 +36,18 @@ dependencies = [
 # See progress.txt.
 
 [tool.uv]
+# CUDA 13 torch: the RTX 5070 Ti (Blackwell, sm_120) needs CUDA >= 12.8, and
+# 2.14's Windows wheels come as cu126 or cu130. The wheel runs on a machine
+# with no GPU at all -- torch.cuda.is_available() is simply False and every
+# check takes the CPU path -- so this is one build, not two; the cost is
+# size, about 3 GB of CUDA libraries in torch/lib that the exe carries.
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = { index = "pytorch-cu130" }
 
 [build-system]
 requires = ["hatchling"]

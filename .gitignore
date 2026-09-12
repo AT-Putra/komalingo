@@ -50,6 +50,8 @@ fixtures/archives/bomb.cbt
 fixtures/archives/bomb.cb7
 
 src-tauri/binaries/*.exe
+# The one-dir sidecar's payload, copied beside the exe (see binaries/README.md).
+src-tauri/binaries/_internal/
 
 # graphify: the graph itself is committed (graph.json, GRAPH_REPORT.md,
 # graph.html, manifest.json, community labels). Machine-local churn is not:

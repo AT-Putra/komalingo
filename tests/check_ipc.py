@@ -114,7 +114,8 @@ def main():
     # -- asserting a suffix here would be asserting a bug. What has to line up
     # is the built artifact, whose name is the conf entry PLUS the triple.
     base = os.path.basename(ext[0]) if ext else ""
-    built = os.path.join(ROOT, "build", "dist", f"{base}-{TRIPLE}.exe")
+    # dist/sidecar/: the one-dir folder check_package builds (its exe beside _internal/).
+    built = os.path.join(ROOT, "build", "dist", "sidecar", f"{base}-{TRIPLE}.exe")
     c.check(
         base == "sidecar",
         f"the externalBin entry is the unsuffixed base name ({base!r}) -- "
