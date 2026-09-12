@@ -177,6 +177,20 @@ async fn api(
     serde_json::from_str(&text).map_err(|e| ApiError::local(e.to_string()))
 }
 
+/// Let the webview read the pages under one output folder.
+///
+/// The asset protocol ships with an empty scope (tauri.conf.json) and this is
+/// the only way it widens: the folder the user picked for this run, and its
+/// subtree, because that is where pipeline._deliver puts every page. A static
+/// `**` scope would have handed the webview the whole disk to load a picture
+/// from a directory it already chose.
+#[tauri::command]
+async fn allow_output_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    app.asset_protocol_scope()
+        .allow_directory(&path, true)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn stop_sidecar(app: tauri::AppHandle) -> Result<(), String> {
     let state: State<Sidecar> = app.state();
@@ -204,7 +218,12 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Sidecar::default())
-        .invoke_handler(tauri::generate_handler![start_sidecar, stop_sidecar, api])
+        .invoke_handler(tauri::generate_handler![
+            start_sidecar,
+            stop_sidecar,
+            api,
+            allow_output_dir
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

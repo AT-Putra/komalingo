@@ -21,6 +21,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Alert } from "../components/Alert";
 import { Icon } from "../components/Icon";
 import {
@@ -123,7 +124,7 @@ export default function SpotFix({
     };
     // No cache-buster on a data: URL: a query string would corrupt it, and an
     // inline image cannot be stale anyway.
-    const src = convertPath(page.output);
+    const src = pageSrc(page.output);
     img.src = src.startsWith("data:") ? src : `${src}?v=${Date.now()}`;
   }, [page, selected]);
 
@@ -381,12 +382,16 @@ export default function SpotFix({
 /**
  * A local file path as something the webview will load.
  *
- * ponytail: `asset://` via Tauri's convertFileSrc is the supported route and
- * needs the asset protocol enabled in tauri.conf.json, which is a Phase 8
- * packaging change. Ceiling: the canvas stays blank in a packaged build until
- * that scope entry exists. Upgrade path: import convertFileSrc from
- * "@tauri-apps/api/core" here and delete this function.
+ * Through the asset protocol, which the Rust side opened for this run's
+ * output folder (allow_output_dir) before the item was started. The
+ * sidecar hands paths back \\?\-prefixed (atomic.long_path); the prefix is
+ * for Win32, not for a URL, so it comes off first. A data: URL (the dev
+ * mock) passes through untouched.
  */
-function convertPath(p: string): string {
-  return p.replace(/^\\\\\?\\/, "").replace(/\\/g, "/");
+function pageSrc(p: string): string {
+  if (p.startsWith("data:")) return p;
+  const plain = p.startsWith("\\\\?\\UNC\\")
+    ? "\\\\" + p.slice(8)
+    : p.replace(/^\\\\\?\\/, "");
+  return convertFileSrc(plain);
 }

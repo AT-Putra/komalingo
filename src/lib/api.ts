@@ -163,6 +163,9 @@ export const api = {
 
   health: () => call<{ status: string; pid: number }>("/api/health"),
 
+  /** Let the editor's canvas load pages from this folder (asset protocol). */
+  allowOutputDir: (path: string) => invoke<void>("allow_output_dir", { path }),
+
   /** Populate the model dropdown from the user's own endpoint. */
   models: (s: Pick<ProviderSettings, "base_url" | "api_key">) => {
     const q = new URLSearchParams({ base_url: s.base_url, api_key: s.api_key });

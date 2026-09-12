@@ -308,6 +308,7 @@ async function api(path: string, method: string, body: Record<string, unknown> |
         setTimeout(() => emit("sidecar-log", "INFO:     Application startup complete."), 900);
         return 8765;
       case "stop_sidecar":
+      case "allow_output_dir":
         return undefined;
       case "api":
         return api(String(args.path), String(args.method), args.body as Record<string, unknown> | null);

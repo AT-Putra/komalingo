@@ -165,6 +165,9 @@ export default function App() {
     setPagesDone(0);
     setProgress(null);
     try {
+      // Before the run, not after: the editor opens on the first page the
+      // moment the result lands, and the canvas must already be allowed in.
+      await api.allowOutputDir(form.dest);
       const settings = loadSettings();
       const result = await api.item({
         src_path: form.src,
