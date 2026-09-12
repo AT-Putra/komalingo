@@ -11,6 +11,7 @@ exits on any POST.
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -327,6 +328,43 @@ def main():
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+
+    # -- the parent watch: stdin EOF ends the sidecar, and only when asked --
+    # The orphan this pins: `tauri dev` restarted, the old app's sidecar kept
+    # 8756, the new one failed to bind, and the UI talked to the orphan for
+    # the rest of the session. Tauri holds the sidecar's stdin pipe; when the
+    # app dies the OS closes it, and that -- not the nonce, which died with
+    # the app -- is what must end the sidecar. Two servers at once, because
+    # each start costs the import time: one opted in, one not, both handed a
+    # stdin pipe that is then closed. Only the opted-in one may exit.
+    watched = launch_drained([sys.executable, "-c", SERVER, str(PORT + 1)],
+                             env=dict(env, MT_EXIT_ON_STDIN_EOF="1"), cwd=ROOT,
+                             stdin=subprocess.PIPE)
+    plain = launch_drained([sys.executable, "-c", SERVER, str(PORT + 2)],
+                           env=env, cwd=ROOT, stdin=subprocess.PIPE)
+    try:
+        c.check(wait_up(PORT + 1) and wait_up(PORT + 2),
+                "both stdin-piped sidecars start and answer health")
+        watched.stdin.close()
+        plain.stdin.close()
+        for _ in range(40):
+            if watched.poll() is not None:
+                break
+            time.sleep(0.25)
+        c.check(watched.poll() is not None,
+                f"MT_EXIT_ON_STDIN_EOF=1: the sidecar exits when its stdin closes "
+                f"({captured(watched, 2)!r:.160})")
+        c.check(call("GET", "/api/health", PORT + 1)[0] == 0,
+                "and its port no longer answers -- nothing left for the next app to talk to")
+        time.sleep(1.0)
+        c.check(plain.poll() is None and call("GET", "/api/health", PORT + 2)[0] == 200,
+                "without the variable a closed stdin changes nothing -- the checks' own "
+                "launches are not affected")
+    finally:
+        for p in (watched, plain):
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=5)
 
     # -- the 400 envelope against a message HTTP cannot deliver -------------
     # A backslash or a newline typed into the base URL comes back through

@@ -310,6 +310,10 @@ async function api(path: string, method: string, body: Record<string, unknown> |
       case "stop_sidecar":
       case "allow_output_dir":
         return undefined;
+      case "frontend_log":
+        // No terminal in a browser; the console is the nearest thing.
+        console.error(`[ui:${String(args.level)}] ${String(args.message)}`);
+        return undefined;
       case "api":
         return api(String(args.path), String(args.method), args.body as Record<string, unknown> | null);
       case "plugin:event|listen": {

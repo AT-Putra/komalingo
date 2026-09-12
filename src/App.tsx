@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Icon, type IconName } from "./components/Icon";
 import { ProgressBar } from "./components/Progress";
 import Job from "./routes/Job";
@@ -9,6 +10,7 @@ import {
   api,
   describeError,
   loadSettings,
+  onExit,
   onLog,
   onProgress,
   type ItemResult,
@@ -59,6 +61,14 @@ function stageWord(stage: string): string {
 const HEALTH_MS = 500;
 const HEALTH_GIVE_UP_MS = 120_000;
 
+function exitMessage(code: number | null): string {
+  return (
+    `The sidecar this app started has exited (code ${code ?? "killed"}). ` +
+    "If the Log says port 8756 is already in use, a sidecar from an earlier run is " +
+    "still running: end sidecar.exe in Task Manager, then restart the app."
+  );
+}
+
 export default function App() {
   const [view, setView] = useState<View>("translate");
   const [theme, setTheme] = useState<Theme>(loadTheme);
@@ -67,6 +77,8 @@ export default function App() {
   const [log, setLog] = useState<string[]>([]);
   const [showLog, setShowLog] = useState(false);
   const [error, setError] = useState("");
+  // Set by the sidecar-exit event; undefined while our child is alive.
+  const exitCode = useRef<number | null | undefined>(undefined);
 
   const [form, setForm] = useState<TranslateForm>({
     src: "",
@@ -118,6 +130,18 @@ export default function App() {
         }
       }),
       onLog((line) => setLog((prev) => [...prev.slice(-199), line])),
+      onExit((code) => {
+        // The sidecar this app started is gone, and nothing here restarts
+        // it. If the strip already said "ready", whatever answered
+        // /api/health was not ours -- a sidecar left over from an earlier
+        // run, holding the port -- and every request from here on goes to
+        // a process this app cannot see or stop. Either way: error, now,
+        // rather than two minutes of polling or a 500 that points at the
+        // wrong thing.
+        exitCode.current = code;
+        setSidecar("error");
+        setError((prev) => prev || exitMessage(code));
+      }),
     ];
 
     // start_sidecar returns on spawn, not on readiness. Readiness is the
@@ -134,7 +158,11 @@ export default function App() {
         if (Date.now() - began > HEALTH_GIVE_UP_MS) {
           if (!cancelled) {
             setSidecar("error");
-            setError("The sidecar did not answer within two minutes. Open the log below.");
+            setError(
+              exitCode.current !== undefined
+                ? exitMessage(exitCode.current)
+                : "The sidecar did not answer within two minutes. Open the log below.",
+            );
           }
           return;
         }
@@ -149,13 +177,17 @@ export default function App() {
         setError(describeError(e));
       });
 
+    // No api.stop() here. React never runs this cleanup when the window
+    // closes -- the sidecar ends then because the process ending closes its
+    // stdin pipe (lib.rs spawn, sidecar/main.py watch_parent). The cleanup
+    // DOES run on StrictMode's dev double-mount and on HMR, and a stop there
+    // killed a sidecar that was still importing torch, then raced the
+    // re-mount's start for the same slot: on every dev launch this app
+    // either had no sidecar or, before today, an orphan answering for it.
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
       subs.forEach((p) => p.then((un) => un()));
-      api.stop().catch(() => {
-        // Closing anyway; the Rust side kills the child if the POST is missed.
-      });
     };
   }, []);
 
@@ -301,35 +333,49 @@ export default function App() {
         </div>
       </aside>
 
+      {/* Something moving while the sidecar boots. The strip already says
+          "Starting sidecar…", but a first launch unpacks torch and can sit
+          there ten seconds or more; a shell that is merely disabled for that
+          long reads as hung. */}
+      {sidecar === "starting" && (
+        <div className="boot-line progress sm indeterminate" aria-hidden>
+          <div className="fill" />
+        </div>
+      )}
+
       <main className="main">
-        {view === "settings" ? (
-          <Settings />
-        ) : view === "job" && batch ? (
-          <Job key={batch.job_id} jobId={batch.job_id} initial={batch} runningItems={runningItems} />
-        ) : view === "spotfix" && job && page ? (
-          <SpotFix
-            job={job.job_id}
-            page={page}
-            pages={job.pages}
-            onSelectPage={setPage}
-            destDir={form.dest}
-            lang={form.lang}
-            onPage={updatePage}
-          />
-        ) : (
-          <Translate
-            form={form}
-            onForm={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
-            busy={busy}
-            sidecarReady={sidecar === "ready"}
-            onRunItem={runItem}
-            onRunFolder={runFolder}
-            error={error}
-            warnings={warnings}
-            progress={progress}
-            pagesDone={pagesDone}
-          />
-        )}
+        {/* Per view, keyed on the view: a crash in one leaves the sidebar
+            standing, and moving to another view clears it. */}
+        <ErrorBoundary scope="This view" resetKey={view}>
+          {view === "settings" ? (
+            <Settings />
+          ) : view === "job" && batch ? (
+            <Job key={batch.job_id} jobId={batch.job_id} initial={batch} runningItems={runningItems} />
+          ) : view === "spotfix" && job && page ? (
+            <SpotFix
+              job={job.job_id}
+              page={page}
+              pages={job.pages}
+              onSelectPage={setPage}
+              destDir={form.dest}
+              lang={form.lang}
+              onPage={updatePage}
+            />
+          ) : (
+            <Translate
+              form={form}
+              onForm={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+              busy={busy}
+              sidecarReady={sidecar === "ready"}
+              onRunItem={runItem}
+              onRunFolder={runFolder}
+              error={error}
+              warnings={warnings}
+              progress={progress}
+              pagesDone={pagesDone}
+            />
+          )}
+        </ErrorBoundary>
       </main>
 
       {showLog && (

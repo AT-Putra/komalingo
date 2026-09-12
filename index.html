@@ -18,10 +18,71 @@
       })();
     </script>
     <meta name="color-scheme" content="dark light" />
+    <style>
+      /* The splash. Inline and JS-free on purpose: App.css arrives with the
+         module graph, and until then a styled page needs its style HERE.
+         Colours mirror App.css's --bg / --fg / --accent for both themes so
+         the hand-off to the shell is a fade, not a jump. main.tsx removes
+         #splash after React's first commit. */
+      html, body { height: 100%; margin: 0; }
+      html { background: #0f172a; }
+      html[data-theme="light"] { background: #f4f6fa; }
+      #splash {
+        position: fixed; inset: 0; z-index: 100;
+        display: grid; place-items: center; align-content: center; gap: 14px;
+        background: #0f172a; color: #94a3b8;
+        font: 15px/1.5 "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+        transition: opacity 250ms ease-out;
+      }
+      html[data-theme="light"] #splash { background: #f4f6fa; color: #526176; }
+      #splash.out { opacity: 0; pointer-events: none; }
+      .splash-mark {
+        display: grid; place-items: center; width: 48px; height: 48px;
+        border-radius: 10px; background: #22c55e; color: #052e16;
+        animation: splash-breathe 1.6s ease-in-out infinite;
+      }
+      html[data-theme="light"] .splash-mark { background: #16a34a; color: #fff; }
+      .splash-name { font-weight: 600; letter-spacing: -0.01em; color: #f1f5f9; }
+      html[data-theme="light"] .splash-name { color: #0f172a; }
+      .splash-bar {
+        position: relative; width: 160px; height: 3px; border-radius: 999px;
+        background: rgba(148, 163, 184, 0.25); overflow: hidden;
+      }
+      .splash-bar span {
+        position: absolute; top: 0; bottom: 0; left: -40%; width: 40%;
+        border-radius: inherit; background: #22c55e;
+        animation: splash-sweep 1.4s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+      }
+      html[data-theme="light"] .splash-bar span { background: #16a34a; }
+      .splash-text { font-size: 0.85rem; }
+      .splash-error {
+        max-width: 560px; margin: 6px 24px 0; padding: 12px 14px;
+        border-radius: 10px; background: rgba(239, 68, 68, 0.12); color: #f87171;
+        font: 0.85rem/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap;
+      }
+      html[data-theme="light"] .splash-error { color: #b91c1c; }
+      @keyframes splash-sweep { to { left: 100%; } }
+      @keyframes splash-breathe { 50% { transform: scale(1.06); } }
+      @media (prefers-reduced-motion: reduce) {
+        .splash-mark, .splash-bar span { animation: none; }
+        .splash-bar span { left: 0; width: 100%; opacity: 0.6; }
+        #splash { transition: none; }
+      }
+    </style>
   </head>
 
   <body>
     <div id="root"></div>
+    <div id="splash" role="status" aria-busy="true" aria-live="polite">
+      <div class="splash-mark" aria-hidden="true">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" />
+        </svg>
+      </div>
+      <div class="splash-name">MangaTranslator</div>
+      <div class="splash-bar" aria-hidden="true"><span></span></div>
+      <div class="splash-text">Starting…</div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

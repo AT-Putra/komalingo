@@ -92,7 +92,11 @@ pub fn new_nonce() -> String {
 
 fn spawn(app: &tauri::AppHandle) -> Result<(), String> {
     let state: State<Sidecar> = app.state();
-    if state.child.lock().unwrap().is_some() {
+    // The slot is held for the whole spawn, so two start_sidecar calls
+    // arriving together cannot both find it empty and start two sidecars
+    // for one port.
+    let mut slot = state.child.lock().unwrap();
+    if slot.is_some() {
         return Ok(());
     }
 
@@ -108,11 +112,20 @@ fn spawn(app: &tauri::AppHandle) -> Result<(), String> {
         .env("PYTHONIOENCODING", "utf-8")
         .env("MT_SHUTDOWN_NONCE", &nonce)
         .env("MT_PORT", PORT.to_string())
+        // The sidecar exits when its stdin pipe closes -- which is what
+        // happens to the pipe below when THIS process ends, however it ends.
+        // The nonce cannot do that job: it dies with us. Before this, every
+        // `tauri dev` restart left a sidecar holding 8756, the new one failed
+        // to bind, and the UI talked to the orphan (sidecar/main.py,
+        // watch_parent).
+        .env("MT_EXIT_ON_STDIN_EOF", "1")
         .spawn()
         .map_err(|e| e.to_string())?;
 
+    let pid = child.pid();
     *state.nonce.lock().unwrap() = nonce;
-    *state.child.lock().unwrap() = Some(child);
+    *slot = Some(child);
+    drop(slot);
 
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -131,6 +144,17 @@ fn spawn(app: &tauri::AppHandle) -> Result<(), String> {
                     let _ = handle.emit("sidecar-log", String::from_utf8_lossy(&line).to_string());
                 }
                 CommandEvent::Terminated(payload) => {
+                    // Free the slot, if it still holds THIS child, so the next
+                    // start_sidecar spawns a new one instead of returning Ok for
+                    // a corpse. By pid: a stop+start pair may already have put
+                    // a newer child there, and that one is not ours to drop.
+                    {
+                        let state: State<Sidecar> = handle.state();
+                        let mut slot = state.child.lock().unwrap();
+                        if slot.as_ref().map(|c| c.pid()) == Some(pid) {
+                            slot.take();
+                        }
+                    }
                     let _ = handle.emit("sidecar-exit", payload.code);
                     break;
                 }
@@ -140,6 +164,16 @@ fn spawn(app: &tauri::AppHandle) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// The webview's errors, on this process's stderr -- which is the terminal
+/// `tauri dev` was launched from. The webview's own console is not: a render
+/// crash that only reached devtools left the terminal saying nothing while
+/// the window went blank. main.tsx forwards here in dev builds only; the
+/// level is a tag, not a filter.
+#[tauri::command]
+fn frontend_log(level: String, message: String) {
+    eprintln!("[ui:{level}] {message}");
 }
 
 #[tauri::command]
@@ -191,13 +225,22 @@ async fn allow_output_dir(app: tauri::AppHandle, path: String) -> Result<(), Str
         .map_err(|e| e.to_string())
 }
 
+/// Stop the sidecar this app started. Not called on app exit -- the process
+/// ending closes the sidecar's stdin pipe, and the sidecar exits on that
+/// (sidecar/main.py, watch_parent). Kept for an explicit restart action.
 #[tauri::command]
 async fn stop_sidecar(app: tauri::AppHandle) -> Result<(), String> {
     let state: State<Sidecar> = app.state();
-    let nonce = state.nonce.lock().unwrap().clone();
-    if nonce.is_empty() {
+    // Take the child and its nonce BEFORE the first await. When this ran
+    // after the shutdown POST, a start_sidecar arriving during that await
+    // found the slot still occupied, spawned nothing -- and then this killed
+    // the only sidecar there was. React's StrictMode dev mount issued
+    // exactly that start, stop, start sequence on every launch.
+    let child = state.child.lock().unwrap().take();
+    let nonce = std::mem::take(&mut *state.nonce.lock().unwrap());
+    let Some(child) = child else {
         return Ok(());
-    }
+    };
     // Ask politely first: the sidecar exits after answering, so an in-flight
     // page write lands instead of being truncated by a kill.
     let _ = reqwest::Client::new()
@@ -205,9 +248,10 @@ async fn stop_sidecar(app: tauri::AppHandle) -> Result<(), String> {
         .header("X-Shutdown-Nonce", nonce)
         .send()
         .await;
-    if let Some(child) = state.child.lock().unwrap().take() {
-        let _ = child.kill();
-    }
+    // This ends the PyInstaller bootloader; the Python process under it ends
+    // when `child` drops here and closes the stdin pipe. A kill alone never
+    // reached that second process -- which is where the orphans came from.
+    let _ = child.kill();
     Ok(())
 }
 
@@ -222,7 +266,8 @@ pub fn run() {
             start_sidecar,
             stop_sidecar,
             api,
-            allow_output_dir
+            allow_output_dir,
+            frontend_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

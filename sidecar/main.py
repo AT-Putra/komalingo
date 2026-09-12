@@ -44,6 +44,51 @@ from .pipeline import CacheMiss  # noqa: E402
 
 HOST = "127.0.0.1"  # never 0.0.0.0. See the module docstring.
 SHUTDOWN_NONCE = os.environ.get("MT_SHUTDOWN_NONCE", "")
+# Set by Tauri, and only by Tauri: exit when stdin reaches EOF. See watch_parent.
+EXIT_ON_STDIN_EOF = os.environ.get("MT_EXIT_ON_STDIN_EOF", "") == "1"
+
+
+def watch_parent(stdin=None) -> threading.Thread:
+    """Exit the moment stdin closes -- which, under Tauri, means the parent died.
+
+    Tauri hands this process a stdin pipe and holds the write end for the life
+    of the app. When the app exits, crashes, or `tauri dev` restarts it, the
+    OS closes that end and the read here returns EOF -- with no cooperation
+    from a parent that may not be running any more. Nothing else covers that
+    case: the shutdown route needs the nonce, and the nonce died with the
+    parent.
+
+    Without this, a sidecar outlived every restart of the app. The next app
+    spawned its own sidecar, which failed to bind 8756 and exited; the UI
+    polled /api/health, the ORPHAN answered, and the UI said "ready" -- to a
+    process whose stdout pipe had no reader. Its first progress print raised
+    OSError [Errno 22] into the 500 envelope, and the traceback went to a
+    stderr nobody was reading. Two sidecars, one port, and every symptom
+    pointing at the wrong one.
+
+    Opt-in by env, because a stdin that is closed or /dev/null is normal for
+    a sidecar launched any other way -- the checks launch it with pipes they
+    never write to, and a shell launch has no pipe at all. A daemon thread:
+    it must never keep the process alive, only end it.
+    """
+    stream = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
+
+    def watch():
+        try:
+            while stream.read(4096):
+                pass
+        except (OSError, ValueError):
+            pass  # a closed or invalid handle is the same news as EOF
+        try:
+            print("sidecar: stdin closed -- parent gone, exiting", file=sys.stderr, flush=True)
+        except OSError:
+            pass  # stderr is on the same dead pipe
+        os._exit(0)
+
+    t = threading.Thread(target=watch, name="parent-watch", daemon=True)
+    t.start()
+    return t
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -59,6 +104,8 @@ async def lifespan(_app: FastAPI):
     deprecated in this FastAPI and warns on import -- and a deprecation warning
     on stderr is indistinguishable from a real one in the Tauri log pane.
     """
+    if EXIT_ON_STDIN_EOF:
+        watch_parent()
     try:
         removed = cache.prune_refs()
         if removed:

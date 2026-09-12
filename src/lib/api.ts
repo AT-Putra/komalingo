@@ -254,6 +254,11 @@ export function onLog(fn: (line: string) => void): Promise<UnlistenFn> {
   return listen<string>("sidecar-log", (e) => fn(e.payload));
 }
 
+/** The sidecar THIS app spawned has exited; `code` is null when killed. */
+export function onExit(fn: (code: number | null) => void): Promise<UnlistenFn> {
+  return listen<number | null>("sidecar-exit", (e) => fn(e.payload));
+}
+
 const KEY = "mt.settings";
 
 /**

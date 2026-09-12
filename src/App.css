@@ -584,6 +584,83 @@ select {
   font-size: 0.86rem;
 }
 
+/* ---------- Crash card (ErrorBoundary) ---------- */
+
+.crash {
+  display: grid;
+  place-items: center;
+  padding: var(--s-6);
+}
+.crash.full {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+}
+.crash-card {
+  width: min(640px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  padding: var(--s-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  animation: fade-up var(--dur) var(--ease-out) backwards;
+}
+.crash-card .icon-tile.danger {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+.crash-msg,
+.crash-where pre {
+  margin: 0;
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.crash-msg {
+  color: var(--danger-text);
+}
+.crash-where summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+}
+.crash-where[open] summary {
+  margin-bottom: var(--s-2);
+}
+.crash-where pre {
+  max-height: 240px;
+  overflow: auto;
+  color: var(--fg-muted);
+}
+.crash-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+/* ---------- Boot line ---------- */
+
+/* Shares the main area's grid cell and sits on its top edge, above the
+   scrolling content. Gone the moment the health route answers. */
+.boot-line {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  z-index: 3;
+  height: 3px;
+  border-radius: 0;
+  background: transparent;
+}
+
 /* ---------- Buttons ---------- */
 
 .btn {
