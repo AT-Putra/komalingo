@@ -40,8 +40,9 @@ fixtures/ko/**/*.webp
 fixtures/real/
 # Phase 6 archive fixtures that are regenerable in seconds and have no business
 # in git history: 200 pages, 5001 members, and 8MB of zeros. Every other
-# fixtures/archives/ file is committed -- benign.cbr because nothing can author
-# it, the rest because they are small and the safety gate reads them in CI.
+# fixtures/archives/ file is committed because they are small and the safety
+# gate reads them in CI -- benign.cbr included, and it is now GENERATED like
+# the rest (gen_fixtures._rar4_store) rather than an unauthorable binary.
 fixtures/archives/big.cbz
 fixtures/archives/members.cbz
 fixtures/archives/bomb.cbz
@@ -60,3 +61,7 @@ graphify-out/.graphify_root
 graphify-out/.graphify_python
 graphify-out/.graphify_detect.json
 .sabotage-active
+# Fetched by sidecar/native.py with pinned sha256s, never committed: nine
+# native DLLs are 4MB that git history cannot give back, and a pin can be
+# re-pinned. See sidecar/native.py for why conda-forge and why no-ICU.
+build/libarchive/

@@ -144,6 +144,7 @@ PHASE_ORDER = [
     "check_group",
     "check_cjk",
     "check_id",
+    "check_native",
     "check_archives",
     "check_pdf",
     "check_batch",

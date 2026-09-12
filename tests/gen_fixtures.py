@@ -26,11 +26,13 @@ tree, byte-identical). Three sources of nondeterminism are closed here:
 bodies are Phase 0 deliverables (build order, section E).
 """
 
+import binascii
 import gzip
 import hashlib
 import io
 import json
 import shutil
+import struct
 import sys
 import tarfile
 import zipfile
@@ -771,6 +773,67 @@ def _write(path: Path, entries, fmt: str, comicinfo=None):
     return sha256_file(path)
 
 
+# RAR4, store mode, hand-rolled -- and this is the one archive the product's
+# own writer cannot make.
+#
+# The claim this replaces, carried by the build order and fixtures/README.md
+# since Phase 6, was "no free tool writes RAR, so benign.cbr must be authored
+# once by a maintainer with a licensed WinRAR and committed as the only binary
+# fixture". Two things were wrong with it. WinRAR 7.x REMOVED RAR4 creation --
+# Rar.exe 7.23 has no -ma switch at all -- so the stated escape hatch had
+# quietly closed. And the claim conflates compression with the container: RAR
+# COMPRESSION is proprietary and nothing here will ever produce it, but a
+# store-mode RAR4 container is a documented header format and about forty
+# lines of struct.pack. The fixture only ever needed to be a real RAR that
+# libarchive reads; it never needed to be compressed.
+#
+# So benign.cbr is generated like every other archive fixture, byte-identical
+# across runs, with no proprietary tool anywhere in the path.
+#
+# Layout, per the RAR4 block format: a 7-byte marker, a MAIN_HEAD, one
+# FILE_HEAD + payload per member, an END_ARCHIVE. Every block's HEAD_CRC is
+# the low 16 bits of the crc32 over that block's bytes from HEAD_TYPE onward,
+# which is what libarchive validates before it will read a single member.
+RAR4_MARKER = bytes([0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00])  # "Rar!" + 1a 07 00
+RAR4_DOS_TIME = 0x2C210000  # 1 Jan 1980, matching the zip members' stamp
+
+
+def _rar4_block(head_type: int, flags: int, body: bytes, payload: bytes = b"") -> bytes:
+    """One RAR4 block: HEAD_CRC, HEAD_TYPE, FLAGS, HEAD_SIZE, body, payload.
+
+    HEAD_SIZE counts the header only. The payload that follows a FILE_HEAD is
+    sized by PACK_SIZE inside the body, which is why a file block carries the
+    0x8000 LONG_BLOCK flag and an end block does not.
+    """
+    head_size = 2 + 1 + 2 + 2 + len(body)
+    raw = struct.pack("<BHH", head_type, flags, head_size) + body
+    return struct.pack("<H", binascii.crc32(raw) & 0xFFFF) + raw + payload
+
+
+def _rar4_store(entries) -> bytes:
+    """A RAR4 archive of `entries`, every member stored uncompressed."""
+    out = bytearray(RAR4_MARKER)
+    out += _rar4_block(0x73, 0x0000, struct.pack("<HI", 0, 0))
+    for name, payload in entries:
+        # RAR4 stores Windows paths with backslashes; libarchive hands them
+        # back with forward slashes, which is what the rest of the suite and
+        # expected.json use.
+        stored = name.replace("/", chr(92)).encode("ascii")
+        body = (
+            struct.pack("<II", len(payload), len(payload))          # PACK, UNP
+            + struct.pack("<B", 0x02)                               # HOST_OS win32
+            + struct.pack("<I", binascii.crc32(payload) & 0xFFFFFFFF)
+            + struct.pack("<I", RAR4_DOS_TIME)
+            + struct.pack("<BB", 20, 0x30)                          # v2.0, store
+            + struct.pack("<H", len(stored))
+            + struct.pack("<I", 0x20)                               # FILE_ATTRIBUTE_ARCHIVE
+            + stored
+        )
+        out += _rar4_block(0x74, 0x8000, body, payload)
+    out += _rar4_block(0x7b, 0x4000, b"")
+    return bytes(out)
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -831,6 +894,25 @@ def gen_archives():
             "extra_member": EXTRA_NAME,
             "page_size": [ARCHIVE_W, ARCHIVE_H],
         }
+
+    # --- benign.cbr: the RAR4 clause of AC-6 ------------------------------
+    # Pages only, no ComicInfo and no extra member: check_archives asserts
+    # exactly three members decode, and this fixture's job is the RAR READ
+    # path -- the member-set round-trip is already proved by six other benign
+    # archives that go through the product's own writer.
+    cbr = out / "benign.cbr"
+    cbr.parent.mkdir(parents=True, exist_ok=True)
+    cbr.write_bytes(_rar4_store((name, pages[name]) for name in ARCHIVE_PAGES))
+    report["benign.cbr"] = {
+        "format": "rar",
+        "generation": 4,
+        "sha256": sha256_file(cbr),
+        "natural_order": ARCHIVE_PAGES,
+        "lexicographic_order": sorted(ARCHIVE_PAGES),
+        "members": list(ARCHIVE_PAGES),
+        "page_size": [ARCHIVE_W, ARCHIVE_H],
+        "note": "store-mode RAR4, written by _rar4_store; no proprietary tool",
+    }
 
     # --- hostile: one per rule an archive can carry -----------------------
     good = ("ch1/p1.png", pages["ch1/p1.png"])

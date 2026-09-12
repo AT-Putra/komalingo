@@ -73,7 +73,7 @@ EXTENSIONS = {
 OUTPUT_FORMAT = {ZIP: ZIP, SEVENZIP: SEVENZIP, TAR: TAR, RAR: ZIP}
 
 CBR_WARNING = ("RAR archives are read-only: this item was written as .cbz. "
-               "No free tool can create RAR, so none is bundled.")
+               "RAR compression is proprietary, so nothing here creates one.")
 
 # The 7z epoch pin, in 7z's own unit: 100ns ticks since 1601-01-01. This value
 # is 1970-01-01. Written into every member py7zr emits, because py7zr stamps

@@ -64,6 +64,31 @@
     ],
     "sha256": "e68a656a978fb83ac9489278c7d754863b76940ad115d26c7c55f9cb3c86778d"
   },
+  "benign.cbr": {
+    "format": "rar",
+    "generation": 4,
+    "lexicographic_order": [
+      "ch1/p1.png",
+      "ch1/p10.png",
+      "ch1/p2.png"
+    ],
+    "members": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "natural_order": [
+      "ch1/p1.png",
+      "ch1/p2.png",
+      "ch1/p10.png"
+    ],
+    "note": "store-mode RAR4, written by _rar4_store; no proprietary tool",
+    "page_size": [
+      600,
+      900
+    ],
+    "sha256": "c8be51d17de65bfb38f35802e9dc373275a17f1f24e764b86c761b35e9900d4e"
+  },
   "benign.cbt": {
     "extra_member": "credits.txt",
     "format": "tar",

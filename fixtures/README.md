@@ -85,72 +85,41 @@ output must reproduce the image's own 240x360pt box rather than stretch it
 over the page. Written through img2pdf (`nodate`, internal engine) and
 pypdf, neither of which is wall-clock-free by default.
 
-### `fixtures/archives/benign.cbr` — missing, and AC-6's `.cbr` clause needs TWO things before it can run
+### `fixtures/archives/benign.cbr` — generated, and AC-6's `.cbr` clause runs
 
-**No free tool writes RAR.** Not libarchive, not 7-Zip, not py7zr — RAR
-compression is proprietary and nothing in this build or in CI creates one. So
-this fixture cannot be generated; it has to be authored once, by hand, by a
-maintainer with a licensed WinRAR, and committed as the repository's only
-binary fixture.
+**This section used to say the fixture could not exist.** The claim was "no
+free tool writes RAR — not libarchive, not 7-Zip, not py7zr — so it has to be
+authored once by a maintainer with a licensed WinRAR and committed as the
+repository's only binary fixture". Two things were wrong with it.
 
-What to author, exactly:
+First, the escape hatch had closed: **WinRAR 7.x removed RAR4 creation.**
+`Rar.exe` 7.23 has no `-ma` switch at all and `rar a -ma4` exits 7 with
+`Unknown option: ma4`. It still extracts RAR4 perfectly well; only the writer
+is gone. A licensed WinRAR was no longer sufficient.
 
-- three pages, the same synthetic pages `gen_fixtures.py` writes into
-  `benign.cbz` (so no third-party artwork is involved and the licensing
-  position above is untouched), under the same member names
-  `ch1/p1.png`, `ch1/p2.png`, `ch1/p10.png`
-- **RAR4 format specifically — `rar a -ma4 benign.cbr ch1\`.** Not RAR5.
-  libarchive's RAR5 reader is a separate and less widely enabled code path, so
-  a RAR5 fixture can fail to read on a libarchive build that carries RAR4
-  support only — and that read is the assert making "bundled and
-  self-contained" a fact rather than a claim. `check_archives.py` asserts the
-  fixture's signature bytes are RAR4, so a regenerated fixture cannot silently
-  drift.
-- record the WinRAR version and the file's SHA-256 in this file when you add it
+Second, and the reason the fixture exists today: **the claim conflated
+compression with the container.** RAR *compression* is proprietary and nothing
+in this project will ever produce it. A store-mode RAR4 *container* is a
+documented block format — a 7-byte marker, a `MAIN_HEAD`, one `FILE_HEAD` plus
+payload per member, an `END_ARCHIVE`, each block carrying the low 16 bits of a
+crc32 over its own header — and it is about forty lines of `struct.pack`. The
+fixture only ever needed to be a real RAR that libarchive reads. It never
+needed to be compressed.
 
-**A licensed WinRAR is no longer sufficient, checked 2026-09-12.** WinRAR 7.x
-removed RAR4 *creation*: `Rar.exe` 7.23 (registered) has no `-ma` switch at
-all and `rar a -ma4` exits 7 with `Unknown option: ma4`. It still extracts
-RAR4 perfectly well — only the writer is gone. So authoring this fixture needs
-a `rar` CLI from the 5.x or 6.x line, or a hand-rolled RAR4 store-mode writer
-(the format is documented: marker, `MAIN_HEAD`, one `FILE_HEAD` per member
-with method `0x30`, CRC32 each), which would have the further advantage of
-making the fixture *generated* and deterministic rather than a committed
-binary.
+So `gen_fixtures._rar4_store` writes it, and:
 
-Writing it as RAR5 with a current WinRAR is possible and is NOT the same
-fixture: it would exercise libarchive's RAR5 reader instead, and the RAR4 pin
-exists precisely because that reader is a separate and less widely enabled
-code path. Changing the pin is a decision, not a shortcut.
+- it is **generated**, not hand-authored, so it is byte-identical across runs
+  and `check_fixtures_deterministic` covers it like every other fixture — the
+  `KEEP_SUFFIXES` carve-out that protected an unreproducible binary is gone
+- it carries the same three synthetic pages as `benign.cbz`
+  (`ch1/p1.png`, `ch1/p2.png`, `ch1/p10.png`), so no third-party artwork is
+  involved and the licensing position above is untouched
+- it is **RAR4**, which keeps the pin `check_archives.py` asserts: libarchive's
+  RAR5 reader is a separate and less widely enabled code path
+- no proprietary tool appears anywhere in the path
 
-Until it exists, `check_archives.py` reports **SKIP (exit 3)** with
-`AC-6's .cbr clause not exercised` after its other 137 asserts pass, and the
-reason names **both** missing prerequisites rather than stopping at the first
-— reporting only the fixture made the clause read as one file away from
-running when it is two independent pieces of work. The `.cbr` read path itself
-is implemented and is exercised by nothing.
+`check_archives.py` reports **PASS (143/143)** with the `.cbr` clause exercised:
+RAR4 by signature, three members decoding, a `.cbr` writing a `.cbz`, one
+`cbr→cbz` warning per job rather than per item, and the read still working with
+`PATH` emptied.
 
-**It also needs libarchive.** The RAR reader is `libarchive` through
-`libarchive-c`, resolved by `archive.libarchive_path()`: `MT_LIBARCHIVE` (an
-explicit path) first, then `build/libarchive/` beside the sidecar, then the
-platform loader. No libarchive release ships a Windows binary — the build
-order's §C row 7 says "the official Windows binary release asset", and no such
-asset exists for any tag — so the bundle has to come from somewhere else
-(conda-forge's win-64 `libarchive` package is the pinnable candidate, and it
-needs its seven dependency DLLs: zlib, bz2, lzma, lz4, zstd, iconv, libxml2).
-That bundling decision is open; `check_archives.py` skips the `.cbr` asserts
-with a named reason when the library cannot be resolved.
-
-**Worth weighing before bundling it.** RAR is the only format that needs
-libarchive — `zipfile` reads zip/cbz, `tarfile` reads tar/cbt, `py7zr` reads
-7z/cb7, all of them pure Python — and RAR is read-only here by design
-(`OUTPUT_FORMAT` maps RAR to ZIP and a `.cbr` item is written back as `.cbz`
-with one warning per job). So the current design carries eight native DLLs
-with no official Windows release for exactly one decode path. A narrower
-backend for that one path — 7-Zip's `7z.dll`, which reads RAR4 and RAR5 in
-process, or `rarfile` driving a bundled `UnRAR.exe` — would be a smaller
-dependency. The trade to check before switching: `check_archives.py` asserts
-the read still works with `PATH` emptied, which any bundled backend satisfies
-when invoked by absolute path, but a subprocess backend also has to re-prove
-AC-12's 400MB streaming bound that `zipfile` and `py7zr` hold by reading
-member by member.

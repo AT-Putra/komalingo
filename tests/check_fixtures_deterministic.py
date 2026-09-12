@@ -34,11 +34,14 @@ FIXTURES = ROOT / "fixtures"
 # which is date-free by default, and text.pdf is hand-rolled bytes.
 SUBDIRS = ("smoke", "bubbles", "cbz", "zh", "ko", "archives", "pdf")
 
-# Not regenerated and not compared: no free tool writes RAR, so benign.cbr is a
-# committed binary the generator cannot produce. Deleting it as part of "empty
-# the tree" would destroy the one fixture AC-6's .cbr clause is verifiable
-# against, and comparing it would compare a file nothing in this run wrote.
-KEEP_SUFFIXES = (".cbr", ".rar")
+# Nothing is carved out any more. This used to hold KEEP_SUFFIXES = (".cbr",
+# ".rar"): benign.cbr was a committed binary no free tool could produce, so
+# emptying the tree would have destroyed the only fixture AC-6's .cbr clause
+# could run against, and comparing it would have compared a file nothing in
+# the run wrote. gen_fixtures._rar4_store writes it now -- a store-mode RAR4
+# container is a documented header format, and only RAR COMPRESSION is
+# proprietary -- so it is generated, deleted and byte-compared like every
+# other fixture, and the determinism gate covers it for the first time.
 GENERATOR = ROOT / "tests" / "gen_fixtures.py"
 
 
@@ -55,19 +58,13 @@ def snapshot():
     out = {}
     for sub in SUBDIRS:
         for p in sorted((FIXTURES / sub).rglob("*")):
-            if p.is_file() and p.suffix.lower() not in KEEP_SUFFIXES:
+            if p.is_file():
                 out[p.relative_to(FIXTURES).as_posix()] = sha256(p)
     return out
 
 
 def generate(label):
     for sub in SUBDIRS:
-        if sub == "archives":
-            # By content, so the committed .cbr survives -- see KEEP_SUFFIXES.
-            for p in sorted((FIXTURES / sub).glob("*")):
-                if p.is_file() and p.suffix.lower() not in KEEP_SUFFIXES:
-                    p.unlink()
-            continue
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
     r = subprocess.run([sys.executable, str(GENERATOR)], cwd=ROOT,
                        capture_output=True,
