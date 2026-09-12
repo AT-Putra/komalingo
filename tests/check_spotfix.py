@@ -20,7 +20,10 @@ gets its own copy of it -- which also means no section can pass because of a
 change another section made, and the order they run in does not matter.
 
 The three timing-sensitive claims are measured, never assumed:
-  * the 3.0s re-render budget, against §E's declared hardware floor;
+  * the 3.0s re-render budget, against a MEASURED hardware floor -- a
+    page-sized raster pass timed at startup, not a clock speed read off
+    WMI, which on a modern hybrid desktop reports a rated number well
+    below what the machine does;
   * "zero LLM requests on the re-render path", counted at the stub SERVER, not
     at the client, because a client-side counter cannot see a request a second
     code path made;
@@ -49,14 +52,35 @@ from lib.stub_provider import StubProvider  # noqa: E402
 CBZ = os.path.join(ROOT, "fixtures", "cbz", "sample.cbz")
 EXPECTED = os.path.join(ROOT, "fixtures", "cbz", "expected.json")
 
-# §E's declared floor for the 3.0s gate. Below it the measured time is printed
-# and not asserted: a timing gate on an undeclared machine is flaky by
-# construction, and a flaky gate gets disabled, which is worse than an honest
-# inconclusive.
-FLOOR_CORES = 8
-FLOOR_MHZ = 3000
+# §E's floor for the 3.0s gate. Below it the measured time is printed and not
+# asserted: a timing gate on an undeclared machine is flaky by construction,
+# and a flaky gate gets disabled, which is worse than an honest inconclusive.
+#
+# The floor MEASURES the machine rather than reading its nameplate. It used to
+# require 8 physical cores at >= 3000MHz: psutil takes cpu_freq().max from
+# WMI's MaxClockSpeed on Windows, a static rated number, and a 24-core Arrow
+# Lake desktop reports current == max == 2700MHz -- so a machine that
+# re-renders in 0.03s, a hundredth of the budget, was ruled below the floor by
+# a label. The rule was written when base clock still tracked performance; a
+# nameplate is not a measurement, and this file asserts nothing else it has
+# not measured.
 FLOOR_RAM = 16 * 1024**3
 BUDGET_S = 3.0
+
+# One reference page's worth of raster work: the blur, resample and byte pass
+# that dominate a re-render. On the box this was calibrated on it takes 0.091s
+# against a real re-render of 0.03s, so the workload is about THREE
+# re-renders' worth of pixels -- that ratio is what makes the allowance below
+# derivable instead of picked.
+CALIB_REPS = 3
+CALIB_TO_RERENDER = 3.0   # measured: 0.091s calibration / 0.03s re-render
+FLOOR_MARGIN = 3.0        # the expected re-render must be <= a third of the budget
+CALIB_ALLOWANCE_S = BUDGET_S * CALIB_TO_RERENDER / FLOOR_MARGIN
+
+# The measurements the METRICS line carries, filled by the calibration and the
+# wallclock section. A module-level dict because sections return their own
+# verdicts, not their timings.
+MEASURED = {}
 
 # The identical pair the fixture is built around. Read from expected.json
 # rather than hard-coded, so regenerating the fixture with a different layout
@@ -140,18 +164,61 @@ def _no_detect_or_ocr():
     return calls, undo
 
 
+def _calibrate():
+    """Seconds for one reference page's worth of raster work. Best of N.
+
+    Deterministic, offline, and built from the same primitives the re-render
+    spends its time in -- a gaussian blur over a page-sized RGB buffer, a
+    LANCZOS resample, a float pass and an encode. Best-of-N rather than a
+    mean: the question is what the machine CAN do, and a scheduler hiccup
+    during one repetition is not evidence that it cannot.
+    """
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    h, w = 1400, 2048
+    base = np.arange(h * w * 3, dtype=np.uint8).reshape(h, w, 3)
+    best = float("inf")
+    for _ in range(CALIB_REPS):
+        t = time.perf_counter()
+        img = Image.fromarray(base, "RGB").filter(ImageFilter.GaussianBlur(4))
+        img = img.resize((w // 2, h // 2), Image.LANCZOS)
+        arr = np.asarray(img, dtype=np.float32)
+        arr = (arr * 0.5 + 8.0).clip(0, 255).astype(np.uint8)
+        Image.fromarray(arr, "RGB").tobytes()
+        best = min(best, time.perf_counter() - t)
+    return best
+
+
 def _above_floor():
-    """(ok, description) for §E's hardware floor. Missing psutil is not a pass."""
+    """(ok, description) for §E's hardware floor. Measured, not read off a label.
+
+    MT_SPOTFIX_FLOOR_S can only make the allowance STRICTER -- it is how the
+    red check proves the floor still refuses, and a knob that could loosen it
+    would be a way to manufacture a green on a machine that cannot hold the
+    budget.
+    """
     try:
         import psutil
     except ImportError:
         return False, "psutil is not installed; the floor cannot be measured"
-    cores = psutil.cpu_count(logical=False) or 0
-    freq = psutil.cpu_freq()
-    mhz = getattr(freq, "max", 0) or 0
+
     ram = psutil.virtual_memory().total
-    ok = cores >= FLOOR_CORES and mhz >= FLOOR_MHZ and ram >= FLOOR_RAM
-    return ok, f"{cores} physical cores, {mhz:.0f}MHz max, {ram / 1024**3:.1f}GB RAM"
+    calib = _calibrate()
+    MEASURED["spotfix_calib_s"] = round(calib, 4)
+
+    allowance = CALIB_ALLOWANCE_S
+    override = os.environ.get("MT_SPOTFIX_FLOOR_S", "").strip()
+    if override:
+        try:
+            allowance = min(allowance, float(override))
+        except ValueError:
+            pass
+
+    ok = calib <= allowance and ram >= FLOOR_RAM
+    return ok, (f"{calib:.3f}s for a page of raster work (allowance "
+                f"{allowance:.3f}s, {allowance / calib:.0f}x margin), "
+                f"{ram / 1024**3:.1f}GB RAM")
 
 
 def _sha(path):
@@ -469,6 +536,7 @@ def section_wallclock(c: Checks, cache_dir: str, out_dir: str, record: dict,
         out, _ = _quiet(pipeline.rerender, JOB_B, record["item_id"], 1, rid,
                         "A SHORT FIX", out_dir)
         elapsed = time.perf_counter() - t
+        MEASURED["spotfix_rerender_s"] = round(elapsed, 4)
     except AssertionError as e:
         undo()
         c.check(False, f"[wallclock] the re-render path ran a forbidden stage: {e}")
@@ -1627,6 +1695,8 @@ def main():
         _guarded(c, "[cap]", section_cap, fork("cap")[0], record)
         _guarded(c, "[tier]", section_tier, fork("tier")[0], record)
         _guarded(c, "[persist]", section_persistence, fork("persist")[0], record)
+
+    print("METRICS " + json.dumps(MEASURED), flush=True)
 
     result = c.finish()
     if result == PASS and not floor_ok:

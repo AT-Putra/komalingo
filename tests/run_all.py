@@ -431,6 +431,15 @@ def main() -> int:
             # ratchets; the check's own asserts tie the two together.
             "cancel_pages_before_stop": None,
             "resume_detect_calls": None,
+            # check_spotfix's measured hardware floor and the re-render it
+            # gates. In NEITHER ratchet set: both are wall-clock readings on
+            # whatever box runs them, and a ratchet over a timing goes red on
+            # the weather. spotfix_rerender_s has its own 3.0s assert when the
+            # calibration clears the allowance; the record is the history, and
+            # the pair together is what says whether a slow run was a slow
+            # machine or a slow re-render.
+            "spotfix_calib_s": None,
+            "spotfix_rerender_s": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline
