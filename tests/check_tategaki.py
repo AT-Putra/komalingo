@@ -31,10 +31,11 @@ import sys
 getattr(sys.stdout, "reconfigure", lambda **_: None)(encoding="utf-8")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # fetch_fixtures
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
 from lib.asserts import assert_cer  # noqa: E402
-from lib.result import Checks, run, skip  # noqa: E402
+from lib.result import Checks, broken_checkout, run, skip  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TATEDIR = os.path.join(ROOT, "fixtures", "tategaki")
@@ -45,16 +46,62 @@ def main():
     c = Checks("check_tategaki")
 
     if not os.path.exists(EXPECTED):
-        return skip(f"ground truth absent: {EXPECTED} -- see fixtures/README.md")
+        return broken_checkout(f"ground truth absent: {EXPECTED} -- committed, "
+                                f"see fixtures/README.md")
 
     with open(EXPECTED, encoding="utf-8") as fh:
         entries = json.load(fh)
+
+    # -- [manifest] these are the pixels the ground truth was read off ------
+    # Absent panels are a skip: artwork this box is not allowed to have.
+    # Present-but-different panels are a FAIL: a second developer's scan of
+    # the same volume crops to the right filenames with other pixels, and a
+    # CER graded against transcriptions authored for the maintainer's pixels
+    # is not a measurement of the OCR. The hashes live in MANIFEST.json,
+    # which is committed, so its absence is a broken checkout, not a skip --
+    # and it is checked BEFORE the panels, so that on a box without the
+    # artwork a missing manifest does not hide behind the skip.
+    # The verifier is fetch_fixtures.verify(), not a copy of it.
+    from fetch_fixtures import MANIFEST, load_manifest, verify
+    from gen_tategaki_panels import scan_dirs
+
+    if not os.path.exists(MANIFEST):
+        return broken_checkout(f"manifest absent: {MANIFEST} -- committed, "
+                               f"see fixtures/README.md")
 
     missing = [e["file"] for e in entries
                if not os.path.exists(os.path.join(TATEDIR, e["file"]))]
     if missing:
         return skip(f"tategaki panels absent ({len(missing)}/{len(entries)} "
                     f"missing, e.g. {missing[0]}) -- see fixtures/README.md")
+
+    # With the scans present the verifier can say WHICH of wrong-scan and
+    # wrong-crop a mismatch is; without them it says it cannot. Look, rather
+    # than assume the scans are absent because this is a check and not the
+    # fetch tool -- on the box that authored the manifest they are here, and
+    # a message that says "absent" while they sit on disk is a wrong message.
+    dirs = scan_dirs()
+    rep = verify(load_manifest(), dirs[0] if len(dirs) == 1 else None)
+    c.check(rep.expected is None,
+            "[manifest] expected.json sha256 matches the one MANIFEST.json was "
+            "written against" + (f" ({rep.expected})" if rep.expected else ""))
+    c.check(not rep.panels,
+            f"[manifest] all {len(entries)} panels match MANIFEST.json"
+            + (f" -- {len(rep.panels)} do not: " + "; ".join(rep.panels)
+               if rep.panels else ""))
+    # The source pages, when this box has them. rep.ok is false on a page
+    # mismatch, and without an assert here that case returned c.finish()
+    # green with nothing graded -- a PASS (2/2) with no CER and no METRICS,
+    # on a box holding a different rip of the volume (review, G1).
+    c.check(not rep.pages,
+            "[manifest] every source page this box holds matches MANIFEST.json"
+            + (f" -- {len(rep.pages)} do not: " + "; ".join(rep.pages)
+               if rep.pages else ""))
+    if not rep.ok:
+        # Stop here rather than grade on. The numbers below would be printed
+        # as METRICS and recorded by run_all as this box's baseline, and a
+        # baseline measured on the wrong pixels is worse than none.
+        return c.finish()
 
     c.check(len(entries) >= 20,
             f">= 20 ground-truth panels, have {len(entries)}")

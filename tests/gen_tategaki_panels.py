@@ -13,6 +13,11 @@ Usage:
 holds the page scans. Exits with result.py's SKIP (3) and a named reason when it is absent -- the
 same exit-code contract check_tategaki.py uses, from the same one place, so a
 machine without the scans reports SKIP rather than a mystery traceback.
+
+"Reproducible byte-for-byte" is a claim, not a check: this script cannot
+tell a different scan of the same volume from the maintainer's. The check is
+tests/fetch_fixtures.py, which imports find_volume() and reassemble() from
+here and then hashes the result against fixtures/tategaki/MANIFEST.json.
 """
 
 import glob
@@ -32,17 +37,31 @@ TATEDIR = os.path.join(ROOT, "fixtures", "tategaki")
 EXPECTED = os.path.join(TATEDIR, "expected.json")
 
 
-def main() -> int:
-    volume = sys.argv[1] if len(sys.argv) > 1 else None
-    if volume is None:
-        dirs = [p for p in glob.glob(os.path.join(TATEDIR, "*"))
-                if os.path.isdir(p) and os.path.basename(p) != "panels"]
-        if len(dirs) != 1:
-            print(f"SKIP: expected exactly one volume directory under {TATEDIR}, "
-                  f"found {len(dirs)} -- pass one explicitly. "
-                  f"See fixtures/README.md", flush=True)
-            return SKIP
-        volume = dirs[0]
+def scan_dirs():
+    """Every directory under fixtures/tategaki/ that could hold the scans.
+
+    One place, because three callers (this file, fetch_fixtures.py and
+    check_tategaki.py) each grew their own copy of the same glob.
+    """
+    return [p for p in glob.glob(os.path.join(TATEDIR, "*"))
+            if os.path.isdir(p) and os.path.basename(p) != "panels"]
+
+
+def find_volume():
+    """The one scan directory under fixtures/tategaki/, or None with the
+    reason printed. A machine with zero or several is asked to say which."""
+    dirs = scan_dirs()
+    if len(dirs) != 1:
+        print(f"SKIP: expected exactly one volume directory under {TATEDIR}, "
+              f"found {len(dirs)} -- pass one explicitly. "
+              f"See fixtures/README.md", flush=True)
+        return None
+    return dirs[0]
+
+
+def reassemble(volume):
+    """Crop every expected.json entry out of <volume>. Returns PASS, or SKIP
+    with the absent page named."""
     if not os.path.isdir(volume):
         print(f"SKIP: volume directory absent: {volume} -- see fixtures/README.md",
               flush=True)
@@ -67,4 +86,12 @@ def main() -> int:
     return PASS
 
 
-sys.exit(main())
+def main() -> int:
+    volume = sys.argv[1] if len(sys.argv) > 1 else find_volume()
+    if volume is None:
+        return SKIP
+    return reassemble(volume)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -29,6 +29,19 @@ if the volume or a listed page is absent. `check_tategaki.py` reports SKIP
 (exit 3) on the same absence, so a machine without the scans is honest
 rather than green.
 
+The reassembly is hash-verified. `tests/fetch_fixtures.py` runs the same
+crop and then checks every file against `fixtures/tategaki/MANIFEST.json`
+(committed; sha256 and pixel size only, no artwork) -- the v1.1 return of
+the MANIFEST + fetch_fixtures pair section E of the build order cut in
+iteration 2. It verifies the 13 source pages `expected.json` references, so
+a different scan of the same volume is caught before it is cropped; the 24
+panels; and `expected.json` itself, so the manifest cannot outlive the
+transcriptions it was written against. `check_tategaki.py` runs the same
+panel verification before grading and FAILS on a mismatch: a CER against
+ground truth authored for other pixels is not a measurement. What it does
+not do: fetch anything. There is nothing it may fetch. It verifies a local
+reassembly, and a machine without the scans still SKIPs.
+
 **Say it plainly: AC-2 has no automated enforcement today.** There is no CI
 in this repository, and the panels cannot go into one, so the OCR-accuracy
 gate runs only where someone holds the volume scans. Everywhere else it
