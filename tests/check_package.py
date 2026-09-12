@@ -63,7 +63,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 
 from lib.childio import captured, launch_drained  # noqa: E402
 from lib.httpread import read_bounded  # noqa: E402
-from lib.result import Checks, run, skip  # noqa: E402
+from lib.result import Checks, broken_checkout, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider  # noqa: E402
 from sidecar.models import select_provider  # noqa: E402
 
@@ -336,8 +336,10 @@ def main():
 
     if sys.platform != "win32":
         return skip("Windows-only: mt.exe and the embedded manifest")
-    if not os.path.exists(SPEC) or not os.path.exists(MANIFEST):
-        return skip("build/sidecar.spec or build/longpath.manifest missing")
+    if not os.path.exists(SPEC):
+        return broken_checkout(f"build/sidecar.spec missing: {SPEC}")
+    if not os.path.exists(MANIFEST):
+        return broken_checkout(f"build/longpath.manifest missing: {MANIFEST}")
 
     c = Checks("check_package")
 

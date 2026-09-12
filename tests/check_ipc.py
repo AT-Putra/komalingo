@@ -41,7 +41,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
-from lib.result import Checks, run, skip  # noqa: E402
+from lib.result import Checks, broken_checkout, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider  # noqa: E402
 
 TRIPLE = "x86_64-pc-windows-msvc"
@@ -90,8 +90,15 @@ def emitted_stages(dest: str) -> tuple[list[str], str]:
 def main():
     if sys.platform != "win32":
         return skip(f"Windows-only: the spawn name is {TRIPLE}")
-    if not os.path.exists(CONF) or not os.path.exists(SMOKE):
-        return skip("src-tauri/tauri.conf.json or the smoke fixture is missing")
+    if not os.path.exists(CONF):
+        return broken_checkout(f"src-tauri/tauri.conf.json missing: {CONF}")
+    if not os.path.exists(SMOKE):
+        # Committed AND generated, like benign.cbz: gen_fixtures.py writes it
+        # and git tracks it. Its absence is therefore a checkout that does not
+        # match the repository, not a clone that has yet to generate -- the
+        # generated-only case is check_fixtures_deterministic's to report.
+        return broken_checkout(f"smoke fixture missing: {SMOKE} -- it is committed; "
+                               f"tests/gen_fixtures.py also regenerates it")
 
     c = Checks("check_ipc")
 

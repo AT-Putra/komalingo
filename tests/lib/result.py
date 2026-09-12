@@ -1,7 +1,9 @@
 """The exit-code contract, in one place so seven checks cannot drift.
 
-    0 pass · 1 fail · 2 inconclusive (below hardware floor) · 3 skip (a
-    precondition the box cannot meet, named in the reason)
+    0 pass · 1 fail (an assert went red, OR a committed file this checkout
+    should already have is missing -- see broken_checkout()) · 2 inconclusive
+    (below hardware floor) · 3 skip (a precondition the box cannot meet,
+    named in the reason)
 
 run_all.py exits with the worst result, precedence 1 > 2 > 3 > 0.
 """
@@ -71,6 +73,24 @@ def skip(reason, *, live=False):
         return FAIL
     print(f"SKIP: {reason}", flush=True)
     return SKIP
+
+
+def broken_checkout(reason):
+    """Exit 1 -- a file this checkout should already have is missing.
+
+    skip() exists for a precondition the box cannot meet: no CUDA device, no
+    live credentials, artwork nobody is allowed to redistribute. A file that
+    is committed to git is none of those -- its absence does not describe
+    this machine, it describes a checkout that does not match the
+    repository (a shallow clone, an interrupted checkout, a fixture deleted
+    by hand). MT_REQUIRE_LIVE has no business promoting that, and neither
+    does the ratchet's last_status() have any business remembering it as a
+    downgrade to reason about: it is simply wrong, on every box, every time,
+    and reporting it as a skip would let a broken checkout hide behind the
+    same green-with-an-asterisk the suite reserves for honest absence.
+    """
+    print(f"BROKEN CHECKOUT: {reason}", flush=True)
+    return FAIL
 
 
 def run(main):
