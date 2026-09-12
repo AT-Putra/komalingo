@@ -483,6 +483,33 @@ def _dismissed(c, src, src_gray, regions) -> None:
             f"[dismissed offline] with no model asked, nothing is dismissed "
             f"({len(offline['regions'])} regions, {offline.get('dismissed')})")
 
+    # Punctuation-only OCR: set aside before the model is asked, so the
+    # request never carries the region and the answer does not depend on a
+    # model. The stub records what it was asked about.
+    from lib.stub_provider import requested_items
+    fake = [dict(r) for r in regions]
+    for r in fake:
+        r.pop("not_text", None)
+        r.pop("dismiss_reason", None)
+    fake[1]["text"] = "…"
+    fake_regions = [dict(r) for r in fake]
+    # ocr()'s own flagging, applied by hand: the smoke page has no region that
+    # reads as punctuation, so one is made to.
+    for r in fake_regions:
+        if pipeline.punctuation_only(r["text"]):
+            r["not_text"], r["dismiss_reason"] = True, "punctuation only"
+    with StubProvider(delay=0) as stub:
+        client = LLMClient(stub.url, "k", "stub-model")
+        pipeline.translate(fake_regions, 1, client, "en", "ja", img=src)
+        asked = [i["id"] for i in requested_items(stub.last_payload)]
+    kept3, gone3 = pipeline.dismiss(fake_regions)
+    c.check(fake[1]["id"] not in asked and len(asked) == len(regions) - 1,
+            f"[dismissed punctuation] a region that read as … is not sent to the "
+            f"model (asked about {asked})")
+    c.check([g["id"] for g in gone3] == [fake[1]["id"]] and gone3[0]["reason"] == "punctuation only"
+            and len(kept3) == len(regions) - 1,
+            f"[dismissed punctuation] ...and is dismissed with its reason: {gone3}")
+
 
 def _composite(c) -> None:
     """The gate nothing else provides: translated text landing on a real page.

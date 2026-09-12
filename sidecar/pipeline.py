@@ -100,6 +100,33 @@ DEFAULT_SOURCE = "ja"
 DEFAULT_LANG = "en"
 
 
+# Characters a region can be made of and still hold nothing to translate.
+# Ellipses, dots, dashes, brackets, exclamation and question marks, in their
+# ASCII and fullwidth forms, and whitespace.
+_PUNCTUATION = re.compile(
+    "^[\\s\u2026\u2025\u30fb\u3002\u3001\uff0c,.\u2022!?\uff01\uff1f"
+    "\u30fc\u2014\u2015\u2500~\uff5e\u301c\\-\u2212\u300c\u300d\u300e\u300f()\uff08\uff09"
+    ":;\uff1a\uff1b\u3000'\"\u201c\u201d\u2018\u2019*\uff0a]+$"
+)
+
+
+def punctuation_only(text: str | None) -> bool:
+    """Is there anything here a translator could change?
+
+    A region that reads as nothing but punctuation -- 「…」, 「・」, 「！！」 --
+    has no translation that differs from itself, so it stays as drawn. That
+    is the whole of the rule, and it is deliberately blind to why the OCR
+    read punctuation: a real beat-bubble of 「…」 loses nothing by keeping its
+    own dots, and a speck, a rivet, a skirt tag or a hand that manga-ocr read
+    as 「…」 (page 4 of the stairwell chapter, at detector confidence 0.97)
+    is left as the art it is instead of being painted white and given
+    "...". The vision model's null (llm.NOT_TEXT_INSTRUCTION) covers the
+    hand that read 「いや…」; this covers what needs no model at all, and
+    does not depend on one answering the same way twice.
+    """
+    return bool(text) and bool(_PUNCTUATION.match(text))
+
+
 def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_SOURCE) -> int:
     """Source text per region. Returns the number of OCR calls made.
 
@@ -107,6 +134,10 @@ def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_
     (its hull) in one pass; PP-OCRv5 takes the region's PARTS -- one per text
     line as the detector saw them -- and ocr_cjk joins them in reading order,
     which is still one call here and one entry in regions.json.
+
+    A region that read as punctuation only is flagged `not_text` here, with
+    its reason; translate() then does not send it, and dismiss() takes it
+    off the page before the inpainter. See punctuation_only.
     """
     if source not in SOURCES:
         raise ValueError(f"source {source!r} is not one of {SOURCES}")
@@ -117,6 +148,9 @@ def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_
             r["text"] = ocr_ja.ocr(rgb.crop((x0, y0, x1, y1)))
         else:
             r["text"] = ocr_cjk.ocr(rgb, r.get("parts") or [r["polygon"]], source)
+        if punctuation_only(r["text"]):
+            r["not_text"] = True
+            r["dismiss_reason"] = "punctuation only"
     emit("ocr", f"{len(regions)} calls", page, 25)
     return len(regions)
 
@@ -163,10 +197,13 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
     Phase 5: `lang` and `source` reach the prompt. Until then the job's lang
     was a cache key and nothing else, and the prompt said English regardless.
     """
+    # Regions ocr() already set aside are not sent: nothing to translate,
+    # and no tokens spent finding that out.
+    asked = [r for r in regions if not r.get("not_text")]
     if client is None:
         # ponytail: offline placeholder so the skeleton runs with no provider.
         # Upgrade path: main.py builds an LLMClient from the settings payload.
-        for r in regions:
+        for r in asked:
             r["translation"] = "HELLO"
     else:
         import asyncio
@@ -174,18 +211,22 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
         from .llm import Region
 
         out = asyncio.run(
-            client.translate_page([Region(id=r["id"], text=r["text"]) for r in regions],
+            client.translate_page([Region(id=r["id"], text=r["text"]) for r in asked],
                                   page_png=page_context_png(img) if img is not None else None,
                                   lang=lang, source=source)
-        )
-        for r in regions:
+        ) if asked else {}
+        for r in asked:
             text = out.get(r["id"], "")
             # None is the vision model's "nothing is written there" -- see
             # llm.NOT_TEXT_INSTRUCTION. Flagged here, removed by dismiss()
             # before the inpainter runs, and stored as null in the
             # translation cache so a cache hit makes the same call.
-            r["not_text"] = text is None
+            if text is None:
+                r["not_text"] = True
+                r["dismiss_reason"] = "not on the page (vision model)"
             r["translation"] = text or ""
+    for r in regions:
+        r.setdefault("translation", "")
     emit("translate", f"{len(regions)} regions", page, 50)
 
 
@@ -200,7 +241,8 @@ def dismiss(regions: list[dict]) -> tuple[list[dict], list[dict]]:
     seen to have lost it rather than never having found it.
     """
     kept = [r for r in regions if not r.get("not_text")]
-    gone = [{"id": r["id"], "polygon": r["polygon"], "text": r.get("text")}
+    gone = [{"id": r["id"], "polygon": r["polygon"], "text": r.get("text"),
+             "reason": r.get("dismiss_reason", "")}
             for r in regions if r.get("not_text")]
     return kept, gone
 
@@ -449,7 +491,9 @@ def _load_translations(regions: list[dict], h: str, lang: str, model: str) -> bo
             covered = False
             continue
         text = entry.get("text", "")
-        r["not_text"] = text is None  # stored null: dismissed on the first run
+        if text is None:  # stored null: dismissed on the first run
+            r["not_text"] = True
+            r.setdefault("dismiss_reason", "not on the page (vision model)")
         r["translation"] = text or ""
         r["edited"] = bool(entry.get("edited"))
     return covered
