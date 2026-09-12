@@ -221,6 +221,27 @@ class Budget:
         if self.escapes(name):
             self._refuse(COMMONPATH_ESCAPE, name, self._resolve(name))
 
+    def check_decoded(self, name: str, nbytes: int) -> None:
+        """Refuse a raster that would exceed the per-file cap BEFORE it exists.
+
+        The byte rules above count bytes as they come out of a decompressor,
+        which is the right shape for an archive member: the bomb is refused
+        partway through its expansion. A PDF image is different in kind --
+        pdfium allocates the whole bitmap the dictionary declares in one call,
+        so by the time a chunk could be counted the 4.8GB a 40000x40000
+        `/Width /Height` implies has already been asked for. This is the same
+        FILE_SIZE_CAP, evaluated on the declared size instead of the observed
+        one, and it honours `enforce` like every other rule.
+
+        Declared, and so trusted as far as the dictionary goes: a JPEG stream
+        whose SOF header names a bigger raster than `/Width /Height` is
+        decoded at the SOF size by Pillow, where `DecompressionBombError` is
+        the backstop -- the same backstop a CBZ member has, and no less.
+        """
+        if nbytes > self.max_file_bytes:
+            self._refuse(FILE_SIZE_CAP, _normalized(name),
+                         f"decoded {nbytes} > {self.max_file_bytes}")
+
     def begin(self, member: Member) -> None:
         """Start accounting for ONE member's stream. Resets the per-file counters.
 

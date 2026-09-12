@@ -30,7 +30,7 @@ import traceback
 from dataclasses import asdict, dataclass, field
 
 from . import atomic, pipeline, safety
-from .containers import archive
+from .containers import archive, pdf
 
 # The item-level progress contract, the way STAGES is the page-level one.
 # check_archives asserts against these names rather than counting events: a
@@ -86,6 +86,11 @@ def classify(path) -> Item:
     ext = os.path.splitext(name)[1].lower()
     if archive.is_archive(path):
         return Item(path=os.fspath(path), item_id=name, kind="archive")
+    if pdf.is_pdf(path):
+        # Phase 7. A container like an archive -- pipeline.run_item reads it
+        # page by page through the same budget and repacks it -- and it is
+        # its own kind because the UI's item list says what a thing is.
+        return Item(path=os.fspath(path), item_id=name, kind="pdf")
     if ext in IMAGE_SUFFIXES:
         return Item(path=os.fspath(path), item_id=name, kind="image")
     return Item(path=os.fspath(path), item_id=name, kind="unsupported",
@@ -102,7 +107,7 @@ def _discard_output(item: Item, dest_dir) -> None:
     archive the product refused, mixed in with legitimate output. The per-item
     directory is what makes the cleanup safe: there is nothing else in it.
     """
-    if item.kind != "archive":
+    if item.kind not in ("archive", "pdf"):
         return
     out = pipeline.item_dir(dest_dir, item.item_id)
     try:
@@ -139,6 +144,8 @@ def run_item(item: Item, dest_dir, job_id, client=None,
             item.status = OK
             return item
 
+        # An archive or a PDF: both are "every page through the cache, then
+        # repack", and pipeline.run_item tells them apart by signature.
         record = pipeline.run_item(
             item.path, dest_dir, job_id, item.item_id, client, lang, source,
         )

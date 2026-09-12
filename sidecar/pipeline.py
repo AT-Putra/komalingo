@@ -25,7 +25,7 @@ from PIL import Image, ImageDraw
 
 from . import atomic, cache, imaging, ocr_cjk, ocr_ja, safety, typeset
 from . import detect as detector
-from .containers import archive
+from .containers import archive, pdf
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
 
@@ -486,9 +486,21 @@ def _deliver(img: Image.Image, dest_dir, member: str, fmt: str,
     return atomic.long_path(dest)
 
 
+def _container(src_path) -> str:
+    """The container family of `src_path`, by signature: an archive family
+    or `pdf.PDF`. Archives first, because `%PDF-` inside the first KB of a
+    zip is a zip whose first member is a PDF, not a PDF."""
+    try:
+        return archive.detect_format(src_path)
+    except archive.UnsupportedArchive:
+        if pdf.detect(src_path):
+            return pdf.PDF
+        raise
+
+
 def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT_LANG,
              source=DEFAULT_SOURCE):
-    """Every page of one CBZ, through the cache. Returns the job record.
+    """Every page of one archive or PDF, through the cache. Returns the record.
 
     The cache hit here is what AC-13's "a re-run skips completed pages" cashes
     out to, and it is keyed on the page's decoded pixels -- so a SECOND job with
@@ -510,7 +522,11 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     # land -- the escape rule is only meaningful relative to the root the
     # repack would write under, and taking the real one means the rule is
     # evaluated against the path the writer builds rather than a placeholder.
-    src_fmt = archive.detect_format(src_path)
+    src_fmt = _container(src_path)
+    # Phase 7: a PDF is read by its own module and through the same Budget.
+    # The rest of this loop is identical for both, which is the point of the
+    # (ordinal, member, image) contract the two readers share.
+    read_pages = pdf.pages if src_fmt == pdf.PDF else archive.pages
     out_dir = item_dir(dest_dir, item_id)
     # The budget's root is the ITEM's directory, which is where a member would
     # actually land -- the escape rule has to be evaluated against the path the
@@ -518,7 +534,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     budget = safety.Budget(out_dir)
     format_warning = archive.CBR_WARNING if src_fmt == archive.RAR else None
     try:
-        for ordinal, member, img in archive.pages(src_path, budget):
+        for ordinal, member, img in read_pages(src_path, budget):
             h = cache.page_hash(img)
             cache.put_placement(job_id, item_id, ordinal, h, member)
             cached = cache.read_regions(h) if cache.has_page(h) else None
@@ -546,6 +562,13 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
             if cached is not None:
                 regions = cached["regions"]
                 fmt, ocr_calls = cached.get("src_format", "PNG"), 0
+                if src_fmt == pdf.PDF and fmt not in ("JPEG", "PNG"):
+                    # The page was first seen as, say, a WEBP member of a
+                    # CBZ and cached under that format; delivered as WEBP
+                    # bytes the PDF repack would fail at img2pdf after every
+                    # page was processed. A PDF page is JPEG or PNG, by the
+                    # reader's own naming.
+                    fmt = img.format or "PNG"
                 emit("detect", f"{len(regions)} regions (cached)", ordinal, 10)
                 emit("ocr", "0 calls (cached)", ordinal, 25)
             else:
@@ -606,6 +629,10 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
                 "fit_summary": fit_summary,
                 "regions": regions,
             }
+            if src_fmt == pdf.PDF:
+                # Which path the page took, so check_pdf can assert the
+                # render fallback was NOT taken without re-reading the PDF.
+                record["pdf_extract"] = img.info.get("pdf_extract")
             # Written back on EVERY pass, hit or miss. The fit flags are derived
             # by render, so a cached record whose region was edited shorter must
             # not keep last run's fit_compromised. Nothing here reads a stored
@@ -644,7 +671,9 @@ def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,
     where the next run can use them, which an archive-only output cannot do
     (a half-written archive is not half a job, it is nothing). The duplication
     is the price of both properties and it is paid on disk, not in RSS: the
-    repack streams one page at a time.
+    archive repack streams one page at a time. The PDF repack does not quite
+    -- img2pdf's internal engine holds every page's bytes until it writes,
+    about one copy of the output (1.02x measured); see `pdf.write_pdf`.
 
     Member names are the INPUT's, verbatim, so the member set round-trips
     identically. The delivered file's name carries `_translated`; the member
@@ -656,6 +685,16 @@ def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,
         # Nothing decoded. An empty archive is worse than no archive: it looks
         # to the user like the job succeeded and produced a volume of nothing.
         return ""
+
+    if src_fmt == pdf.PDF:
+        # img2pdf reads the delivered files itself and embeds their bytes
+        # verbatim; the page boxes come from the source. No extras, no
+        # ComicInfo: a PDF's metadata is its outline and /Info, and
+        # write_pdf carries both.
+        return pdf.write_pdf(
+            pdf.output_path(src_path, dest_dir),
+            [record["output"] for record in records], src_path,
+        )
 
     out_fmt = archive.OUTPUT_FORMAT[src_fmt]
     dest = archive.output_path(src_path, dest_dir)

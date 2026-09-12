@@ -148,7 +148,7 @@ export default function App() {
             <input
               value={src}
               onChange={(e) => setSrc(e.target.value)}
-              placeholder="path to a .cbz"
+              placeholder="path to a .cbz or .pdf"
               size={40}
             />
             <input
@@ -180,7 +180,7 @@ export default function App() {
               ))}
             </select>
             <button onClick={runItem} disabled={busy || !src || !dest}>
-              {busy ? "Translating…" : "Translate archive"}
+              {busy ? "Translating…" : "Translate item"}
             </button>
           </div>
 

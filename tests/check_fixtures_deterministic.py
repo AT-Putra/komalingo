@@ -30,7 +30,9 @@ FIXTURES = ROOT / "fixtures"
 # build order gives: ZipFile stamps the current mtime into every member by
 # default, so the two fixtures carrying AC-11 and AC-12 would be byte-identically
 # irreproducible in exactly the place reproducibility is load-bearing.
-SUBDIRS = ("smoke", "bubbles", "cbz", "zh", "ko", "archives")
+# Phase 7 adds "pdf": scan.pdf goes through img2pdf and pypdf, neither of
+# which is date-free by default, and text.pdf is hand-rolled bytes.
+SUBDIRS = ("smoke", "bubbles", "cbz", "zh", "ko", "archives", "pdf")
 
 # Not regenerated and not compared: no free tool writes RAR, so benign.cbr is a
 # committed binary the generator cannot produce. Deleting it as part of "empty

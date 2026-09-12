@@ -5,7 +5,7 @@
 
 Writes `fixtures/smoke/` and `fixtures/bubbles/` (Phase 0a), `fixtures/cbz/`
 (Phase 3) and `fixtures/zh/`, `fixtures/ko/` (Phase 4); Phase 6 extends this
-with `fixtures/archives/`. Exit 0 always, or a traceback -- there is no
+with `fixtures/archives/` and Phase 7 with `fixtures/pdf/`. Exit 0 always, or a traceback -- there is no
 partial-success mode: a generator that half-writes a fixture tree is worse
 than one that fails.
 
@@ -35,6 +35,9 @@ import sys
 import tarfile
 import zipfile
 from pathlib import Path
+
+import img2pdf
+from pypdf import PdfWriter
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -925,6 +928,211 @@ def gen_archives():
     return report
 
 
+# --------------------------------------------------------------------------
+# Phase 7: fixtures/pdf/
+# --------------------------------------------------------------------------
+
+# scan.pdf is what a scanner writes: one full-page image per page, no text.
+# Three pages, deliberately different in the three ways AC-5's reader has to
+# handle: page 1 is a DCTDecode XObject (Pillow decodes the raw stream), page
+# 2 is a FlateDecode XObject from a PNG (pdfium decodes it), and page 3 is a
+# LANDSCAPE JPEG on a landscape page carrying /Rotate 90 -- the scanner that
+# rotated its output through the page attribute rather than the pixels, so
+# the displayed page is portrait and the delivered page must be too.
+#
+# The page boxes are set by a layout function rather than by an image DPI, so
+# the box is a known number to the point and the round-trip assert can compare
+# to 0.01pt instead of to whatever a JFIF header rounded to.
+PDF_PAGE_W, PDF_PAGE_H = 288.0, 432.0        # 600x900px at 150 DPI
+PDF_LANDSCAPE = (900, 600)                   # page 3's pixels, before /Rotate
+PDF_ROTATE = 90
+PDF_INFO = {"/Title": "scan fixture", "/Author": "gen_fixtures.py",
+            "/Subject": "synthetic scanned manga, three pages"}
+# [title, 0-based page, children]. One nested item: an outline copier that
+# flattens nesting passes a title-and-page assert and fails this one.
+PDF_OUTLINE = [
+    ["Chapter 1", 0, [["Page 2", 1, []]]],
+    ["Chapter 2", 2, []],
+]
+
+# The source images are ALSO written beside the PDF, because check_pdf's
+# cache-key assert builds a CBZ from the same bytes and compares the page
+# hash each container yields. The check reads the files; expected.json
+# records their sha256 so a stale pair is caught rather than compared.
+PDF_SOURCE_IMAGES = {"scan_p1.jpg": 1, "scan_p2.png": 2}
+
+# partial.pdf: one page whose image covers 54% of a square page -- past the
+# rule's 50% so it takes the XObject path, and well short of the page so the
+# output has to reproduce the IMAGE's box, not just the page's. The first
+# writer stretched every image over its page box and no fixture could see
+# it, because scan.pdf's images fill their pages (architect review).
+PARTIAL_PAGE = 400.0
+PARTIAL_IMAGE = (240.0, 360.0)                # 0.54 of 400x400, aspect 1.5
+
+# text.pdf: the page that MUST take the render fallback. Fifty characters is
+# the rule's threshold, so the text is well over it, and there is no image
+# XObject at all. Hand-rolled bytes: the point is a PDF nothing here wrote
+# through img2pdf, and a text page is thirty lines of PDF syntax.
+TEXT_LINES = [
+    "This page is text, not a scan.",
+    "It carries more than fifty characters of real text",
+    "and no image XObject, so the reader must render it",
+    "at 300 DPI rather than extract anything.",
+]
+
+
+def _pdf_page_jpeg(i: int, size=(ARCHIVE_W, ARCHIVE_H)) -> bytes:
+    """A page as a scanner's JPEG: baseline, 4:2:0, no EXIF, no wall clock."""
+    with Image.open(io.BytesIO(_archive_page(i, *size))) as img:
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, "JPEG", quality=90, optimize=False,
+                                progressive=False, subsampling=2)
+    return buf.getvalue()
+
+
+def _text_pdf() -> bytes:
+    """A one-page text PDF, byte-stable, with an /Info entry of its own."""
+    content = ["BT /F1 14 Tf 24 400 Td"]
+    for j, line in enumerate(TEXT_LINES):
+        if j:
+            content.append("0 -20 Td")
+        content.append("(" + line.replace("\\", "\\\\").replace("(", "\\(")
+                       .replace(")", "\\)") + ") Tj")
+    content.append("ET")
+    stream = "\n".join(content).encode("ascii")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] "
+         b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+         % (int(PDF_PAGE_W), int(PDF_PAGE_H))),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+        b"<< /Title (text fixture) /Author (gen_fixtures.py) >>",
+    ]
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = []
+    for n, body in enumerate(objects, start=1):
+        offsets.append(out.tell())
+        out.write(b"%d 0 obj\n" % n + body + b"\nendobj\n")
+    xref = out.tell()
+    out.write(b"xref\n0 %d\n" % (len(objects) + 1))
+    out.write(b"0000000000 65535 f \n")
+    for off in offsets:
+        out.write(b"%010d 00000 n \n" % off)
+    out.write(b"trailer\n<< /Size %d /Root 1 0 R /Info 6 0 R >>\n"
+              % (len(objects) + 1))
+    out.write(b"startxref\n%d\n%%%%EOF\n" % xref)
+    return out.getvalue()
+
+
+def gen_pdf():
+    out = FIXTURES / "pdf"
+    out.mkdir(parents=True, exist_ok=True)
+
+    p1 = _pdf_page_jpeg(1)
+    p2 = _archive_page(2)                       # PNG bytes -> FlateDecode
+    p3 = _pdf_page_jpeg(3, PDF_LANDSCAPE)
+    (out / "scan_p1.jpg").write_bytes(p1)
+    (out / "scan_p2.png").write_bytes(p2)
+
+    # Page boxes, one per image, in order: two portrait, one landscape that
+    # /Rotate 90 will display as portrait. img2pdf calls the layout once per
+    # image in order, so an iterator is the whole mechanism.
+    boxes = iter([(PDF_PAGE_W, PDF_PAGE_H), (PDF_PAGE_W, PDF_PAGE_H),
+                  (PDF_PAGE_H, PDF_PAGE_W)])
+
+    def layout(_w, _h, _dpi):
+        w, h = next(boxes)
+        return w, h, w, h
+
+    built = img2pdf.convert([p1, p2, p3], engine=img2pdf.Engine.internal,
+                            nodate=True, layout_fun=layout)
+    writer = PdfWriter(clone_from=io.BytesIO(built))
+    writer.pages[2].rotate(PDF_ROTATE)
+    writer.add_metadata(PDF_INFO)
+
+    def add(items, parent):
+        for title, page, children in items:
+            node = writer.add_outline_item(title, page, parent=parent)
+            add(children, node)
+
+    add(PDF_OUTLINE, None)
+    with open(out / "scan.pdf", "wb") as fh:
+        writer.write(fh)
+    (out / "text.pdf").write_bytes(_text_pdf())
+
+    # text_rot.pdf: the same text page under /Rotate 90 -- the render path
+    # under rotation. pdfium renders the page as displayed, so the reader
+    # must NOT rotate the bitmap a second time; the first draft did, and
+    # delivered the page sideways into a landscape box (architect review).
+    rot = PdfWriter(clone_from=io.BytesIO(_text_pdf()))
+    rot.pages[0].rotate(PDF_ROTATE)
+    with open(out / "text_rot.pdf", "wb") as fh:
+        rot.write(fh)
+
+    def partial_layout(_w, _h, _dpi):
+        return PARTIAL_PAGE, PARTIAL_PAGE, PARTIAL_IMAGE[0], PARTIAL_IMAGE[1]
+
+    (out / "partial.pdf").write_bytes(img2pdf.convert(
+        [p1], engine=img2pdf.Engine.internal, nodate=True,
+        layout_fun=partial_layout))
+
+    return {
+        "scan.pdf": {
+            "sha256": sha256_file(out / "scan.pdf"),
+            "pages": 3,
+            # DISPLAYED boxes: page 3's landscape box, rotated, is portrait.
+            "boxes": [[PDF_PAGE_W, PDF_PAGE_H]] * 3,
+            "image_boxes": [[PDF_PAGE_W, PDF_PAGE_H]] * 3,
+            "rotation": [0, 0, PDF_ROTATE],
+            "px": [[ARCHIVE_W, ARCHIVE_H], [ARCHIVE_W, ARCHIVE_H],
+                   list(PDF_LANDSCAPE)],
+            "filters": ["DCTDecode", "FlateDecode", "DCTDecode"],
+            "outline": PDF_OUTLINE,
+            "info": PDF_INFO,
+            "extract": "xobject",
+            "source_images": {name: {"page": page,
+                                     "sha256": sha256_file(out / name)}
+                              for name, page in PDF_SOURCE_IMAGES.items()},
+        },
+        "text.pdf": {
+            "sha256": sha256_file(out / "text.pdf"),
+            "pages": 1,
+            "boxes": [[PDF_PAGE_W, PDF_PAGE_H]],
+            "image_boxes": [[PDF_PAGE_W, PDF_PAGE_H]],
+            "rotation": [0],
+            "chars": sum(len(line) for line in TEXT_LINES),
+            "info": {"/Title": "text fixture", "/Author": "gen_fixtures.py"},
+            "extract": "render",
+        },
+        "text_rot.pdf": {
+            "sha256": sha256_file(out / "text_rot.pdf"),
+            "pages": 1,
+            # Displayed: the portrait text page turned landscape.
+            "boxes": [[PDF_PAGE_H, PDF_PAGE_W]],
+            "image_boxes": [[PDF_PAGE_H, PDF_PAGE_W]],
+            "rotation": [PDF_ROTATE],
+            "chars": sum(len(line) for line in TEXT_LINES),
+            "info": {"/Title": "text fixture", "/Author": "gen_fixtures.py"},
+            "extract": "render",
+        },
+        "partial.pdf": {
+            "sha256": sha256_file(out / "partial.pdf"),
+            "pages": 1,
+            "boxes": [[PARTIAL_PAGE, PARTIAL_PAGE]],
+            "image_boxes": [list(PARTIAL_IMAGE)],
+            "rotation": [0],
+            "px": [[ARCHIVE_W, ARCHIVE_H]],
+            "filters": ["DCTDecode"],
+            "cover": PARTIAL_IMAGE[0] * PARTIAL_IMAGE[1] / PARTIAL_PAGE ** 2,
+            "info": {},
+            "extract": "xobject",
+        },
+    }
+
+
 def write_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     # sort_keys + fixed separators + trailing newline: byte-identical across runs.
@@ -938,7 +1146,7 @@ def write_json(path, obj):
 
 
 def main():
-    for sub in ("smoke", "bubbles", "cbz", "zh", "ko"):
+    for sub in ("smoke", "bubbles", "cbz", "zh", "ko", "pdf"):
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
     # archives/ is cleared by CONTENT, not wholesale: benign.cbr is committed
     # and cannot be regenerated -- no free tool writes RAR -- so an rmtree here
@@ -955,6 +1163,7 @@ def main():
     zh = gen_cjk("zh", ZH_PHRASES, ZH_FONTS)
     ko = gen_cjk("ko", KO_PHRASES, KO_FONTS)
     archives = gen_archives()
+    pdf = gen_pdf()
 
     write_json(FIXTURES / "smoke" / "expected.json", smoke)
     write_json(FIXTURES / "bubbles" / "expected.json", bubbles)
@@ -962,10 +1171,11 @@ def main():
     write_json(FIXTURES / "zh" / "expected.json", zh)
     write_json(FIXTURES / "ko" / "expected.json", ko)
     write_json(FIXTURES / "archives" / "expected.json", archives)
+    write_json(FIXTURES / "pdf" / "expected.json", pdf)
 
     n = (len(smoke) + len(bubbles) + len(cbz) + len(zh) + len(ko)
-         + len([k for k in archives if not k.startswith("_")]))
-    print(f"generated {n} fixtures + 6 expected.json under {FIXTURES}")
+         + len([k for k in archives if not k.startswith("_")]) + len(pdf))
+    print(f"generated {n} fixtures + 7 expected.json under {FIXTURES}")
     for lang, pages in (("zh", zh), ("ko", ko)):
         for name in sorted(pages):
             print(f"  {lang}/{name}  {len(pages[name]['bubbles'])} bubbles, {pages[name]['font']}")
@@ -980,6 +1190,8 @@ def main():
         meta = archives[name]
         note = meta.get("rejects_with") or f"{meta.get('pages', 3)} pages"
         print(f"  archives/{name}  {meta['format']}, {note}")
+    for name in sorted(pdf):
+        print(f"  pdf/{name}  {pdf[name]['pages']} pages, {pdf[name]['extract']}")
     return 0
 
 

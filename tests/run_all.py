@@ -79,6 +79,8 @@ RANK = {FAIL: 3, INCONCLUSIVE: 2, SKIP: 1, PASS: 0}
 # archive_hostile_rejected IS ratcheted -- it counts AC-11 rules observed
 # firing on a real fixture, and that count going down means a rule stopped
 # working or a fixture stopped being hostile.
+#
+# pdf_render_fallbacks (Phase 7) is in neither set: see the record schema.
 LOWER_IS_BETTER = {
     "max_overflow_pct",
     "clipped_glyph_count",
@@ -114,6 +116,7 @@ PHASE_ORDER = [
     "check_cjk",
     "check_id",
     "check_archives",
+    "check_pdf",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -286,7 +289,7 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "6",
+        "phase": "7",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
@@ -331,6 +334,13 @@ def main() -> int:
             # and neither is something a green run should be able to hide.
             "archive_peak_rss_mb": None,
             "archive_hostile_rejected": None,
+            # Phase 7: check_pdf. How many pages took the 300 DPI render
+            # fallback across the PDF fixtures. In NEITHER ratchet set, for
+            # fit_failed_count's reason: it counts outcomes over a fixed
+            # fixture set (text.pdf and text_rot.pdf exist to be the two), so
+            # its value is decided by which fixtures exist. check_pdf's own
+            # asserts hold it at exactly two; the record is the history.
+            "pdf_render_fallbacks": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline

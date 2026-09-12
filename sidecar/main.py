@@ -98,7 +98,7 @@ class TranslateRequest(BaseModel):
 
 
 class ItemRequest(BaseModel):
-    """One archive, start to finish. Phase 8 owns the QUEUE, not this route.
+    """One archive or PDF, start to finish. Phase 8 owns the QUEUE, not this route.
 
     job_id arrives from the caller rather than being minted here, because it is
     both the delete scope and the placement key: the UI has to be able to name
@@ -305,7 +305,7 @@ def translate(req: TranslateRequest):
 
 @app.post("/api/item")
 def translate_item(req: ItemRequest):
-    """Every page of one CBZ, through the page cache.
+    """Every page of one archive or PDF, through the page cache.
 
     A second run of the same archive under a NEW job_id hits the cache and
     calls neither detection nor OCR, which is what makes this route -- and not

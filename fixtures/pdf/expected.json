@@ -1,0 +1,173 @@
+{
+  "partial.pdf": {
+    "boxes": [
+      [
+        400.0,
+        400.0
+      ]
+    ],
+    "cover": 0.54,
+    "extract": "xobject",
+    "filters": [
+      "DCTDecode"
+    ],
+    "image_boxes": [
+      [
+        240.0,
+        360.0
+      ]
+    ],
+    "info": {},
+    "pages": 1,
+    "px": [
+      [
+        600,
+        900
+      ]
+    ],
+    "rotation": [
+      0
+    ],
+    "sha256": "6d81098468462baf3bc39a31900b37d853df1e6dbb1fca4ec7e9621134938783"
+  },
+  "scan.pdf": {
+    "boxes": [
+      [
+        288.0,
+        432.0
+      ],
+      [
+        288.0,
+        432.0
+      ],
+      [
+        288.0,
+        432.0
+      ]
+    ],
+    "extract": "xobject",
+    "filters": [
+      "DCTDecode",
+      "FlateDecode",
+      "DCTDecode"
+    ],
+    "image_boxes": [
+      [
+        288.0,
+        432.0
+      ],
+      [
+        288.0,
+        432.0
+      ],
+      [
+        288.0,
+        432.0
+      ]
+    ],
+    "info": {
+      "/Author": "gen_fixtures.py",
+      "/Subject": "synthetic scanned manga, three pages",
+      "/Title": "scan fixture"
+    },
+    "outline": [
+      [
+        "Chapter 1",
+        0,
+        [
+          [
+            "Page 2",
+            1,
+            []
+          ]
+        ]
+      ],
+      [
+        "Chapter 2",
+        2,
+        []
+      ]
+    ],
+    "pages": 3,
+    "px": [
+      [
+        600,
+        900
+      ],
+      [
+        600,
+        900
+      ],
+      [
+        900,
+        600
+      ]
+    ],
+    "rotation": [
+      0,
+      0,
+      90
+    ],
+    "sha256": "ac6cdaa58729aa6a0a4451aeb14d3fe3d5b3ec1dd9ef2c037e578a367ae92428",
+    "source_images": {
+      "scan_p1.jpg": {
+        "page": 1,
+        "sha256": "ba9686ee4a561bb5c95db7fa6a4493bc27e136621c8186e85c1bfd17ac86aba8"
+      },
+      "scan_p2.png": {
+        "page": 2,
+        "sha256": "f665d568e941c4a271a789a22c9d44660fcafcd68e49401485a5a4bd27ae5095"
+      }
+    }
+  },
+  "text.pdf": {
+    "boxes": [
+      [
+        288.0,
+        432.0
+      ]
+    ],
+    "chars": 170,
+    "extract": "render",
+    "image_boxes": [
+      [
+        288.0,
+        432.0
+      ]
+    ],
+    "info": {
+      "/Author": "gen_fixtures.py",
+      "/Title": "text fixture"
+    },
+    "pages": 1,
+    "rotation": [
+      0
+    ],
+    "sha256": "20aa8b9fcee6d420657374f0b0cac8318c553b65a022e0b97ec9095b43bd120a"
+  },
+  "text_rot.pdf": {
+    "boxes": [
+      [
+        432.0,
+        288.0
+      ]
+    ],
+    "chars": 170,
+    "extract": "render",
+    "image_boxes": [
+      [
+        432.0,
+        288.0
+      ]
+    ],
+    "info": {
+      "/Author": "gen_fixtures.py",
+      "/Title": "text fixture"
+    },
+    "pages": 1,
+    "rotation": [
+      90
+    ],
+    "sha256": "79df441075619f573fc2e5fe735d611e3732aeee2cf2574ad47d1f237b4d1876"
+  }
+}

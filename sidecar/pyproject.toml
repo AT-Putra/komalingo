@@ -17,6 +17,12 @@ dependencies = [
     "onnxruntime>=1.20,<2",
     "py7zr>=1.0",
     "libarchive-c>=5.1",
+    # Phase 7 (AC-5): pypdfium2 reads and renders, pypdf carries the outline
+    # and /Info across, img2pdf rebuilds without re-encoding a single page.
+    # PyMuPDF is AGPL and is not an option (spec, hard constraint 2).
+    "pypdfium2>=5,<6",
+    "pypdf>=6,<7",
+    "img2pdf>=0.6,<0.7",
 ]
 
 # comic-text-detector (dep #5) and manga-image-translator (dep #2) are NOT on
