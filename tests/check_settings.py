@@ -119,10 +119,22 @@ def main():
         c.check("base_url" in expr and "model" in expr, "ready requires base_url and model")
         c.check("api_key" not in expr, f"and NOT api_key -- it may be empty ({expr.strip()})")
 
+    # A show/hide toggle is allowed -- a user pasting a key into a local
+    # server's field wants to see what landed -- so the attribute may be a
+    # ternary. What must hold is that the false branch is "password" and the
+    # toggle STARTS false: a field that opens revealed is plain text with
+    # extra steps.
+    reveal = re.search(r'type=\{\s*(\w+)\s*\?\s*"text"\s*:\s*"password"\s*\}', settings)
     c.check(
-        'type="password"' in settings,
+        'type="password"' in settings or reveal is not None,
         "the API key field is a password input, not plain text",
     )
+    if reveal:
+        flag = reveal.group(1)
+        c.check(
+            re.search(rf"\[{flag},\s*set\w+\]\s*=\s*useState\(false\)", settings) is not None,
+            f"and the reveal toggle `{flag}` starts hidden",
+        )
 
     # -- the error path shows the provider's own words (AC-8) ---------------
     c.check("describeError" in strip_comments(settings), "Settings renders errors via describeError")
