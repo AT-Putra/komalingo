@@ -212,11 +212,20 @@ def libarchive_path() -> str | None:
     override = os.environ.get("MT_LIBARCHIVE", "").strip()
     if override:
         return override if os.path.isfile(override) else None
-    for name in ("archive.dll", "libarchive.dll", "libarchive.so",
-                 "libarchive.so.13", "libarchive.dylib"):
-        candidate = os.path.join(BUNDLED_LIBARCHIVE, name)
-        if os.path.isfile(candidate):
-            return candidate
+    # The packaged exe first. PyInstaller unpacks a one-file build into
+    # sys._MEIPASS and __file__ no longer sits under the repository, so the
+    # source-tree path below names a directory that does not exist inside the
+    # bundle. build/sidecar.spec places the closure at <_MEIPASS>/libarchive,
+    # and check_package proves the exe reads a .cbr -- this is the line that
+    # assert depends on.
+    frozen = getattr(sys, "_MEIPASS", None)
+    roots = ([os.path.join(frozen, "libarchive")] if frozen else []) + [BUNDLED_LIBARCHIVE]
+    for root in roots:
+        for name in ("archive.dll", "libarchive.dll", "libarchive.so",
+                     "libarchive.so.13", "libarchive.dylib"):
+            candidate = os.path.join(root, name)
+            if os.path.isfile(candidate):
+                return candidate
     return None
 
 

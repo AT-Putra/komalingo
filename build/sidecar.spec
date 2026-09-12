@@ -86,6 +86,30 @@ for package, expected in REQUIRED_DATA.items():
         )
     datas += collected
 
+# libarchive, for the .cbr read path (AC-6). Nine native DLLs that pip cannot
+# deliver: sidecar/native.py fetches them from conda-forge under pinned
+# sha256s into build/libarchive, and archive.libarchive_path() looks for them
+# at <_MEIPASS>/libarchive inside a frozen build -- which is where this puts
+# them. Refused loudly when incomplete, for the REQUIRED_DATA reason: an exe
+# without them builds, launches, answers /api/health, translates every zip,
+# 7z and tar, and fails on the user's first .cbr with a message about a
+# missing library. check_package.py drives a .cbr through the built exe so
+# that gap cannot ship twice.
+import sys as _sys
+_sys.path.insert(0, ROOT)
+from sidecar import native as _native  # noqa: E402
+
+_missing = [d for d in _native.REQUIRED_DLLS
+            if not os.path.isfile(os.path.join(_native.LIBARCHIVE_DIR, d))]
+if _missing:
+    raise SystemExit(
+        f"[sidecar.spec] build/libarchive is incomplete ({', '.join(_missing)} "
+        f"absent). Run `uv run --project sidecar python -m sidecar.native` "
+        f"first. Refusing to build an exe that cannot read .cbr."
+    )
+binaries += [(os.path.join(_native.LIBARCHIVE_DIR, d), "libarchive")
+             for d in _native.REQUIRED_DLLS]
+
 a = Analysis(
     [os.path.join(ROOT, "build", "launch.py")],
     pathex=[ROOT],
@@ -95,6 +119,22 @@ a = Analysis(
     excludes=["tkinter", "matplotlib", "pytest"],
     noarchive=False,
 )
+
+# PyInstaller's binary scan follows archive.dll's imports and copies its eight
+# siblings a SECOND time, to the bundle root, under their bare names
+# (PKG-00.toc showed zlib.dll, zstd.dll, liblzma.dll ... twice). archive.dll
+# resolves its siblings from its own directory first, so the copies are
+# harmless today -- and a bare zlib.dll at the root of the frozen search path
+# is a latent shadow for any extension module that loads one by name, and it
+# is not the closure "exactly" that native.py promises. Keep only the copies
+# under libarchive/.
+_closure = {os.path.normcase(os.path.join(_native.LIBARCHIVE_DIR, d))
+            for d in _native.REQUIRED_DLLS}
+a.binaries = [
+    entry for entry in a.binaries
+    if not (os.path.normcase(entry[1]) in _closure
+            and not entry[0].replace("\\", "/").startswith("libarchive/"))
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

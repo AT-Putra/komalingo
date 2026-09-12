@@ -73,6 +73,7 @@ EXE = os.path.join(DIST, EXE_NAME)
 SPEC = os.path.join(ROOT, "build", "sidecar.spec")
 MANIFEST = os.path.join(ROOT, "build", "longpath.manifest")
 SMOKE = os.path.join(ROOT, "fixtures", "smoke", "tategaki_01.png")
+CBR = os.path.join(ROOT, "fixtures", "archives", "benign.cbr")
 
 HEALTH_TIMEOUT = 30.0  # cold start budget; past this we fall back to one-dir
 SHUTDOWN_TIMEOUT = 5.0
@@ -437,6 +438,36 @@ def main():
             any(v > 0 for v in changed.values()),
             f"pixels changed inside a polygon ({changed})",
         )
+
+        # [cbr] a RAR through the packaged exe. The nine libarchive DLLs
+        # reach the bundle only because build/sidecar.spec lists them, and
+        # archive.libarchive_path() finds them only because it looks under
+        # sys._MEIPASS -- neither of which the translate above touches. An exe
+        # built before either existed launched, answered /api/health,
+        # translated every zip, 7z and tar, and failed on the user's first
+        # .cbr. This is the assert that would have caught it.
+        cbr_dest = os.path.join(ROOT, "build", "work", "cbr-out")
+        shutil.rmtree(cbr_dest, ignore_errors=True)
+        with StubProvider() as stub:
+            status, body = post(port, "/api/item", {
+                "src_path": CBR,
+                "dest_dir": cbr_dest,
+                "job_id": "check-package-cbr",
+                "settings": {"base_url": stub.url, "api_key": "", "model": "stub-model"},
+            })
+        c.check(status == 200,
+                f"[cbr] POST /api/item on benign.cbr returns 200 through the exe "
+                f"({status}: {body[:300]!r})")
+        if status == 200:
+            rec = json.loads(body)
+            c.check(len(rec.get("pages", [])) == 3,
+                    f"[cbr] three pages came back ({len(rec.get('pages', []))})")
+            out = rec.get("archive") or ""
+            c.check(out.lower().endswith("_translated.cbz") and os.path.isfile(out),
+                    f"[cbr] the .cbr was written back as a .cbz that exists ({out})")
+            c.check("RAR archives are read-only" in (rec.get("format_warning") or ""),
+                    f"[cbr] and the cbr->cbz notice is on the record "
+                    f"({rec.get('format_warning')!r})")
 
         # [11] the CPU EP was selected. Goes red on a build where onnxruntime
         # resolves to nothing at all: select_provider names every fallback it
