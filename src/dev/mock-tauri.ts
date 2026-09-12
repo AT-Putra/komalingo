@@ -193,10 +193,21 @@ async function api(path: string, method: string, body: Record<string, unknown> |
   if (path === "/api/health") return { status: "ok", pid: 4242 };
   if (path.startsWith("/api/models")) {
     await sleep(500);
+    // Enough rows to scroll and to filter: what an aggregator answers.
     return {
       models: [
+        { id: "gpt-4o", owned_by: "openai" },
         { id: "gpt-4o-mini", owned_by: "openai" },
-        { id: "qwen2.5-vl-7b", owned_by: "local" },
+        { id: "gpt-4.1", owned_by: "openai" },
+        { id: "claude-sonnet-4", owned_by: "anthropic" },
+        { id: "claude-opus-4", owned_by: "anthropic" },
+        { id: "gemini-2.5-pro", owned_by: "google" },
+        { id: "gemini-2.5-flash", owned_by: "google" },
+        { id: "qwen2.5-vl-7b-instruct", owned_by: "local" },
+        { id: "qwen2.5-vl-72b-instruct", owned_by: "combo" },
+        { id: "llama-3.2-11b-vision", owned_by: "local" },
+        { id: "pixtral-12b", owned_by: "mistral" },
+        { id: "deepseek-chat", owned_by: "deepseek" },
       ],
     };
   }
@@ -204,7 +215,8 @@ async function api(path: string, method: string, body: Record<string, unknown> |
     await sleep(900);
     return {
       page: 1,
-      output: "out/test/sample.png",
+      // The real sidecar reports the long-path form it wrote through.
+      output: `\\\\?\\${String(body?.dest_dir)}\\sample_translated.png`,
       detections: 4,
       ocr_calls: 1,
       inpaint_calls: 1,
@@ -331,6 +343,16 @@ async function api(path: string, method: string, body: Record<string, unknown> |
         const o = (args.options ?? {}) as { directory?: boolean };
         return o.directory ? "C:\\Manga\\series" : "C:\\Manga\\chapter-01.cbz";
       }
+      // @tauri-apps/api/path: Settings resolves the bundled sample page and
+      // the app data folder through these two. BaseDirectory.Resource is 11,
+      // AppLocalData is 15 -- the enum in path.js, not exported as strings.
+      case "plugin:path|resolve_directory": {
+        const dir = Number(args.directory);
+        const base = dir === 11 ? "C:\\Program Files\\MangaTranslator" : "C:\\Users\\me\\AppData\\Local\\com.adita.mangatranslator";
+        return args.path ? `${base}\\${String(args.path)}` : base;
+      }
+      case "plugin:path|join":
+        return (args.paths as string[]).join("\\");
       default:
         throw { status: 0, body: `mock: unknown command ${cmd}` };
     }

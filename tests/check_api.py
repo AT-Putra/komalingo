@@ -186,6 +186,29 @@ def main():
         status, _ = call("GET", "/api/job/nope")
         c.check(status == 404, f"GET /api/job/nope is 404 (got {status})")
 
+        # -- a missing source file is 404 naming it, on both page routes ---
+        # The regression this pins: the Settings "test with sample" button
+        # sent a relative path the sidecar could not see from its own cwd,
+        # and Image.open's FileNotFoundError fell into the 500 envelope --
+        # which by design ships the exception CLASS and not its message. So
+        # the one string the user needed, the path, was the one string the
+        # UI did not get. Also asserted: no provider round trip is spent
+        # first -- with an unreachable base_url this would be a 502 if the
+        # probe ran before the file check.
+        for route, extra in (("/api/translate", {"page": 1}),
+                             ("/api/item", {"job_id": "api-nofile"})):
+            status, body = call("POST", route, body=json.dumps({
+                "src_path": os.path.join(EMPTY_MODELS, "no-such-page.png"),
+                "dest_dir": os.path.join(EMPTY_MODELS, "out"),
+                "settings": {"base_url": "http://127.0.0.1:9", "api_key": "", "model": "m"},
+                **extra,
+            }), timeout=10)
+            c.check(status == 404, f"POST {route} with a missing file is 404 (got {status})")
+            payload, why = _parse_json(body)
+            c.check(isinstance(payload, dict) and "no-such-page.png" in str(payload.get("error"))
+                    and payload.get("kind") == "input",
+                    f"and names the path with kind=input ({why}; body {body[:100]!r})")
+
         # -- a weights failure reaches the UI with its reason intact -------
         # The regression this pins: /api/translate used to catch ProviderError
         # only, so a checksum mismatch or a dead network -- the two failures
@@ -229,6 +252,25 @@ def main():
         # against the f-string too, so this assert guards the assert.
         c.check('"' in provider_body,
                 "the provider fixture really does contain a double quote")
+
+        # -- the success shape is what the UI renders ----------------------
+        # {"models": [{"id", "owned_by"}]}, objects with a string id. The UI
+        # typed it that way from the start while the sidecar sent bare
+        # strings; the datalist swallowed the mismatch and the combobox that
+        # replaced it read `.id` off a string and blanked the whole window.
+        with StubProvider(models_status=200, delay=0) as stub:
+            status, body = call(
+                "GET", f"/api/models?base_url={quote(stub.url, safe='')}&model=probe"
+            )
+        c.check(status == 200, f"/api/models against a live provider is 200 (got {status})")
+        payload, why = _parse_json(body)
+        listed = payload.get("models") if isinstance(payload, dict) else None
+        c.check(isinstance(listed, list) and len(listed) == 4,
+                f"and lists all 4 fixture models ({why}; body {body[:120]!r})")
+        c.check(isinstance(listed, list) and all(
+                    isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]
+                    and isinstance(m.get("owned_by"), str) for m in listed),
+                f"each as an object with a string id and owner, not a bare id ({body[:120]!r})")
 
         with StubProvider(models_status=401, delay=0) as stub:
             status, body = call(

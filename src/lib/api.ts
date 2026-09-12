@@ -26,9 +26,33 @@ export function isApiError(e: unknown): e is ApiError {
 /** What the reader sees when a call fails. Status and body, never a synonym. */
 export function describeError(e: unknown): string {
   if (isApiError(e)) {
-    return e.status === 0 ? e.body : `HTTP ${e.status}\n\n${e.body}`;
+    const text = e.status === 0 ? e.body : `HTTP ${e.status}\n\n${e.body}`;
+    // The sidecar's 500 envelope names the exception class and, by design,
+    // nothing else; the traceback went to its stderr, which is the Log
+    // drawer. Say so, or the one place the answer is stays unopened.
+    return isInternal(e.body) ? `${text}\n\nThe full traceback is in the Log (bottom right).` : text;
   }
   return String(e);
+}
+
+/**
+ * A path as a person reads it. The sidecar opens and writes through Windows
+ * long-path names, so the paths it reports come back as `\\?\C:\...`; the
+ * prefix is an implementation detail of atomic.long_path, not something to
+ * put in front of a user. UNC keeps its two leading slashes.
+ */
+export function displayPath(p: string): string {
+  if (p.startsWith("\\\\?\\UNC\\")) return "\\\\" + p.slice(8);
+  if (p.startsWith("\\\\?\\")) return p.slice(4);
+  return p;
+}
+
+function isInternal(body: string): boolean {
+  try {
+    return (JSON.parse(body) as { kind?: unknown }).kind === "internal";
+  } catch {
+    return false;
+  }
 }
 
 export interface ProviderSettings {
@@ -167,9 +191,23 @@ export const api = {
   allowOutputDir: (path: string) => invoke<void>("allow_output_dir", { path }),
 
   /** Populate the model dropdown from the user's own endpoint. */
-  models: (s: Pick<ProviderSettings, "base_url" | "api_key">) => {
+  models: async (s: Pick<ProviderSettings, "base_url" | "api_key">) => {
     const q = new URLSearchParams({ base_url: s.base_url, api_key: s.api_key });
-    return call<{ models: ModelInfo[] }>(`/api/models?${q}`);
+    const r = await call<{ models: unknown }>(`/api/models?${q}`);
+    // Normalised HERE, at the boundary, so no component ever reads `.id` off
+    // something that is not an object. The sidecar sends {id, owned_by}
+    // objects; a bare string is still accepted as an id, and anything else
+    // is dropped -- a list entry the UI cannot name is not worth a blank
+    // window, which is what the first mismatch produced.
+    const models: ModelInfo[] = [];
+    for (const m of Array.isArray(r.models) ? r.models : []) {
+      if (typeof m === "string" && m) models.push({ id: m });
+      else if (m && typeof m === "object" && typeof (m as ModelInfo).id === "string" && (m as ModelInfo).id) {
+        const owner = (m as ModelInfo).owned_by;
+        models.push({ id: (m as ModelInfo).id, owned_by: typeof owner === "string" && owner ? owner : undefined });
+      }
+    }
+    return { models };
   },
 
   translate: (req: {

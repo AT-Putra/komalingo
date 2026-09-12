@@ -232,15 +232,29 @@ class LLMClient:
 
     # -- model listing -----------------------------------------------------
 
-    def list_models(self) -> list[str]:
-        """Every id the provider reports, in the provider's own order.
+    def list_models(self) -> list[dict]:
+        """Every model the provider reports, in the provider's own order, as
+        {"id", "owned_by"} -- the shape the Settings combobox renders.
 
         No filtering on owned_by. Aggregators report owned_by="combo" for
         their routed models; a client that only accepts known owners hides
-        exactly the models this user configured the aggregator to serve.
+        exactly the models this user configured the aggregator to serve. The
+        owner travels because it is what tells two similarly named ids apart
+        in an aggregator's list.
+
+        Objects, not bare ids: the UI typed this as objects from the start
+        while this returned strings, and the first component to read `.id`
+        off a string took the whole window down with it. check_api pins the
+        shape at the HTTP boundary now.
         """
         data = self._request("/models")
-        return [m["id"] for m in data.get("data", []) if m.get("id")]
+        out = []
+        for m in data.get("data", []):
+            if not isinstance(m, dict) or not isinstance(m.get("id"), str) or not m["id"]:
+                continue
+            owner = m.get("owned_by")
+            out.append({"id": m["id"], "owned_by": owner if isinstance(owner, str) else ""})
+        return out
 
     # -- translation -------------------------------------------------------
 

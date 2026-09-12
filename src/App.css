@@ -661,6 +661,128 @@ select {
   background: transparent;
 }
 
+/* ---------- Combobox ---------- */
+
+/* The input is the field; the popup floats under it in the field's own width.
+   Fills the .control row where a bare input would. */
+.field .control > .combobox {
+  flex: 1;
+  min-width: 0;
+}
+.combobox {
+  position: relative;
+  display: flex;
+}
+.combobox > input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding-right: 40px; /* room for the toggle */
+}
+.combobox-toggle {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  width: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.combobox-toggle:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--muted);
+}
+.combobox-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.combobox-pop {
+  position: absolute;
+  top: calc(100% + var(--s-1));
+  left: 0;
+  right: 0;
+  z-index: 20; /* above cards and the log drawer (5) */
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: fade-up var(--dur-fast) var(--ease-out) backwards;
+}
+.combobox-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-1);
+  max-height: 280px;
+  overflow-y: auto;
+}
+.combobox-opt {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 36px;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+/* One highlight source: the active row follows the keyboard and the pointer
+   alike (onPointerMove sets it), so hover and arrow keys never disagree. */
+.combobox-opt.active {
+  background: var(--muted);
+}
+.combobox-opt[aria-selected="true"] .combobox-id {
+  color: var(--ok-text);
+  font-weight: 500;
+}
+.combobox-check {
+  width: 14px;
+  flex: none;
+  display: inline-flex;
+  color: var(--ok-text);
+}
+.combobox-id {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 0.86rem;
+}
+.combobox-owner {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--fg-faint);
+}
+.combobox-empty {
+  margin: 0;
+  padding: var(--s-3);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+.combobox-empty b {
+  color: var(--fg);
+  font-weight: 500;
+}
+.combobox-count {
+  padding: var(--s-1) var(--s-3);
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- Buttons ---------- */
 
 .btn {
@@ -770,6 +892,18 @@ select {
 .alert .body {
   flex: 1;
   min-width: 0;
+  /* Paths and ids are single tokens longer than the card; reflow them
+     rather than let them run out of the box. Never break-all: prose
+     still wraps at spaces. */
+  overflow-wrap: anywhere;
+}
+.alert .alert-path {
+  display: block;
+  margin-top: var(--s-1);
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--fg);
+  user-select: all; /* one click selects the whole path to copy */
 }
 .alert .title {
   font-weight: 600;

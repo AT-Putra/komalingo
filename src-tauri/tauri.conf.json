@@ -37,6 +37,9 @@
     ],
     "externalBin": [
       "binaries/sidecar"
-    ]
+    ],
+    "resources": {
+      "../fixtures/smoke/tategaki_01.png": "sample.png"
+    }
   }
 }

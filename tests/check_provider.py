@@ -117,10 +117,16 @@ def main():
 
         # --- models list is unfiltered ------------------------------------
         models = client.list_models()
+        ids = [m["id"] for m in models]
         c.check(len(models) == 4, f"all 4 fixture models are listed, got {len(models)}")
         c.check(
-            "cx/gpt-5.6-sol" in models and "cx/claude-opus-5" in models,
+            "cx/gpt-5.6-sol" in ids and "cx/claude-opus-5" in ids,
             "owned_by=combo models are NOT filtered out",
+        )
+        c.check(
+            all(isinstance(m.get("owned_by"), str) for m in models)
+            and {m["owned_by"] for m in models} == {"combo", "openai", "local"},
+            f"and each carries its owner ({[m.get('owned_by') for m in models]})",
         )
 
         # --- batching: 5 regions -> 1 request ------------------------------

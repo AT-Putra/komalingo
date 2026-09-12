@@ -36,7 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from fastapi import FastAPI, Request, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from . import cache, job, pipeline  # noqa: E402
+from . import atomic, cache, job, pipeline  # noqa: E402
 from .detect import DetectError  # noqa: E402
 from .llm import LLMClient, ProviderError, SettingsError  # noqa: E402
 from .models import FetchError  # noqa: E402
@@ -321,6 +321,27 @@ def _cache_miss_response(e: CacheMiss) -> Response:
     )
 
 
+def _missing_source_response(path: str) -> Response | None:
+    """404 naming the path when src_path is not a file; None when it is.
+
+    Checked BEFORE the client is built and the vision probe runs, so a typo
+    in a path does not cost a provider round trip to discover. Without this
+    the pipeline's Image.open raised FileNotFoundError into the last-resort
+    500 envelope, which by design withholds the message -- so the one string
+    the user needed, the path it could not find, was the one string the UI
+    did not have. Here the path is the user's own input, not an unvetted
+    exception message, and it travels. `kind` "input" is what the UI branches
+    on, the same way start_job answers a missing folder with 404.
+    """
+    if os.path.isfile(atomic.long_path(path)):
+        return None
+    return Response(
+        content=json.dumps({"error": f"no such file: {path}", "kind": "input"}),
+        status_code=404,
+        media_type="application/json",
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "pid": os.getpid()}
@@ -341,6 +362,9 @@ def models(base_url: str, model: str = "", api_key: str = ""):
 @app.post("/api/translate")
 def translate(req: TranslateRequest):
     """Run one page. Progress lines go to stdout, which Tauri reads."""
+    missing = _missing_source_response(req.src_path)
+    if missing is not None:
+        return missing
     try:
         # INSIDE the try. The constructor rejects an empty base_url or model,
         # and the settings payload can carry both as empty strings -- pydantic
@@ -398,6 +422,9 @@ def translate_item(req: ItemRequest):
     only the re-render one -- part of AC-10's evidence. See cache.py on why the
     page directory is keyed on content and on nothing about the run.
     """
+    missing = _missing_source_response(req.src_path)
+    if missing is not None:
+        return missing
     try:
         client = _client(req.settings)
         vision_warning = _probed(client)
