@@ -240,10 +240,33 @@ def _libarchive():
     try:
         import libarchive  # noqa: PLC0415 -- deliberately lazy; see docstring
     except Exception as e:
-        raise LibarchiveMissing(
-            f"libarchive not available ({type(e).__name__}: {e}); "
-            f"looked at MT_LIBARCHIVE and {BUNDLED_LIBARCHIVE}"
-        ) from e
+        if resolved:
+            # A library WAS found and would not load. Here the binding's own
+            # error IS the diagnosis: a dependency DLL missing beside it fails
+            # exactly like an absent file, and the type name is the only thing
+            # that separates the two.
+            reason = (f"libarchive at {resolved} could not be loaded "
+                      f"({type(e).__name__}: {e}) -- a dependency DLL beside "
+                      f"it may be missing")
+        else:
+            # Nothing resolved, and the platform loader found nothing either.
+            # The binding reports that as "argument of type 'NoneType' is not
+            # iterable", which is the exact sentence this class's docstring
+            # exists to keep away from a reader -- so it does not go in the
+            # message. It reached one anyway, as check_archives' skip reason,
+            # because the message pasted it back in.
+            # Two audiences, in that order. job.py puts this string on the
+            # item as its SKIPPED reason and the Job view shows it, so the
+            # first sentence is the one a reader who has just dropped a .cbr
+            # on the app needs; the paths follow for whoever has to fix it.
+            reason = ("this install cannot read RAR (.cbr) archives -- no "
+                      "libarchive is bundled. Every other format is "
+                      "unaffected: zip, 7z and tar need none of it. "
+                      "(MT_LIBARCHIVE unset; "
+                      f"{BUNDLED_LIBARCHIVE} carries no archive.dll, "
+                      "libarchive.dll or libarchive.so; the platform loader "
+                      "found none)")
+        raise LibarchiveMissing(reason) from e
     return libarchive
 
 

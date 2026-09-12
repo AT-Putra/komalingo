@@ -760,14 +760,23 @@ def check_refused_cleanup(c, tmp):
 
 def check_cbr(c, tmp):
     """AC-6's .cbr clause. Returns False when it could not be exercised."""
+    # BOTH prerequisites, not the first one that fails. Reporting only the
+    # missing fixture made the clause read as one file away from running when
+    # it is two independent pieces of work -- a fixture nothing on this box
+    # can author, and a native library with no official Windows build. A
+    # reader who fixes the named half and finds the clause still skipping has
+    # been misled by the reason string, which is a defect in the reason.
     path = fixture("benign.cbr")
+    missing = []
     if not os.path.isfile(path):
-        return False, "fixtures/archives/benign.cbr is absent (see fixtures/README.md)"
+        missing.append("fixtures/archives/benign.cbr is absent")
     if archive.libarchive_path() is None:
         try:
             archive._libarchive()
         except archive.LibarchiveMissing as e:
-            return False, e.reason
+            missing.append(e.reason)
+    if missing:
+        return False, " AND ".join(missing) + " (see fixtures/README.md)"
 
     c.check(archive.rar_generation(path) == 4,
             "benign.cbr is RAR4 (-ma4), not RAR5")

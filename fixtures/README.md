@@ -85,7 +85,7 @@ output must reproduce the image's own 240x360pt box rather than stretch it
 over the page. Written through img2pdf (`nodate`, internal engine) and
 pypdf, neither of which is wall-clock-free by default.
 
-### `fixtures/archives/benign.cbr` — missing, and AC-6's `.cbr` clause is unverified until it exists
+### `fixtures/archives/benign.cbr` — missing, and AC-6's `.cbr` clause needs TWO things before it can run
 
 **No free tool writes RAR.** Not libarchive, not 7-Zip, not py7zr — RAR
 compression is proprietary and nothing in this build or in CI creates one. So
@@ -108,9 +108,27 @@ What to author, exactly:
   drift.
 - record the WinRAR version and the file's SHA-256 in this file when you add it
 
+**A licensed WinRAR is no longer sufficient, checked 2026-09-12.** WinRAR 7.x
+removed RAR4 *creation*: `Rar.exe` 7.23 (registered) has no `-ma` switch at
+all and `rar a -ma4` exits 7 with `Unknown option: ma4`. It still extracts
+RAR4 perfectly well — only the writer is gone. So authoring this fixture needs
+a `rar` CLI from the 5.x or 6.x line, or a hand-rolled RAR4 store-mode writer
+(the format is documented: marker, `MAIN_HEAD`, one `FILE_HEAD` per member
+with method `0x30`, CRC32 each), which would have the further advantage of
+making the fixture *generated* and deterministic rather than a committed
+binary.
+
+Writing it as RAR5 with a current WinRAR is possible and is NOT the same
+fixture: it would exercise libarchive's RAR5 reader instead, and the RAR4 pin
+exists precisely because that reader is a separate and less widely enabled
+code path. Changing the pin is a decision, not a shortcut.
+
 Until it exists, `check_archives.py` reports **SKIP (exit 3)** with
-`AC-6's .cbr clause not exercised` after its other 137 asserts pass. The
-`.cbr` read path itself is implemented and is exercised by nothing.
+`AC-6's .cbr clause not exercised` after its other 137 asserts pass, and the
+reason names **both** missing prerequisites rather than stopping at the first
+— reporting only the fixture made the clause read as one file away from
+running when it is two independent pieces of work. The `.cbr` read path itself
+is implemented and is exercised by nothing.
 
 **It also needs libarchive.** The RAR reader is `libarchive` through
 `libarchive-c`, resolved by `archive.libarchive_path()`: `MT_LIBARCHIVE` (an
@@ -122,3 +140,17 @@ asset exists for any tag — so the bundle has to come from somewhere else
 needs its seven dependency DLLs: zlib, bz2, lzma, lz4, zstd, iconv, libxml2).
 That bundling decision is open; `check_archives.py` skips the `.cbr` asserts
 with a named reason when the library cannot be resolved.
+
+**Worth weighing before bundling it.** RAR is the only format that needs
+libarchive — `zipfile` reads zip/cbz, `tarfile` reads tar/cbt, `py7zr` reads
+7z/cb7, all of them pure Python — and RAR is read-only here by design
+(`OUTPUT_FORMAT` maps RAR to ZIP and a `.cbr` item is written back as `.cbz`
+with one warning per job). So the current design carries eight native DLLs
+with no official Windows release for exactly one decode path. A narrower
+backend for that one path — 7-Zip's `7z.dll`, which reads RAR4 and RAR5 in
+process, or `rarfile` driving a bundled `UnRAR.exe` — would be a smaller
+dependency. The trade to check before switching: `check_archives.py` asserts
+the read still works with `PATH` emptied, which any bundled backend satisfies
+when invoked by absolute path, but a subprocess backend also has to re-prove
+AC-12's 400MB streaming bound that `zipfile` and `py7zr` hold by reading
+member by member.
