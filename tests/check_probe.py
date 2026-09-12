@@ -2,7 +2,8 @@
 
 Only this file talks to a live endpoint. All other checks run against the
 stub server in tests/lib/stub_provider.py. This one must read MT_BASE_URL,
-MT_API_KEY, MT_MODEL from .env.local (git-ignored) or die with exit 3.
+MT_API_KEY, MT_MODEL from .env.local (git-ignored, loaded by lib.env_local --
+the real environment wins over the file) or die with exit 3.
 
 The probe paints a random 4-char token into an image and asserts it returns
 in the reply. A forced-failure probe must latch text-only mode. The translate
@@ -19,31 +20,36 @@ import io
 import json
 import os
 import random
-import string
 import sys
 import asyncio
 import urllib.error
 import urllib.request
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from lib.result import Checks, run
+from lib.env_local import load_env_local
+from lib.result import Checks, run, skip
+
+load_env_local()
 
 BASE = os.environ.get("MT_BASE_URL", "").rstrip("/")
 KEY = os.environ.get("MT_API_KEY", "")
 MODEL = os.environ.get("MT_MODEL", "")
 
 if not BASE or not MODEL:
-    reason = f"MT_BASE_URL and MT_MODEL must both be set (got BASE={bool(BASE)} MODEL={bool(MODEL)})"
-    if os.environ.get("MT_REQUIRE_LIVE"):
-        print(f"SKIP promoted to FAIL by MT_REQUIRE_LIVE: {reason}")
-        sys.exit(1)
-    print(f"SKIP: {reason}")
-    sys.exit(3)
+    # live=True: this is the skip MT_REQUIRE_LIVE exists for. The inline copy
+    # that used to live here read the variable as a non-empty string, so the
+    # MT_REQUIRE_LIVE=0 that section E tells CI to set promoted the skip
+    # instead of suppressing the promotion. One contract, in lib/result.py.
+    sys.exit(skip(
+        f"MT_BASE_URL and MT_MODEL must both be set "
+        f"(got BASE={bool(BASE)} MODEL={bool(MODEL)})",
+        live=True,
+    ))
 
 
 def post(path, payload=None):
@@ -67,17 +73,44 @@ def post(path, payload=None):
         return 0, f"{type(e.reason).__name__}: {e.reason}"
 
 
+# No 0/O, 1/I, 5/S, 8/B or 2/Z. `tok.lower() in reply.lower()` is an exact
+# substring test, so a model that reads O as 0 goes red at any font size --
+# and with ascii_uppercase + digits a 4-char draw contains at least one
+# confusable about 73% of the time. 32**4 is still ~1.05M, so the assert
+# keeps its strength; it stops measuring typography instead of vision.
+ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def redact(text):
+    """Never echo the live key, whatever the gateway reflected back."""
+    return text.replace(KEY, "***") if KEY else text
+
+
 def token_image(tok):
-    """Paint a 4-char token large and black on white. No prompt text."""
+    """Paint a 4-char token large and black on white. No prompt text.
+
+    "Large" was a lie until the live sign-off ran this for the first time:
+    the token went out in PIL's default bitmap font, about 11px tall on a
+    320x120 canvas, and the assert then went red on roughly every other run
+    against a healthy endpoint. What that measures is whether a vision model
+    can resolve 11px glyphs, not whether it can read pixels at all, which is
+    what AC-9 asks. Rendered at 64px it is unambiguous.
+
+    Making the token legible cannot make a blind model pass: assert [5]
+    demands that a probe for a token that was NEVER painted still fails, so
+    a model replying with plausible noise is caught there, and assert [8]
+    demands the positive case succeed on the same image.
+    """
     img = Image.new("RGB", (320, 120), "white")
-    ImageDraw.Draw(img).text((20, 40), tok, fill="black")
+    ImageDraw.Draw(img).text((20, 20), tok, fill="black",
+                             font=ImageFont.load_default(size=64))
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
 
 def attempt():
-    tok = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    tok = "".join(random.choices(ALPHABET, k=4))
     payload = {
         "model": MODEL,
         "max_tokens": 32,
@@ -92,14 +125,14 @@ def attempt():
     }
     status, body = post("/chat/completions", payload)
     if status != 200:
-        print(f"  http {status}: {body[:300]!r}")
+        print(f"  http {status}: {redact(body)[:300]!r}")
         return False
     try:
         reply = json.loads(body)["choices"][0]["message"]["content"]
         if isinstance(reply, list):
             reply = "".join(p.get("text", "") for p in reply)
     except (KeyError, IndexError, ValueError, TypeError) as e:
-        print(f"  unparseable 200: {type(e).__name__}: {body[:300]!r}")
+        print(f"  unparseable 200: {type(e).__name__}: {redact(body)[:300]!r}")
         return False
     hit = tok.lower() in reply.lower()
     print(f"  token {tok} {'FOUND' if hit else 'absent'} in {reply.strip()[:80]!r}")
@@ -112,7 +145,7 @@ def main():
     # Assert 1: live endpoint
     status, body = post("/models")
     if status != 200:
-        c.check(False, f"GET /models -> {status}: {body[:300]!r}")
+        c.check(False, f"GET /models -> {status}: {redact(body)[:300]!r}")
         return c.finish()
     try:
         data = json.loads(body)
@@ -146,8 +179,8 @@ def main():
     client = LLMClient(BASE, KEY, MODEL)
     c.check(not client.text_only, "a fresh client is NOT text-only (the latch is never speculative)")
 
-    absent = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    painted = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    absent = "".join(random.choices(ALPHABET, k=8))
+    painted = "".join(random.choices(ALPHABET, k=4))
     png = base64.b64decode(token_image(painted))
 
     ok = asyncio.run(client.probe_vision(png, absent))

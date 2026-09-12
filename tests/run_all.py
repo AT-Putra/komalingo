@@ -14,19 +14,38 @@ not one -- Phase 0a lost time to exactly that. So the interpreter is asserted
 BEFORE any check runs, and a miss aborts with its own message rather than
 producing a table of misattributed failures.
 
+**The runner's own stdout must survive what it prints.** run_all forces
+PYTHONIOENCODING=utf-8 on every CHILD and then printed the child's failing
+lines through its own cp1252 stdout. The first time a check that prints
+Japanese actually FAILED -- check_id, during the live sign-off -- the runner
+died with UnicodeEncodeError at the line that reports the failure, mid-table:
+the remaining four checks never ran and no baseline record was written. A
+runner that cannot report a red check is worse than one that cannot run it.
+
 **A check that silently went from pass to skip is a regression.** Fixtures
 vanish, an env var gets dropped, and the run still prints green because a skip
 is not a failure. That is why every run appends its per-check status to
 tests/baseline.json and compares against the last comparable record.
 
-Comparison is scoped to the newest prior record with an IDENTICAL `skipped`
-set. Without that scoping a developer's `full` record (real-panel fixtures
-present) and CI's `synthetic` record differ by several legitimately-skipped
-checks, and the ratchet reads that as a pass-to-skip regression. When no
-comparable record exists -- a clean clone, or a new environment class -- this
-exits 3 with the reason `no baseline record for env_class=<x>` and writes the
-first record. A floor that silently never fires is the same cannot-go-red
-defect the store was added to remove.
+That clause was unreachable from Phase 0 until the live sign-off found it:
+the STATUS comparison was scoped to a prior record with an identical skip
+set, and a check that skips now skipped in that record too. See
+last_status(), which is where the two comparisons part company -- metrics
+still compare within an identical skip set, statuses compare per check
+against the newest record in the same env_class that ran it.
+
+METRIC comparison is scoped to the newest prior record with an IDENTICAL
+`skipped` set, because which checks ran decides which metrics exist. Without
+that scoping a developer's `full` record (real-panel fixtures present) and
+CI's `synthetic` record differ by several legitimately-skipped checks and the
+comparison is meaningless. When no comparable record exists -- a clean clone,
+or a new environment class -- this exits 3 with the reason `no baseline record
+for env_class=<x>` and writes the first record. A floor that silently never
+fires is the same cannot-go-red defect the store was added to remove.
+
+An intended pass-to-skip is declared, not endured: `MT_ACCEPT_SKIP="<reason>"`
+records it and lets the run through, the way `MT_ACCEPT_METRIC_REGRESSION`
+does for a metric. Undeclared, it is a failure.
 
 Run from the repo root:
     uv run --project sidecar python tests/run_all.py
@@ -39,6 +58,14 @@ import os
 import subprocess
 import sys
 import time
+
+# Before anything can print: this runner echoes its children's output, and
+# eleven of them print Japanese. See the docstring.
+# errors="replace" because reconfigure(encoding=) resets the handler to
+# strict: children are decoded with errors="replace", so one lone U+FFFD
+# would otherwise crash the runner the same way cp1252 just did.
+getattr(sys.stdout, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace")
+getattr(sys.stderr, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(ROOT, "tests")
@@ -232,6 +259,53 @@ def append_record(record: dict) -> None:
         fh.write("\n")
 
 
+def last_status(name: str, ec: str) -> str | None:
+    """The newest status recorded for `name` in this env_class, ANY skip set.
+
+    This is deliberately not read out of the same record the metric ratchet
+    compares against, and the difference is the whole point of this function.
+
+    The metric comparison must be scoped to an identical skip set, because
+    which checks ran decides which metrics exist. The STATUS comparison was
+    given the same scoping, and that made the pass-to-skip clause below
+    unreachable by construction: `skipped` is derived from this run's
+    results, the prior record is filtered to an IDENTICAL skipped list, so a
+    check that skips now also skipped in the record it is compared against
+    and `was == "PASS"` is never true for a SKIP. The clause could only ever
+    fire for PASS -> FAIL and PASS -> INCONCLUSIVE, both of which `worst`
+    already catches. Verified against the whole store when it was found: in
+    every record, the set of checks with status SKIP equals its `skipped`
+    list, so there was no record in which the comparison could have differed.
+
+    The cost was not theoretical. It is the mechanism the live-endpoint
+    sign-off cited when it scoped MT_REQUIRE_LIVE to live skips -- delete
+    .env.local and the run reproduces a historical skip set, matches it
+    status for status, prints "no regression" and exits 3 exactly as a
+    healthy run does, while AC-4 and AC-9 stop being measured. A ratchet
+    that cannot fire is the same defect class as a docstring nothing keeps.
+
+    Scanning newest-first for the check by NAME removes the coupling: a
+    record that never ran the check at all returns None and imposes no
+    floor, and one that ran it imposes the floor it recorded.
+    """
+    for r in reversed(load_records()):
+        if r.get("env_class") != ec:
+            continue
+        status = (r.get("checks") or {}).get(name)
+        # FAIL and INCONCLUSIVE are skipped over rather than treated as the
+        # floor. A run in which the check BROKE measured nothing about
+        # whether its precondition still exists, so letting it stand as the
+        # floor means one red run erases the demotion guard: the run after it
+        # can lose a fixture or a credential and read as no regression. Found
+        # by the red check for this very clause -- a record written while the
+        # tree was being edited had check_id FAIL, and the pass-to-skip that
+        # followed went unreported while check_probe's, whose newest record
+        # said PASS, was caught.
+        if status in ("PASS", "SKIP"):
+            return status
+    return None
+
+
 def metric_regressions(now_metrics: dict, last_metrics: dict) -> list[str]:
     """Every metric that moved the WRONG way against the last comparable record.
 
@@ -382,9 +456,21 @@ def main() -> int:
     last = prior[-1]
     regressions = []
     for name, status in record["checks"].items():
-        was = last["checks"].get(name)
+        was = last_status(name, ec)
         if was == "PASS" and status != "PASS":
             regressions.append(f"{name}: PASS -> {status}")
+
+    # A pass-to-skip that IS intended -- a fixture deliberately retired, a
+    # machine that legitimately lost its CUDA device -- says so, the way a
+    # metric regression does. Silence is what this clause exists to refuse.
+    accepted_skip = os.environ.get("MT_ACCEPT_SKIP", "").strip()
+    demotions = [r for r in regressions if r.endswith("-> SKIP")]
+    if demotions and accepted_skip:
+        record["accepted_skip"] = {"reason": accepted_skip, "checks": demotions}
+        print(f"\n  pass-to-skip ACCEPTED ({accepted_skip}):")
+        for r in demotions:
+            print(f"    {r}")
+        regressions = [r for r in regressions if r not in demotions]
 
     # The build order's clause is "every METRIC no worse than the last record",
     # and until Phase 2a only check STATUS was compared -- max_overflow_pct could

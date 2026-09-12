@@ -1,5 +1,7 @@
 """Phase 5 -- Indonesian output and the glossary (AC-4). Offline half always;
-live half when MT_BASE_URL and MT_MODEL are set, else exit 3.
+live half when MT_BASE_URL and MT_MODEL are set -- from the environment, or
+from the git-ignored .env.local via lib.env_local, which never overrides a
+name the environment already carries -- else exit 3.
 
 The build order rewrote this gate once already: its first draft graded
 self-consistency and glossary-key coverage, and both reviewers showed that a
@@ -43,7 +45,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+# Every assert below prints the Japanese source line it graded. On a cp1252
+# console that is a UnicodeEncodeError in the middle of the offline half,
+# before the check has decided anything -- which is what a direct
+# `python tests/check_id.py` did on Windows until now. run_all.py forces
+# PYTHONIOENCODING=utf-8 on its children and so never saw it, and
+# PYTHONIOENCODING read out of .env.local cannot help: the interpreter has
+# already chosen the codec by the time any line of this file runs. Same line
+# as check_tategaki.py, for the same reason.
+getattr(sys.stdout, "reconfigure", lambda **_: None)(encoding="utf-8", errors="replace")
+
 from lib.asserts import chrf_pp, english_function_words  # noqa: E402
+from lib.env_local import load_env_local  # noqa: E402
 from lib.result import Checks, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider, requested_items  # noqa: E402
 from sidecar import llm  # noqa: E402
@@ -61,6 +74,8 @@ FORBIDDEN = {
     "senpai": ["Kak "],
     "sensei": ["Pak Guru", "Bu Guru"],
 }
+
+load_env_local()
 
 BASE = os.environ.get("MT_BASE_URL", "").rstrip("/")
 KEY = os.environ.get("MT_API_KEY", "")
@@ -215,7 +230,7 @@ def main():
         if c.failures:
             return c.finish()
         return skip(f"MT_BASE_URL and MT_MODEL must both be set for the live half "
-                    f"(got BASE={bool(BASE)} MODEL={bool(MODEL)})")
+                    f"(got BASE={bool(BASE)} MODEL={bool(MODEL)})", live=True)
 
     metrics = _live(c, lines)
     print("METRICS " + json.dumps(metrics))

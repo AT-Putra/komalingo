@@ -8,16 +8,25 @@ The three load-bearing asserts:
   * 10 concurrent pages never put more than 3 requests in flight (the semaphore)
   * a 5-region page costs exactly 1 chat request (page-context batching)
   * a 401 and a 500 arrive at the caller with status AND body verbatim (AC-8)
+
+It also owns the [env-local] section. lib/env_local.py is what puts
+MT_BASE_URL / MT_API_KEY / MT_MODEL in front of the two LIVE checks, and
+those two skip on a machine with no credentials -- so the parsing and, more
+importantly, the does-not-override rule would be exercised nowhere that can
+go red in CI. It is asserted here, offline, against a temporary file and
+names of its own.
 """
 
 import asyncio
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
 from sidecar.llm import LLMClient, ProviderError, Region  # noqa: E402
+from lib.env_local import load_env_local  # noqa: E402
 from lib.result import Checks, run  # noqa: E402
 from lib.stub_provider import FIXTURES, StubProvider  # noqa: E402
 
@@ -28,8 +37,72 @@ def regions(n):
     return [Region(id=i, text=f"テスト{i}") for i in range(n)]
 
 
+def env_local(c) -> None:
+    """[env-local] the loader fills gaps and never overwrites (lib/env_local.py)."""
+    names = ["MTTEST_QUOTED", "MTTEST_PLAIN", "MTTEST_SPACED", "MTTEST_HELD"]
+    file_lines = [
+        "# a comment",
+        "",
+        'MTTEST_QUOTED="quoted value"',
+        "MTTEST_PLAIN=plain",
+        "  MTTEST_SPACED = spaced ",
+        "MTTEST_HELD=from-the-file",
+        "a line with no equals sign",
+    ]
+    for n in names:
+        os.environ.pop(n, None)
+    os.environ["MTTEST_HELD"] = "from-the-environment"
+    # .env.local.example tells a developer to set MT_NO_ENV_LOCAL=1 to
+    # reproduce CI's skip path. Inherited here it short-circuits the loader
+    # and reddens three of these asserts -- indistinguishable from a real
+    # regression, and produced by following the documentation.
+    inherited = os.environ.pop("MT_NO_ENV_LOCAL", None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env.local")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(chr(10).join(file_lines) + chr(10))
+            loaded = load_env_local(path)
+
+            c.check(sorted(loaded) == ["MTTEST_PLAIN", "MTTEST_QUOTED", "MTTEST_SPACED"],
+                    f"[env-local] returns the names it SET, comments and junk lines "
+                    f"ignored (got {sorted(loaded)})")
+            c.check(os.environ.get("MTTEST_QUOTED") == "quoted value",
+                    "[env-local] surrounding quotes are stripped")
+            c.check(os.environ.get("MTTEST_SPACED") == "spaced",
+                    "[env-local] whitespace around the key and the value is stripped")
+            c.check(os.environ.get("MTTEST_HELD") == "from-the-environment",
+                    f"[env-local] a name already in the environment WINS over the file "
+                    f"(got {os.environ.get('MTTEST_HELD')!r})")
+            c.check("MTTEST_HELD" not in loaded,
+                    "[env-local] and it is not reported as loaded")
+            c.check(not any(v in loaded for v in ("plain", "quoted value")),
+                    "[env-local] no VALUE is ever returned -- MT_API_KEY is a credential")
+
+            # An absent file is a clean clone, which must skip rather than raise.
+            c.check(load_env_local(os.path.join(tmp, "nothing-here")) == [],
+                    "[env-local] an absent file returns [] and raises nothing")
+
+            # The suppression the skip path depends on: without it, the one
+            # kind of box that HAS credentials cannot reproduce CI's skip.
+            os.environ.pop("MTTEST_PLAIN", None)
+            os.environ["MT_NO_ENV_LOCAL"] = "1"
+            try:
+                c.check(load_env_local(path) == [] and "MTTEST_PLAIN" not in os.environ,
+                        "[env-local] MT_NO_ENV_LOCAL=1 reads nothing at all")
+            finally:
+                os.environ.pop("MT_NO_ENV_LOCAL", None)
+    finally:
+        for n in names:
+            os.environ.pop(n, None)
+        if inherited is not None:
+            os.environ["MT_NO_ENV_LOCAL"] = inherited
+
+
 def main():
     c = Checks("check_provider")
+
+    env_local(c)
 
     # --- construction refuses to invent credentials ------------------------
     for missing, label in ((("", MODEL), "base_url"), (("http://x/v1", ""), "model")):
