@@ -4,7 +4,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>MangaTranslator</title>
+    <script>
+      // Before first paint, so the window does not flash the other theme.
+      // App.tsx owns this afterwards and keeps it in sync with the toggle.
+      (function () {
+        var t = "system";
+        try { t = localStorage.getItem("mt.theme") || "system"; } catch (e) {}
+        if (t === "system") {
+          t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        }
+        document.documentElement.dataset.theme = t;
+      })();
+    </script>
+    <meta name="color-scheme" content="dark light" />
   </head>
 
   <body>
