@@ -1,0 +1,9 @@
+# The rule set every phase's "ruff clean" means. Pinned at the repo root so
+# it covers sidecar/ and tests/ alike and reads the same on every machine,
+# rather than whatever the runner's user-level config selects (Phase 8
+# review, N10). From the repo root:
+#     uvx ruff check sidecar tests
+extend-exclude = ["spikes", "node_modules", "dist", "build", "src-tauri"]
+
+[lint]
+select = ["F", "E711", "E712", "B007"]

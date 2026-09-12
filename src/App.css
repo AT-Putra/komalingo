@@ -173,3 +173,4 @@ button {
 .job tr.skipped td { color: #e90; }
 .job tr.failed td { color: #d33; }
 .job tr.pending td { color: #888; }
+.job tr.cancelled td { color: #888; text-decoration: line-through; }

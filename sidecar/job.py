@@ -63,7 +63,7 @@ _WARN_LOCK = threading.Lock()
 # tell that from three of the right events.
 ITEM_STAGES = ("item_start", "item_done")
 
-OK, SKIPPED, FAILED = "ok", "skipped", "failed"
+OK, SKIPPED, FAILED, CANCELLED = "ok", "skipped", "failed", "cancelled"
 
 # Loose images are items too -- AC-7's folder mixes them with archives -- and
 # Phase 0's run_page already handles one. Listed here so `classify` has one
@@ -76,10 +76,12 @@ class Item:
     """One input file and what became of it.
 
     `status` is the machine-readable outcome and `reason` is why, in the user's
-    words. An Item with status SKIPPED or FAILED always carries a non-empty
-    reason -- a skipped item with no reason is a file that vanished from the
-    user's job with no explanation, which is the failure mode AC-7's "per-item
-    reason" clause exists to forbid.
+    words. An Item with status SKIPPED, FAILED or CANCELLED always carries a
+    non-empty reason -- a skipped item with no reason is a file that vanished
+    from the user's job with no explanation, which is the failure mode AC-7's
+    "per-item reason" clause exists to forbid. CANCELLED (Phase 9) is its own
+    status because "skipped" means the product declined the item and
+    "cancelled" means the user did; the reason says how far it got.
     """
 
     path: str
@@ -150,8 +152,14 @@ def run_item(item: Item, dest_dir, job_id, client=None,
              lang: str = pipeline.DEFAULT_LANG,
              source: str = pipeline.DEFAULT_SOURCE,
              warned: set | None = None,
-             warned_lock: threading.Lock | None = None) -> Item:
+             warned_lock: threading.Lock | None = None,
+             cancel: threading.Event | None = None) -> Item:
     """Process one item. Never raises.
+
+    `cancel` (Phase 9) is the job's token, handed down to the pipeline, which
+    checks it at page boundaries. A cancelled item comes back CANCELLED with
+    its delivered page count and no output archive; its finished pages are
+    left in place -- complete files, and the cache the next run reads.
 
     `warned` is the per-JOB warning set. AC-6 says the cbr->cbz warning is
     surfaced "once", and once means once per job: a job of thirty `.cbr` items
@@ -171,7 +179,8 @@ def run_item(item: Item, dest_dir, job_id, client=None,
             return item
 
         if item.kind == "image":
-            record = pipeline.run_page(item.path, dest_dir, 1, client, source, lang)
+            record = pipeline.run_page(item.path, dest_dir, 1, client, source, lang,
+                                       cancel=cancel)
             item.output = record.get("output", "")
             item.pages = 1
             item.record = record
@@ -182,6 +191,7 @@ def run_item(item: Item, dest_dir, job_id, client=None,
         # repack", and pipeline.run_item tells them apart by signature.
         record = pipeline.run_item(
             item.path, dest_dir, job_id, item.item_id, client, lang, source,
+            cancel=cancel,
         )
         item.record = record
         item.pages = len(record.get("pages", []))
@@ -199,6 +209,14 @@ def run_item(item: Item, dest_dir, job_id, client=None,
     # Reason BEFORE status in every branch below: a poll between the two
     # assignments must not see SKIPPED with an empty reason, the state the
     # Item docstring forbids.
+    except pipeline.Cancelled as e:
+        item.pages = e.pages_done
+        # An item that stopped before its first page landed is, to the user,
+        # one that never started; the count only helps once it is non-zero.
+        item.reason = (CANCELLED_REASON if e.pages_done == 0 else
+                       f"cancelled after {e.pages_done} page{'s' if e.pages_done != 1 else ''}")
+        item.status = CANCELLED
+        return item
     except safety.UnsafeArchive as e:
         # The one failure with a machine-readable reason. The UI shows
         # e.reason's rule name; the detail stays in the message.
@@ -294,11 +312,12 @@ class Job:
     finishing two `.cbr` items in the same millisecond would otherwise both
     see an empty set and both surface the warning.
 
-    `cancel()` is the plumbing point Phase 9 threads through the pipeline.
-    Today it means: items that have not started are marked SKIPPED with
-    CANCELLED_REASON and the job runs to `done` without them; an item that is
-    mid-page finishes its item. That is stated, not hidden -- a cancel that
-    stopped mid-page today would leave the partial output AC-13 forbids.
+    `cancel()` sets the token every worker hands to the pipeline (Phase 9,
+    AC-13). Items that have not started come back CANCELLED with
+    CANCELLED_REASON; an item mid-run stops at its next page boundary and
+    comes back CANCELLED with the pages it delivered; the job runs to `done`.
+    Nothing partial is left behind: every write is atomic and the repack of
+    a cancelled item never starts.
     """
 
     def __init__(self, job_id, paths, dest_dir, client=None,
@@ -376,7 +395,7 @@ class Job:
             try:
                 if self._cancel.is_set() and item.status == "pending":
                     item.reason = CANCELLED_REASON
-                    item.status = SKIPPED
+                    item.status = CANCELLED
                     # Still emitted, still reported: a cancelled item is an
                     # item the user asked about and did not get, and the
                     # queue view has to say why.
@@ -384,7 +403,8 @@ class Job:
                     pipeline.emit("item_done", item.item_id, 0, 100)
                 else:
                     run_item(item, self.dest_dir, self.job_id, self.client,
-                             self.lang, self.source, self.warned, self._lock)
+                             self.lang, self.source, self.warned, self._lock,
+                             cancel=self._cancel)
             except BaseException as e:  # noqa: BLE001 -- see below
                 # run_item's boundary is total for the pipeline, but not for
                 # its own `finally: emit(...)` on a broken stdout, nor for
@@ -395,7 +415,10 @@ class Job:
                 if item.status == "pending":
                     item.reason = f"worker error: {type(e).__name__}: {e}"
                     item.status = FAILED
-                traceback.print_exc()
+                try:
+                    traceback.print_exc()
+                except OSError:
+                    pass  # the realistic trigger is a closed pipe: stderr is gone too
             finally:
                 with self._lock:
                     self._running.discard(item.item_id)
@@ -418,10 +441,14 @@ class Job:
             "ok": sum(1 for i in items if i["status"] == OK),
             "skipped": sum(1 for i in items if i["status"] == SKIPPED),
             "failed": sum(1 for i in items if i["status"] == FAILED),
+            "cancelled_items": sum(1 for i in items if i["status"] == CANCELLED),
             # Not yet claimed. An item mid-run still carries status
             # "pending" -- the boundary only writes a terminal status --
             # so it is subtracted here rather than counted twice.
-            "pending": sum(1 for i in items if i["status"] == "pending") - running,
+            # Clamped: a worker writes the terminal status outside the lock
+            # and discards itself from _running inside it, so a snapshot
+            # between the two would otherwise read -1 for an instant.
+            "pending": max(0, sum(1 for i in items if i["status"] == "pending") - running),
             "running": running,
             "done": self._done.is_set(),
             "cancelled": self._cancel.is_set(),

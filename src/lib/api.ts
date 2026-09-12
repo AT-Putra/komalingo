@@ -114,7 +114,7 @@ export interface JobItem {
   path: string;
   item_id: string;
   kind: "archive" | "pdf" | "image" | "unsupported";
-  status: "pending" | "ok" | "skipped" | "failed";
+  status: "pending" | "ok" | "skipped" | "failed" | "cancelled";
   /** Why it was skipped or failed, in the user's words. Empty when ok. */
   reason: string;
   /** A per-job warning this item raised first (cbr->cbz). */
@@ -132,6 +132,8 @@ export interface JobStatus {
   ok: number;
   skipped: number;
   failed: number;
+  /** AC-13: items stopped by the user at a page boundary, nothing partial left. */
+  cancelled_items: number;
   pending: number;
   running: number;
   done: boolean;

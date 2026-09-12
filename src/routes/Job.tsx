@@ -44,7 +44,7 @@ export default function Job({ jobId, initial }: { jobId: string; initial: JobSta
   }
 
   const total = status.items.length;
-  const finished = status.ok + status.skipped + status.failed;
+  const finished = status.ok + status.skipped + status.failed + status.cancelled_items;
 
   return (
     <section className="job">
@@ -53,6 +53,7 @@ export default function Job({ jobId, initial }: { jobId: string; initial: JobSta
       <p>
         {finished} / {total} items · {status.ok} ok · {status.skipped} skipped ·{" "}
         {status.failed} failed
+        {status.cancelled_items > 0 ? ` · ${status.cancelled_items} cancelled` : ""}
         {status.done ? " · done" : status.cancelled ? " · cancelling…" : ` · ${status.running} running`}
       </p>
       {status.warnings.map((w) => (

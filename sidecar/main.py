@@ -404,8 +404,13 @@ def job_status(job_id: str):
 
 @app.post("/api/job/{job_id}/cancel")
 def cancel_job(job_id: str):
-    """The Phase 8 plumbing point: items not yet started are skipped. An
-    item mid-page finishes; stopping it cleanly is Phase 9's."""
+    """AC-13: items not yet started are cancelled outright; an item mid-run
+    stops at its next page boundary with the pages it delivered kept and no
+    archive written. An item already past its last page finishes its repack
+    and comes back OK -- there is no page boundary left to stop at, and
+    discarding finished work is not what cancel means. The response is the
+    status at the moment of the request; poll GET /api/job/{id} to watch the
+    running items stop."""
     with _jobs_lock:
         found = _jobs.get(job_id)
     if found is None:

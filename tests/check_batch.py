@@ -36,9 +36,10 @@ moved here from a live endpoint:
   3. The second half is the control; without it the first is vacuous. The
   stub owns the 200ms delay for the same reason (see stub_provider.py).
 
-  CANCEL. The Phase 8 plumbing point: a one-worker job cancelled right after
-  start finishes its running item, skips the rest with CANCELLED_REASON, and
-  still reaches done. Interrupting the running item is Phase 9's (AC-13).
+  CANCEL. A one-worker job cancelled right after start: the running item
+  stops at its next page boundary (Phase 9), the rest come back CANCELLED
+  with CANCELLED_REASON, and the job still reaches done. check_cancel holds
+  the rest of AC-13 -- no partial file, and the resume.
 """
 
 import asyncio
@@ -402,12 +403,22 @@ def check_cancel(c, src, out):
     c.check(finished and status["done"] and status["cancelled"],
             f"a cancelled one-worker job reaches done (done={status['done']})")
     cancelled = [i for i in status["items"] if i["reason"] == job.CANCELLED_REASON]
-    c.check(len(cancelled) >= 1 and all(i["status"] == job.SKIPPED for i in cancelled),
-            f"{len(cancelled)} items skipped with {job.CANCELLED_REASON!r}")
+    c.check(len(cancelled) >= 1 and all(i["status"] == job.CANCELLED for i in cancelled),
+            f"{len(cancelled)} items CANCELLED with {job.CANCELLED_REASON!r}")
     c.check(all(i["status"] != "pending" for i in status["items"]),
             "and nothing is left pending")
-    c.check(status["ok"] <= 1,
-            f"at most the item that was already running finished ({status['ok']} ok)")
+    # Phase 9: the item that was running when cancel() fired stops at its
+    # next page boundary, so it is CANCELLED with a page count -- or OK if
+    # it was already past its last page. Either way at most one item ran.
+    ran = [i for i in status["items"]
+           if i["status"] == job.OK or (i["status"] == job.CANCELLED
+                                        and i["reason"] != job.CANCELLED_REASON)]
+    c.check(len(ran) <= 1,
+            f"at most the item that was already running got anywhere "
+            f"({[(i['item_id'], i['status'], i['reason']) for i in ran]})")
+    c.check(status["cancelled_items"] == len([i for i in status["items"]
+                                              if i["status"] == job.CANCELLED]),
+            f"status() counts the cancelled items ({status['cancelled_items']})")
 
 
 def main():

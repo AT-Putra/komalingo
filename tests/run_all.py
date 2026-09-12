@@ -81,7 +81,8 @@ RANK = {FAIL: 3, INCONCLUSIVE: 2, SKIP: 1, PASS: 0}
 # working or a fixture stopped being hostile.
 #
 # pdf_render_fallbacks (Phase 7) and batch_peak_llm_concurrency /
-# batch_items_ok (Phase 8) are in neither set: see the record schema.
+# batch_items_ok (Phase 8), cancel_pages_before_stop / resume_detect_calls
+# (Phase 9) are in neither set: see the record schema.
 LOWER_IS_BETTER = {
     "max_overflow_pct",
     "clipped_glyph_count",
@@ -119,6 +120,7 @@ PHASE_ORDER = [
     "check_archives",
     "check_pdf",
     "check_batch",
+    "check_cancel",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
@@ -291,7 +293,7 @@ def main() -> int:
     print(f"  {'-' * 60}\n  run_all: {NAMES.get(worst, worst)}")
 
     record = {
-        "phase": "8",
+        "phase": "9",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "env_class": env_class(),
         "skipped": skipped,
@@ -349,6 +351,12 @@ def main() -> int:
             # is decided by the folder the check builds. Neither ratchets.
             "batch_peak_llm_concurrency": None,
             "batch_items_ok": None,
+            # Phase 9: check_cancel. How far the item got before the cancel
+            # landed is a timing (the stub's delay against the page loop),
+            # and the resume's detect count is three minus it. Neither
+            # ratchets; the check's own asserts tie the two together.
+            "cancel_pages_before_stop": None,
+            "resume_detect_calls": None,
         },
     }
     # Only keys the schema already names: a check cannot invent a baseline

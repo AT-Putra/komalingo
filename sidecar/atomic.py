@@ -41,6 +41,10 @@ def long_path(path) -> str:
     return _PREFIX + p
 
 
+# Sharing-violation retries: 8 doublings from 10ms is ~2.55s of patience.
+RETRIES = 8
+
+
 def _replace(tmp: str, dest: str) -> None:
     """os.replace with a short, bounded retry on Windows sharing violations.
 
@@ -49,12 +53,16 @@ def _replace(tmp: str, dest: str) -> None:
     Windows answers PermissionError [WinError 5] or [WinError 32] rather than
     replacing under the reader as POSIX would. Within one process the page
     lock in pipeline.py prevents the meeting; across processes nothing can,
-    so the replace is retried a few times over ~250ms and then raised as it
-    always was. Bounded, so a file that is genuinely locked still fails
-    loudly instead of hanging the job.
+    so the replace is retried over ~2.5s (RETRIES doublings from 10ms) and
+    then raised as it always was. Bounded, so a file that is genuinely
+    locked still fails loudly instead of hanging the job. The bound was
+    ~300ms first; under a full run_all beside an architect review the
+    2x300-pair hammer in check_batch lost one replace to a reader that held
+    the file longer than that (1 of 600), so the bound is what a loaded box
+    needs and not what a quiet one does.
     """
     delay = 0.01
-    for _attempt in range(5):
+    for _attempt in range(RETRIES):
         try:
             os.replace(tmp, dest)
             return
@@ -79,7 +87,7 @@ def open_retry(path, mode: str = "r", encoding: str | None = None):
     spot-fix editor reading a page a batch worker is writing.
     """
     delay = 0.01
-    for _attempt in range(5):
+    for _attempt in range(RETRIES):
         try:
             return open(path, mode, encoding=encoding)
         except PermissionError:
