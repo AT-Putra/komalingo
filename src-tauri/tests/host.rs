@@ -33,17 +33,21 @@ fn a_progress_line_becomes_one_progress_event() {
 /// would send every line of such a run to the log pane instead of the bar.
 #[test]
 fn a_progress_line_carries_the_page_count_when_the_sidecar_knows_it() {
-    let counted = br#"{"stage":"ocr","item":"3 calls","page":2,"pct":25,"total":24}"#;
+    let counted = br#"{"stage":"ocr","item":"3 calls","page":2,"pct":25,"total":24,"item_id":"vol1.cbz"}"#;
     match classify(counted) {
         Some(Line::Progress(p)) => {
             assert_eq!(p.total, Some(24));
+            assert_eq!(p.item_id.as_deref(), Some("vol1.cbz"));
             assert_eq!(p.page, 2);
         }
         other => panic!("expected a progress event, got {:?}", other),
     }
     let uncounted = br#"{"stage":"ocr","item":"3 calls","page":2,"pct":25}"#;
     match classify(uncounted) {
-        Some(Line::Progress(p)) => assert_eq!(p.total, None),
+        Some(Line::Progress(p)) => {
+            assert_eq!(p.total, None);
+            assert_eq!(p.item_id, None);
+        }
         other => panic!("expected a progress event, got {:?}", other),
     }
 }

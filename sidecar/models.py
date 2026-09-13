@@ -19,6 +19,7 @@ import http.client
 import io
 import os
 import shutil
+import threading
 import urllib.error
 import urllib.request
 
@@ -201,6 +202,9 @@ def fetch(url: str, dest, sha256: str = "", size: int = 0, progress=None) -> str
 
     if os.path.exists(dest) and (not sha256 or _sha256(dest) == sha256):
         return dest
+    if getattr(_NO_DOWNLOAD, "on", False):
+        raise FetchError(f"{os.path.basename(dest)} is not downloaded, or fails its checksum; "
+                         f"not fetched here (see no_download)", "absent")
 
     have = os.path.getsize(part) if os.path.exists(part) else 0
     _free_space(directory, max(0, size - have))
@@ -331,6 +335,24 @@ def _ensure_directory(name: str, entry: dict, progress=None) -> str:
     return atomic.long_path(directory)
 
 
+_NO_DOWNLOAD = threading.local()
+
+
+@contextlib.contextmanager
+def no_download():
+    """On this thread, fetch() raises FetchError('absent') instead of downloading.
+
+    For the launch warm-up (pipeline.warm_models), which may load a model only
+    if it is already present and valid.
+    """
+    previous = getattr(_NO_DOWNLOAD, "on", False)
+    _NO_DOWNLOAD.on = True
+    try:
+        yield
+    finally:
+        _NO_DOWNLOAD.on = previous
+
+
 def on_disk(name: str) -> bool:
     """Whether MANIFEST entry `name` is fully downloaded, by name and size only.
 
@@ -423,23 +445,30 @@ def select_provider(force_cpu: bool | None = None) -> tuple[str, str]:
     # loaded, and onnxruntime fell back to CPU with a warning nobody reads.
     global _PRELOADED
     preload = getattr(onnxruntime, "preload_dlls", None)
-    if preload is not None and not _PRELOADED:
-        # preload_dlls print()s what it did ("Skip loading CUDA and cuDNN
-        # DLLs since torch is imported."). stdout is the progress channel --
-        # one JSON line per stage, nothing else, and check_pipeline holds the
-        # sidecar to that -- so the print is swallowed here and the reason
-        # string carries anything worth knowing.
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                preload()
-        except Exception as e:  # noqa: BLE001 -- a failed preload is a CPU reason, not a crash
-            return "CPUExecutionProvider", f"CUDA libraries did not load ({type(e).__name__}: {e}); using CPU"
-        _PRELOADED = True  # once per process: the DLLs stay loaded
+    # Under a lock: redirect_stdout swaps sys.stdout for the whole PROCESS, and
+    # two threads interleaving their enter and exit -- the launch warm-up and
+    # the first /api/health -- could leave it a StringIO for good, swallowing
+    # every progress line after (review). The second caller waits, then finds
+    # _PRELOADED set.
+    with _PRELOAD_LOCK:
+        if preload is not None and not _PRELOADED:
+            # preload_dlls print()s what it did ("Skip loading CUDA and cuDNN
+            # DLLs since torch is imported."). stdout is the progress channel --
+            # one JSON line per stage, nothing else, and check_pipeline holds the
+            # sidecar to that -- so the print is swallowed here and the reason
+            # string carries anything worth knowing.
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    preload()
+            except Exception as e:  # noqa: BLE001 -- a failed preload is a CPU reason, not a crash
+                return "CPUExecutionProvider", f"CUDA libraries did not load ({type(e).__name__}: {e}); using CPU"
+            _PRELOADED = True  # once per process: the DLLs stay loaded
 
     return "CUDAExecutionProvider", ""
 
 
 _PRELOADED = False
+_PRELOAD_LOCK = threading.Lock()
 
 
 def onnx_session(path: str):

@@ -696,6 +696,175 @@ def check_page_window(c, tmp):
             "assert above was not satisfied by a sequential run")
 
 
+def check_page_slots(c):
+    """[slots] the page window is the PROCESS's, and a failed page stops new ones.
+
+    Pages are faked here (the pipeline's page function is replaced by a
+    sleeper that counts), so this is about _run_pages' scheduling alone.
+    """
+    import sys as _sys
+    import time as _time
+
+    real = (pipeline._run_cached_page, cache.page_hash, cache.put_placement)
+    lock, live, peak = threading.Lock(), [0], [0]
+
+    class Img:
+        format, info = "PNG", {}
+
+    def pages(n):
+        for i in range(1, n + 1):
+            yield i, f"p{i}.png", Img()
+
+    def counting_page(h, img, member, ordinal, *a, **k):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        _time.sleep(0.05)
+        with lock:
+            live[0] -= 1
+        return {"page": ordinal}
+
+    # Distinct leading digits: _page_lock stripes on the first eight, and
+    # id()-based hashes all shared one stripe, which serialised every page
+    # and let the bound assert pass at a peak of 1.
+    import itertools as _itertools
+    serial = _itertools.count(1)
+    cache.page_hash = lambda img: f"{(next(serial) * 2654435761) & 0xFFFFFFFF:08x}{0:08x}"
+    cache.put_placement = lambda *a, **k: None
+    try:
+        # Four items at once, as job.WORKERS runs them: before the window was
+        # process-wide this reached 4 x 3 = 12 decoded pages in flight.
+        pipeline._run_cached_page = counting_page
+        items = [threading.Thread(target=pipeline._run_pages,
+                                  args=(pages(12), "j", f"item{i}", "s.cbz", "out", None, "en",
+                                        "ja", "offline", "ZIP", None, 12))
+                 for i in range(4)]
+        for t in items:
+            t.start()
+        for t in items:
+            t.join()
+        c.check(peak[0] == pipeline.PAGE_WINDOW,
+                f"[slots] four items at once reach, and never pass, PAGE_WINDOW="
+                f"{pipeline.PAGE_WINDOW} pages in flight between them: peak {peak[0]}")
+
+        # A page that fails must be visible to the reader that its slot wakes.
+        # The slot used to be released in the worker's finally, BEFORE the
+        # future held the exception: 2 in 40 trials started one more page.
+        started = []
+
+        def failing_page(h, img, member, ordinal, *a, **k):
+            started.append(ordinal)
+            if ordinal == 1:
+                _time.sleep(0.01)
+                raise RuntimeError("provider said no")
+            _time.sleep(0.3)
+            return {"page": ordinal}
+
+        pipeline._run_cached_page = failing_page
+        switch = _sys.getswitchinterval()
+        _sys.setswitchinterval(1e-6)
+        extra = 0
+        try:
+            for _ in range(40):
+                started.clear()
+                try:
+                    pipeline._run_pages(pages(9), "j", "item", "s.cbz", "out", None, "en", "ja",
+                                        "offline", "ZIP", None, 9)
+                except RuntimeError:
+                    pass
+                extra += pipeline.PAGE_WINDOW + 1 in started
+        finally:
+            _sys.setswitchinterval(switch)
+        c.check(extra == 0,
+                f"[slots] after page 1 fails, no page beyond the window is started: "
+                f"{extra}/40 trials started page {pipeline.PAGE_WINDOW + 1}")
+
+        # A reader whose close() raises must not return with pages running.
+        class ClosingReader:
+            def __init__(self):
+                self.it = pages(3)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.it)
+
+            def close(self):
+                raise OSError("pdf.close failed")
+
+        live[0], peak[0] = 0, 0
+        pipeline._run_cached_page = counting_page
+        try:
+            pipeline._run_pages(ClosingReader(), "j", "item", "s.pdf", "out", None, "en", "ja",
+                                "offline", "PDF", None, 3)
+            outcome = "returned"
+        except OSError as e:
+            outcome = str(e)
+        c.check(outcome == "pdf.close failed" and live[0] == 0,
+                f"[slots] when closing the reader raises, every page has finished before the "
+                f"error leaves _run_pages ({outcome!r}, {live[0]} still running)")
+    finally:
+        pipeline._run_cached_page, cache.page_hash, cache.put_placement = real
+
+    # A loose image that waits for a slot must still see a cancel that lands
+    # meanwhile: that wait can last as long as other items' translations.
+    from PIL import Image
+
+    ran = []
+    real_stages = (pipeline.detect, pipeline.ocr, pipeline.translate)
+    pipeline.detect = lambda img, page: ran.append("detect") or []
+    pipeline.ocr = lambda regions, img, page, source="ja": 0
+    pipeline.translate = lambda *a, **k: ran.append("translate")
+    slots = pipeline._page_slots()
+    held = 0
+    outcome = []
+    with tempfile.TemporaryDirectory(prefix="mt-slot-cancel-") as tmp:
+        src = os.path.join(tmp, "loose.png")
+        Image.new("RGB", (64, 64), "white").save(src)
+        cancel = threading.Event()
+
+        def image_item():
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    pipeline.run_page(src, os.path.join(tmp, "out"), 1, None, cancel=cancel)
+                outcome.append("ran")
+            except pipeline.Cancelled:
+                outcome.append("cancelled")
+            except Exception as e:  # noqa: BLE001
+                outcome.append(f"{type(e).__name__}: {e}")
+
+        try:
+            for _ in range(pipeline.PAGE_WINDOW):
+                slots.acquire()
+                held += 1
+            t = threading.Thread(target=image_item)
+            t.start()
+            __import__("time").sleep(0.3)
+            cancel.set()
+            __import__("time").sleep(0.1)
+        finally:
+            for _ in range(held):
+                slots.release()
+            pipeline.detect, pipeline.ocr, pipeline.translate = real_stages
+        t.join(30)
+    c.check(outcome == ["cancelled"] and not ran,
+            f"[slots] a loose image cancelled while it waits for a page slot stops before "
+            f"detect and the provider request: {outcome}, ran {ran}")
+
+
+def check_image_item_id(c, out):
+    """[item-id] a loose image's page lines carry the JOB's id for it, not its basename."""
+    captured = io.StringIO()
+    item = job.classify(os.path.join(FIXTURES, "smoke", "tategaki_01.png"))
+    item.item_id = "tategaki_01 (2).png"  # what job.py names a second file of the same name
+    with contextlib.redirect_stdout(captured):
+        job.run_item(item, out, "check-item-id")
+    ids = {e.get("item_id") for e in events_of(captured.getvalue()) if e["stage"] in pipeline.STAGES}
+    c.check(item.status == job.OK and ids == {"tategaki_01 (2).png"},
+            f"[item-id] every page event names the item as the job does: {ids} ({item.status})")
+
+
 def main():
     for sub in ("archives", "pdf", "smoke"):
         if not os.path.isdir(os.path.join(FIXTURES, sub)):
@@ -720,6 +889,8 @@ def main():
         check_cancel(c, src, out)
         check_probe_wiring(c, src, out, stub)
         check_page_window(c, tmp)
+        check_page_slots(c)
+        check_image_item_id(c, out)
 
     # Recorded, not ratcheted: the peak is a timing under a hard cap the
     # asserts above hold, and the item count is decided by the folder.

@@ -255,29 +255,38 @@ class _Tier:
     def __init__(self):
         self._items: OrderedDict[str, Image.Image] = OrderedDict()
         self._bytes: dict[str, int] = {}
+        # An item's pages run three at a time (pipeline.PAGE_WINDOW), inside
+        # four job workers, and every one reads and writes this LRU. Unlocked,
+        # a get's move_to_end races a put's eviction of the same key
+        # (KeyError), and total_bytes() iterates _bytes while another thread
+        # resizes it (RuntimeError). Different page hashes, so the per-hash
+        # page lock does not cover it.
+        self._lock = threading.RLock()
 
     def get(self, key):
-        img = self._items.get(key)
-        if img is not None:
-            self._items.move_to_end(key)
-        return img
+        with self._lock:
+            img = self._items.get(key)
+            if img is not None:
+                self._items.move_to_end(key)
+            return img
 
     def put(self, key, img: Image.Image) -> None:
         # Arithmetic, not len(img.tobytes()): tobytes materialises a second
         # full copy of the raster on every insert, and Phase 6's peak-RSS
         # sampler would see that spike as residency this tier does not have.
         n = img.size[0] * img.size[1] * len(img.getbands())
-        self._items.pop(key, None)
-        self._bytes.pop(key, None)
-        if n > MAX_TIER_BYTES:
-            # Served from disk every time rather than held. The first draft
-            # kept one oversized raster resident as "still servable", which is
-            # true, and left tier_bytes above the bound §E has Phase 6 count
-            # inside AC-12's 400MB -- a bound with an exception is not a bound.
-            return
-        self._items[key] = img
-        self._bytes[key] = n
-        self._evict()
+        with self._lock:
+            self._items.pop(key, None)
+            self._bytes.pop(key, None)
+            if n > MAX_TIER_BYTES:
+                # Served from disk every time rather than held. The first draft
+                # kept one oversized raster resident as "still servable", which is
+                # true, and left tier_bytes above the bound §E has Phase 6 count
+                # inside AC-12's 400MB -- a bound with an exception is not a bound.
+                return
+            self._items[key] = img
+            self._bytes[key] = n
+            self._evict()
 
     def _evict(self) -> None:
         while self._items and (
@@ -286,12 +295,20 @@ class _Tier:
             k, _ = self._items.popitem(last=False)
             self._bytes.pop(k, None)
 
+    def discard(self, key) -> None:
+        """Drop `key` if resident. enforce_cap's path; never touch _items directly."""
+        with self._lock:
+            self._items.pop(key, None)
+            self._bytes.pop(key, None)
+
     def total_bytes(self) -> int:
-        return sum(self._bytes.values())
+        with self._lock:
+            return sum(self._bytes.values())
 
     def clear(self) -> None:
-        self._items.clear()
-        self._bytes.clear()
+        with self._lock:
+            self._items.clear()
+            self._bytes.clear()
 
 
 _tier = _Tier()
@@ -819,8 +836,7 @@ def enforce_cap(job_id: str | None = None) -> str | None:
                 continue
             freed = _dir_size(page_dir(h))
             shutil.rmtree(atomic.long_path(page_dir(h)), ignore_errors=True)
-            _tier._items.pop(h, None)
-            _tier._bytes.pop(h, None)
+            _tier.discard(h)
             size -= freed
 
     if size <= target:

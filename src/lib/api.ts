@@ -70,6 +70,9 @@ export interface Progress {
    *  Absent for a compressed tar, where the count costs a second decompression
    *  (sidecar/containers/archive.expected_pages). */
   total?: number;
+  /** The item a page stage belongs to; `item` there is the stage's detail.
+   *  Absent on item_start/item_done, whose `item` is the id. */
+  item_id?: string | null;
 }
 
 export interface TranslateResult {

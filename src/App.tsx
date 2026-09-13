@@ -54,28 +54,32 @@ function loadTheme(): Theme {
   return "system";
 }
 
-/** The two bracketing lines read better as words than as identifiers. */
 /**
  * Record `p` and return the event to display: the latest one for the lowest
  * page of `p`'s item that has not been written yet, or `p` itself when no
  * page of that item is still in flight (its last write, and the item events).
+ * Keyed on `item_id`: on a page stage `item` is that stage's detail text, so
+ * keying on it left every page's earlier stages behind in the map.
  */
 function frontPage(pages: Map<string, Progress>, p: Progress): Progress {
-  const key = `${p.item}\u001f${p.page}`;
-  if (p.stage === "item_done") {
-    for (const k of [...pages.keys()]) if (k.startsWith(`${p.item}\u001f`)) pages.delete(k);
+  if (p.stage === "item_start" || p.stage === "item_done") {
+    const prefix = `${p.item}\u001f`;
+    for (const k of [...pages.keys()]) if (k.startsWith(prefix)) pages.delete(k);
     return p;
   }
   if (p.page <= 0) return p;
+  const prefix = `${p.item_id ?? ""}\u001f`;
+  const key = `${prefix}${p.page}`;
   if (p.stage === "write") pages.delete(key);
   else pages.set(key, p);
   let front: Progress | undefined;
   for (const [k, e] of pages) {
-    if (k.startsWith(`${p.item}\u001f`) && (!front || e.page < front.page)) front = e;
+    if (k.startsWith(prefix) && (!front || e.page < front.page)) front = e;
   }
   return front ?? p;
 }
 
+/** The two bracketing lines read better as words than as identifiers. */
 function stageWord(stage: string): string {
   return stage === "item_start" ? "starting" : stage === "item_done" ? "done" : stage;
 }

@@ -377,6 +377,38 @@ def check_warmup(c):
             else:
                 os.environ[k] = v
 
+    # -- no_download: a bad or missing file is refused, never fetched ---------
+    import urllib.request as _urlreq
+
+    real_urlopen = _urlreq.urlopen
+    opened = []
+    _urlreq.urlopen = lambda *a, **k: opened.append(a) or (_ for _ in ()).throw(AssertionError("network"))
+    try:
+        with tempfile.TemporaryDirectory(prefix="mt-nodl-") as tmp:
+            bad = os.path.join(tmp, "model.onnx")
+            with open(bad, "wb") as fh:
+                fh.write(b"right size, wrong bytes")
+            kinds = []
+            for dest in (bad, os.path.join(tmp, "missing.onnx")):
+                try:
+                    with models.no_download():
+                        models.fetch("http://example.invalid/model.onnx", dest, "0" * 64, 23)
+                    kinds.append("returned")
+                except models.FetchError as e:
+                    kinds.append(e.kind)
+        c.check(kinds == ["absent", "absent"] and not opened,
+                f"[warmup] under no_download a file that fails its checksum, and a missing one, "
+                f"raise FetchError('absent') without opening a connection: {kinds}, {len(opened)} opened")
+        try:
+            models.fetch("http://example.invalid/model.onnx", os.path.join(tempfile.gettempdir(),
+                         "mt-nodl-outside.onnx"), "0" * 64, 23)
+        except (models.FetchError, AssertionError):
+            pass
+        c.check(len(opened) == 1,
+                "[warmup] and outside no_download the same fetch does try the network")
+    finally:
+        _urlreq.urlopen = real_urlopen
+
     # -- presence by size, and the cuDNN search mode ------------------------
     with tempfile.TemporaryDirectory(prefix="mt-ondisk-") as tmp:
         saved = os.environ.get("MT_MODEL_DIR")

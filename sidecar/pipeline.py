@@ -58,6 +58,12 @@ def emit(stage: str, item: str, page: int, pct: int) -> None:
     total = getattr(_EXPECTED, "total", None)
     if total:
         line["total"] = total
+    # `item` on a page stage is that stage's detail ("5 regions", the output
+    # file name), not the item. With an item's pages interleaved, the UI needs
+    # to know which item and page a line belongs to, so the id rides along.
+    item_id = getattr(_EXPECTED, "item_id", None)
+    if item_id:
+        line["item_id"] = item_id
     with _EMIT_LOCK:
         print(json.dumps(line), flush=True)
 
@@ -70,14 +76,14 @@ _EXPECTED = threading.local()
 
 
 @contextlib.contextmanager
-def expecting(total: int | None):
-    """Publish the page count of the item this thread is about to run."""
-    previous = getattr(_EXPECTED, "total", None)
-    _EXPECTED.total = total
+def expecting(total: int | None, item_id: str | None = None):
+    """Publish the page count and id of the item this thread is about to run."""
+    previous = (getattr(_EXPECTED, "total", None), getattr(_EXPECTED, "item_id", None))
+    _EXPECTED.total, _EXPECTED.item_id = total, item_id
     try:
         yield
     finally:
-        _EXPECTED.total = previous
+        _EXPECTED.total, _EXPECTED.item_id = previous
 
 
 def _bbox(polygon):
@@ -378,19 +384,34 @@ def encode_and_write(img: Image.Image, src_path, dest_dir, page: int) -> str:
 
 
 def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAULT_SOURCE,
-             lang: str = DEFAULT_LANG, cancel=None) -> dict:
+             lang: str = DEFAULT_LANG, cancel=None, item_id: str | None = None) -> dict:
     """One page through all seven stages, in order. Returns the regions record.
 
-    `cancel` (Phase 9) is checked ONCE, before the first stage: a loose
-    image is one page, and one page is delivered whole or not at all -- a
-    check between stages would stop after detect with nothing on disk to
-    show for it, which is the same outcome as not starting.
+    `cancel` (Phase 9) is checked before the first stage: a loose image is one
+    page, and one page is delivered whole or not at all -- a check between
+    stages would stop after detect with nothing on disk to show for it, which
+    is the same outcome as not starting. "Before the first stage" means after
+    the page slot, too: that wait lasts as long as other items' translations,
+    and a cancel that lands during it must not run the image anyway (review).
+
+    `item_id` is the job's id for the image, which job.py disambiguates when
+    two files share a name; the basename otherwise.
     """
-    _check_cancel(cancel, os.path.basename(os.fspath(src_path)), 0)
+    item_id = item_id or os.path.basename(os.fspath(src_path))
+    _check_cancel(cancel, item_id, 0)
     # One loose image is one page, and its lines say so: the UI's chapter bar
     # reads `total` and a page run that omitted it would look like an item
     # whose length is unknown.
-    with expecting(1), Image.open(atomic.long_path(src_path)) as src:
+    # A page slot like every item page (see PAGE_WINDOW): a folder of loose
+    # images runs beside archives on the same four workers, and their decoded
+    # pages count against the same bound.
+    with _page_slots():
+        _check_cancel(cancel, item_id, 0)
+        return _run_page_in_slot(src_path, dest_dir, page, client, source, lang, item_id)
+
+
+def _run_page_in_slot(src_path, dest_dir, page, client, source, lang, item_id) -> dict:
+    with expecting(1, item_id), Image.open(atomic.long_path(src_path)) as src:
         src.load()
         original = src.convert("RGB").copy()
 
@@ -463,10 +484,11 @@ def warm_models(log=None) -> list[str]:
 
     Each model loads under _MODEL_LOCK through the same lazy global the
     pipeline uses, so a page that arrives mid-warm-up waits for the model
-    rather than building a second copy. A model not yet on disk is skipped,
-    not fetched: a download belongs on a page, where its progress is shown.
-    A failure is logged and skipped; the page that needs the model raises
-    the same named error it always did.
+    rather than building a second copy. A model not yet on disk -- or on disk
+    but failing its checksum -- is skipped, never fetched: a download at
+    launch would hold the model lock with nothing on screen to say why pages
+    wait. A failure is logged and skipped; the page that needs the model
+    fetches or raises exactly as it did before.
     """
     log = log or (lambda msg: print(msg, file=sys.stderr, flush=True))
     steps = [
@@ -489,7 +511,12 @@ def warm_models(log=None) -> list[str]:
             log(f"warm-up: {name} not downloaded yet; the first page fetches it")
             continue
         try:
-            with _MODEL_LOCK:
+            # no_download: on_disk checks sizes only, so a file of the right
+            # size that fails its checksum reaches fetch -- which would
+            # re-download hundreds of MB here, silently, at launch, with every
+            # page waiting behind _MODEL_LOCK. Refused instead; the page that
+            # needs the model downloads it.
+            with _MODEL_LOCK, models.no_download():
                 load()
             loaded.append(name)
         except Exception as e:  # noqa: BLE001 -- logged; the page raises it properly
@@ -797,7 +824,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     # against enforce_cap and its marker file on disk (review, measured).
     cache.mark_running(job_id)
     try:
-        with expecting(expected):
+        with expecting(expected, item_id):
             records = _run_pages(
                 read_pages(src_path, budget), job_id, item_id, src_path, out_dir,
                 client, lang, source, model, src_fmt, cancel, expected)
@@ -828,94 +855,136 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     }
 
 
-# Pages of one item in flight at once. The translation request is most of a
-# page's wall time (measured: 19-27 s of a 25-50 s page against a gateway
-# model, the GPU stages about 2 s), and one page at a time left the other
-# two provider slots idle while the next pages waited to be detected. The
-# window matches llm.MAX_CONCURRENT: more pages than slots would only queue
-# decoded images at the gate. CV stages stay serialised under _MODEL_LOCK,
-# so the window buys concurrent TRANSLATION plus detect/OCR/erase of the
-# next pages while earlier ones wait on the provider.
-PAGE_WINDOW = MAX_CONCURRENT
+# Decoded pages in flight across the WHOLE process, not per item. The
+# translation request is most of a page's wall time (measured: 19-27 s of a
+# 25-50 s page against a gateway model, the GPU stages about 2 s), and one
+# page at a time left two of the provider's three slots idle while the next
+# pages waited to be detected. llm.MAX_CONCURRENT pages translating plus one
+# being detected or erased keeps every slot fed. Process-wide because job.py
+# runs four items at once: a per-item window of three was twelve decoded
+# pages at a time -- three times the residency AC-12 was measured against,
+# for no more provider throughput than the gate's three slots.
+PAGE_WINDOW = MAX_CONCURRENT + 1
+_SLOTS_LOCK = threading.Lock()
+_SLOTS: dict[int, threading.BoundedSemaphore] = {}
+
+
+def _page_slots() -> threading.BoundedSemaphore:
+    """The process's page semaphore, sized by PAGE_WINDOW as it is NOW (a
+    check can lower the window to prove what it buys)."""
+    with _SLOTS_LOCK:
+        if PAGE_WINDOW not in _SLOTS:
+            _SLOTS[PAGE_WINDOW] = threading.BoundedSemaphore(PAGE_WINDOW)
+        return _SLOTS[PAGE_WINDOW]
 
 
 def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
                model, src_fmt, cancel, expected) -> list[dict]:
-    """Run an item's pages, up to PAGE_WINDOW at once. Returns records in page order.
+    """Run an item's pages concurrently. Returns records in page order.
 
     The reader stays on THIS thread -- pypdfium2 and the archive budget are
-    not thread-safe, and a decoded page is only pulled once a window slot is
-    free, so no more than PAGE_WINDOW decoded pages exist at a time (AC-12's
-    peak RSS). Placements are written here too, in page order.
+    not thread-safe -- and pulls the next decoded page only once it holds one
+    of the process's PAGE_WINDOW slots, so decoded pages stay bounded across
+    every item of every job (AC-12). Page hashing and placements happen here,
+    in page order. A slot is released by the page's done-callback, which runs
+    after the future holds its result or exception, so the reader that wakes
+    on it always sees a page that failed.
 
-    Cancel keeps its page-boundary meaning (AC-13): the token is checked when
-    the next page has been read, exactly where the sequential loop checked it,
-    and inside each page before its translation request. Pages already past
-    that point finish and are delivered; the raised Cancelled counts every
-    page that was. A failure on one page stops new pages, lets the pages in
-    flight finish -- their files are whole either way, as after a cancel --
-    and is raised once they have, earliest page first.
+    Cancel keeps its page-boundary meaning (AC-13): checked when the next page
+    has been read, where the sequential loop checked it, and inside each page
+    before and after its translation request. Pages past that point finish
+    and are delivered; Cancelled counts every page that was. A failed page
+    stops new pages, the pages in flight finish -- whole files either way, as
+    after a cancel -- and the earliest page's error is raised.
+
+    The reader is CLOSED here, on this thread, before anything is raised. Left
+    to the garbage collector -- an exception held by this frame keeps the
+    suspended generator alive in a cycle -- pdf.pages' finally took
+    _PDFIUM_LOCK on whichever thread the collection ran, which deadlocked a
+    thread already inside that lock (review: reproduced on scan.pdf).
     """
-    import concurrent.futures  # noqa: PLC0415 -- only the item path needs it
+    import concurrent.futures as cf  # noqa: PLC0415 -- only the item path needs it
 
-    slots = threading.Semaphore(PAGE_WINDOW)
-    futures: list[concurrent.futures.Future] = []
+    slots = _page_slots()
+    futures: list[cf.Future] = []
 
     def one(h, img, member, ordinal):
-        try:
-            # _EXPECTED is per thread: the worker publishes the item's page
-            # count again, or its emits lose the `total` the UI's bar runs to.
-            with expecting(expected), _page_lock(h):
-                return _run_cached_page(h, img, member, ordinal, item_id, out_dir, client,
-                                        lang, source, model, src_fmt, cancel, 0)
-        finally:
-            slots.release()
+        # _EXPECTED is per thread: the worker publishes the item's page count
+        # and id again, or its emits lose the `total` and `item_id` the UI uses.
+        with expecting(expected, item_id), _page_lock(h):
+            return _run_cached_page(h, img, member, ordinal, item_id, out_dir, client,
+                                    lang, source, model, src_fmt, cancel, 0)
 
-    def failed():
-        return any(f.done() and f.exception() is not None
-                   and not isinstance(f.exception(), Cancelled) for f in futures)
+    def page_failed():
+        return any(f.done() and not isinstance(f.exception(), (type(None), Cancelled))
+                   for f in futures)
 
     reader_error, cancelled = None, False
-    pages = iter(pages)
-    with concurrent.futures.ThreadPoolExecutor(
-            max_workers=PAGE_WINDOW, thread_name_prefix=f"pages-{item_id}"[:40]) as pool:
-        try:
-            while True:
-                slots.acquire()
-                if failed():
-                    slots.release()
+    reader = iter(pages)
+    pool = cf.ThreadPoolExecutor(max_workers=PAGE_WINDOW,
+                                 thread_name_prefix=f"pages-{item_id}"[:40])
+    try:
+        while True:
+            slots.acquire()
+            submitted = False
+            try:
+                if page_failed():
                     break
                 try:
-                    ordinal, member, img = next(pages)
+                    ordinal, member, img = next(reader)
                 except StopIteration:
-                    slots.release()
                     break
                 if cancel is not None and cancel.is_set():
-                    slots.release()
                     cancelled = True
                     break
                 h = cache.page_hash(img)
                 cache.put_placement(job_id, item_id, ordinal, h, member,
                                     src_path=os.fspath(src_path))
-                futures.append(pool.submit(one, h, img, member, ordinal))
+                future = pool.submit(one, h, img, member, ordinal)
+                submitted = True
+                future.add_done_callback(lambda _f: slots.release())
+                futures.append(future)
                 del img  # the worker holds the only reference now
-        except BaseException as e:  # noqa: BLE001 -- the reader's own failure, raised below
-            reader_error = e
-        # Leaving the with-block waits for every page in flight.
+            finally:
+                if not submitted:
+                    slots.release()
+    except BaseException as e:  # noqa: BLE001 -- the reader's own failure, raised below
+        reader_error = e
+    finally:
+        try:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
+        finally:
+            # Even when close() raises: returning with pages still running
+            # would let them write after run_item has cleared its running
+            # marker and job.py has reported the item (review).
+            pool.shutdown(wait=True)
 
-    records, first_error = [], None
+    records, errors = [], []
     for f in futures:
         e = f.exception()
         if e is None:
             records.append(f.result())
         elif isinstance(e, Cancelled):
             cancelled = True
-        elif first_error is None:
-            first_error = e
-    if first_error is not None:
-        raise first_error
+        else:
+            errors.append(e)
+    # Each future holds its exception, and so do the loop variables: drop
+    # them all, or the raise below cycles exception -> traceback -> this
+    # frame -> future -> exception.
+    del futures
+    f = e = future = None  # noqa: F841
     if reader_error is not None:
-        raise reader_error
+        errors.append(reader_error)
+        reader_error = None
+    if errors:
+        error = errors[0]
+        errors.clear()
+        try:
+            raise error
+        finally:
+            del error
     if cancelled:
         raise Cancelled(item_id, len(records))
     return records
@@ -930,7 +999,10 @@ def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
 # pairs on one hash, 291 OSErrors; one FAILED item in a cold-cache batch of
 # two identical archives). Under the lock the second worker waits, then
 # HITS, which is also the cheaper outcome.
-_PAGE_STRIPES = [threading.Lock() for _ in range(64)]
+# 1024 stripes, not 64: a page holds its stripe through its translation, and
+# with PAGE_WINDOW pages in flight two unrelated hashes sharing a stripe run
+# one after the other. At 64 that was likely (review); at 1024 it is rare.
+_PAGE_STRIPES = [threading.Lock() for _ in range(1024)]
 
 
 def _page_lock(page_hash_: str) -> threading.Lock:

@@ -1009,6 +1009,45 @@ def section_tier(c: Checks, cache_dir: str, record: dict):
     cache = _reset(cache_dir)
     from PIL import Image
 
+    # Many threads on one tiny LRU, on overlapping keys: the shape of three
+    # pages per item inside four job workers. The GIL hides the race at the
+    # default switch interval, so the interval is forced down for the run:
+    # unlocked, 15 of 16 threads then died with KeyError from move_to_end.
+    import sys as _sys
+    import threading as _threading
+
+    hammer = cache._Tier()
+    tiles = [Image.new("L", (64, 64)) for _ in range(40)]
+    errors = []
+
+    def churn(seed):
+        try:
+            for i in range(20000):
+                k = f"k{(seed * 7 + i) % 40}"
+                if i % 5 == 0:
+                    hammer.discard(k)  # enforce_cap's path
+                elif i % 3:
+                    hammer.put(k, tiles[(seed + i) % 40])
+                else:
+                    hammer.get(k)
+                hammer.total_bytes()
+        except Exception as e:  # noqa: BLE001 -- the assert reports it
+            errors.append(f"{type(e).__name__}: {e}")
+
+    workers = [_threading.Thread(target=churn, args=(s,)) for s in range(16)]
+    switch = _sys.getswitchinterval()
+    _sys.setswitchinterval(1e-6)
+    try:
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+    finally:
+        _sys.setswitchinterval(switch)
+    c.check(not errors and len(hammer._items) <= cache.MAX_RASTERS,
+            f"[tier] sixteen threads churning one LRU raise nothing and keep the bound: "
+            f"{errors[:2]} ({len(hammer._items)} resident)")
+
     hashes = [p["page_hash"] for p in record["pages"]][:4]
     for h in hashes:
         cache.read_raster(h)

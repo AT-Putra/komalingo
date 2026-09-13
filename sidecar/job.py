@@ -179,7 +179,7 @@ def run_item(item: Item, dest_dir, job_id, client=None,
             return item
 
         if item.kind == "image":
-            record = pipeline.run_page(item.path, dest_dir, 1, client, source, lang,
+            record = pipeline.run_page(item.path, dest_dir, 1, client, source, lang, item_id=item.item_id,
                                        cancel=cancel)
             item.output = record.get("output", "")
             item.pages = 1

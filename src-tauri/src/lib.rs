@@ -60,6 +60,12 @@ pub struct Progress {
     /// a missing field here would turn every progress event into a log line.
     #[serde(default)]
     pub total: Option<i64>,
+    /// The item a page stage belongs to. `item` on those lines is the stage's
+    /// detail ("5 regions", an output file name), and an item's pages now run
+    /// interleaved, so the UI keys its status strip on this instead. Absent on
+    /// item_start/item_done, whose `item` already is the id.
+    #[serde(default)]
+    pub item_id: Option<String>,
 }
 
 /// What one sidecar stdout line becomes.

@@ -552,11 +552,12 @@ def job_status(job_id: str):
 def cancel_job(job_id: str):
     """AC-13: items not yet started are cancelled outright; an item mid-run
     stops at its next page boundary with the pages it delivered kept and no
-    archive written. An item already past its last page finishes its repack
-    and comes back OK -- there is no page boundary left to stop at, and
-    discarding finished work is not what cancel means. The response is the
-    status at the moment of the request; poll GET /api/job/{id} to watch the
-    running items stop."""
+    archive written. That holds up to the repack itself: a cancel that lands
+    after the last page but before the archive is written comes back
+    CANCELLED with every page delivered and cached, and the resume repacks
+    without running a page. Only an item already writing its archive
+    finishes OK. The response is the status at the moment of the request;
+    poll GET /api/job/{id} to watch the running items stop."""
     with _jobs_lock:
         found = _jobs.get(job_id)
     if found is None:

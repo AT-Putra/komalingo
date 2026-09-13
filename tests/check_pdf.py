@@ -489,6 +489,56 @@ def check_no_agpl(c):
     c.check("extractall" not in src, "pdf.py never calls extractall")
 
 
+READER_CLOSE_DRIVER = r"""
+import gc, os, sys, threading
+sys.path.insert(0, sys.argv[1])
+from sidecar import cache, pipeline
+from sidecar.containers import pdf
+gc.disable()
+def failing_page(*a, **k):
+    raise RuntimeError("provider said no")
+pipeline._run_cached_page = failing_page
+cache.page_hash = lambda img: "0" * 16
+cache.put_placement = lambda *a, **k: None
+src = sys.argv[2]
+try:
+    pipeline._run_pages(pdf.pages(src), "j", "item", src, "out", None, "en", "ja",
+                        "offline", pdf.PDF, None, 3)
+except RuntimeError:
+    pass
+done = threading.Event()
+def another_pdf_item():
+    with pdf._PDFIUM_LOCK:
+        gc.collect()
+    done.set()
+threading.Thread(target=another_pdf_item, daemon=True).start()
+print("RESULT " + ("no deadlock" if done.wait(10) else "deadlocked"), flush=True)
+os._exit(0)
+"""
+
+
+def check_reader_close(c):
+    """[reader-close] a failed page does not leave the PDF reader to the GC.
+
+    In a new process, because the failure mode is a thread blocked forever on
+    _PDFIUM_LOCK -- in this one it would hang every later PDF assert. The
+    reader's finally takes that lock; left open in a reference cycle by the
+    raised exception, it ran on whichever thread the collector did, and a
+    thread already inside the lock deadlocked on itself (review).
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        [sys.executable, "-c", READER_CLOSE_DRIVER, ROOT, fixture("scan.pdf")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        env=dict(os.environ, PYTHONIOENCODING="utf-8"), cwd=ROOT)
+    result = next((l[len("RESULT "):] for l in proc.stdout.splitlines() if l.startswith("RESULT ")),
+                  f"no result (rc {proc.returncode}): {proc.stderr[-300:]!r}")
+    c.check(result == "no deadlock",
+            f"[reader-close] after a page fails, a collection inside _PDFIUM_LOCK on another "
+            f"thread does not deadlock: {result}")
+
+
 def main():
     if not os.path.isdir(PDFS) or not os.path.isfile(fixture(SCAN)):
         return skip("fixtures/pdf/ is absent -- run tests/gen_fixtures.py")
@@ -506,6 +556,7 @@ def main():
         fallbacks = check_round_trip(c, expected, tmp)
         check_info_names(c, tmp)
         check_boundary(c, tmp)
+        check_reader_close(c)
 
     # Recorded, not ratcheted: a count over a fixed fixture set (text.pdf and
     # text_rot.pdf exist to be the two), the same class as fit_failed_count.
