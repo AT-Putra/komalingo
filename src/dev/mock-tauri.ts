@@ -356,7 +356,7 @@ async function api(path: string, method: string, body: Record<string, unknown> |
       // AppLocalData is 15 -- the enum in path.js, not exported as strings.
       case "plugin:path|resolve_directory": {
         const dir = Number(args.directory);
-        const base = dir === 11 ? "C:\\Program Files\\Komalingo" : "C:\\Users\\me\\AppData\\Local\\com.adita.komalingo";
+        const base = dir === 11 ? "C:\\Program Files\\Komalingo" : "C:\\Users\\me\\AppData\\Local\\asia.komorebi.komalingo";
         return args.path ? `${base}\\${String(args.path)}` : base;
       }
       case "plugin:path|join":

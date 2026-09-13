@@ -263,7 +263,7 @@ async fn stop_sidecar(app: tauri::AppHandle) -> Result<(), String> {
 /// The WebView profile folder under the identifier before the rename.
 pub const OLD_IDENTIFIER: &str = "com.adita.mangatranslator";
 /// Must match `identifier` in tauri.conf.json.
-pub const IDENTIFIER: &str = "com.adita.komalingo";
+pub const IDENTIFIER: &str = "asia.komorebi.komalingo";
 
 /// Move the pre-rename WebView profile into the new identifier's folder.
 ///
