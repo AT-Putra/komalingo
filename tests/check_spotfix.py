@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1261,6 +1262,23 @@ def section_archive(c: Checks, cache_dir: str, out_dir: str):
     first, second = rec["pages"][1], rec["pages"][2]
     rid1, rid2 = first["regions"][0]["id"], second["regions"][0]["id"]
 
+    # The "two edits, one repack" assert below needs both re-renders inside
+    # the debounce. Measured at 0.03s each against 1.0s, but a loaded run_all
+    # is not a quiet machine; widened for this section and restored after.
+    saved_delay, pipeline.REPACK_DELAY = pipeline.REPACK_DELAY, 3.0
+    try:
+        _archive_edits(c, pipeline, main, job, item, archive_path, before,
+                       members_before, first, second, rid1, rid2, out_dir)
+    finally:
+        pipeline.REPACK_DELAY = saved_delay
+
+
+def _archive_edits(c, pipeline, main, job, item, archive_path, before,
+                   members_before, first, second, rid1, rid2, out_dir):
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
     t0 = time.perf_counter()
     out1 = _call(c, "[archive]", pipeline.rerender, job, item, first["page"], rid1,
                  "INTO THE ZIP", out_dir)
@@ -1292,7 +1310,9 @@ def section_archive(c: Checks, cache_dir: str, out_dir: str):
         )
         deadline = time.time() + 30
         status = r.json()
-        while status.get("status") not in ("done", "failed") and time.time() < deadline:
+        # idle is terminal too: a sidecar that never scheduled the repack
+        # answers idle forever, and waiting the full 30s on it tells nothing.
+        while status.get("status") not in ("done", "failed", "idle") and time.time() < deadline:
             time.sleep(0.1)
             status = client.get("/api/repack", params={"job_id": job, "item_id": item}).json()
     c.check(
@@ -1329,6 +1349,136 @@ def section_archive(c: Checks, cache_dir: str, out_dir: str):
         members_after == members_before,
         f"[archive] and the member set round-trips unchanged: "
         f"{len(members_after)} of {len(members_before)}",
+    )
+
+    # The exit paths. The app quits by closing the sidecar's stdin, and a
+    # timer armed a second ago does not fire across os._exit -- so both exit
+    # paths call flush_repacks first. Here: an edit, then the flush at once,
+    # and the archive has it before the timer would have fired.
+    out3 = _call(c, "[archive]", pipeline.rerender, job, item, first["page"], rid1,
+                 "BEFORE QUIT", out_dir)
+    if out3 is None:
+        return
+    t0 = time.perf_counter()
+    pipeline.flush_repacks()
+    flushed = pipeline.repack_status(job, item)
+    c.check(
+        flushed["status"] == "done" and flushed["repacks"] == 2,
+        f"[archive] flush_repacks runs the pending repack inline, which is what "
+        f"the exit paths call so an edit made just before quitting reaches the "
+        f"volume: {flushed} in {time.perf_counter() - t0:.2f}s",
+    )
+    with zipfile.ZipFile(archive_path) as zf:
+        in_zip3 = zf.read(first["member"])
+    with open(out3["output"], "rb") as fh:
+        loose3 = fh.read()
+    c.check(
+        in_zip3 == loose3 and in_zip3 != in_zip1,
+        "[archive] and the archive carries the edit made before the flush",
+    )
+    time.sleep(pipeline.REPACK_DELAY + 0.3)
+    c.check(
+        pipeline.repack_status(job, item)["repacks"] == 2,
+        "[archive] the timer the flush cancelled did not run a further pass",
+    )
+
+    # Coalescing. An edit that lands while a pass is running is not lost:
+    # the worker goes again, once -- and the mid-pass edit's own timer,
+    # still armed, is cancelled rather than left to run a third pass over
+    # inputs the second already covered. The first pass is held on an
+    # Event so the mid-pass edit lands deterministically.
+    real_repack, saved_delay = pipeline.repack_item, pipeline.REPACK_DELAY
+    started, release = threading.Event(), threading.Event()
+    passes = [0]
+
+    def held_first(*a, **kw):
+        passes[0] += 1
+        if passes[0] == 1:
+            started.set()
+            release.wait(10)
+        return real_repack(*a, **kw)
+
+    pipeline.repack_item = held_first
+    try:
+        pipeline.REPACK_DELAY = 0.05
+        out4 = _call(c, "[archive]", pipeline.rerender, job, item, second["page"], rid2,
+                     "MID PASS ONE", out_dir)
+        c.check(
+            out4 is not None and started.wait(5),
+            "[archive] the first pass is under way and held",
+        )
+        pipeline.REPACK_DELAY = 0.4
+        out5 = _call(c, "[archive]", pipeline.rerender, job, item, second["page"], rid2,
+                     "MID PASS TWO", out_dir)
+        c.check(
+            pipeline.repack_status(job, item)["status"] == "running",
+            "[archive] an edit that lands mid-pass leaves the status running, "
+            "not pending: the worker owns it now",
+        )
+        release.set()
+        deadline = time.time() + 30
+        status = pipeline.repack_status(job, item)
+        while status["status"] not in ("done", "failed") and time.time() < deadline:
+            time.sleep(0.05)
+            status = pipeline.repack_status(job, item)
+        settled = time.perf_counter()
+        c.check(
+            status["status"] == "done" and status["repacks"] == 4,
+            f"[archive] the worker went again ONCE for the mid-pass edit: {status}",
+        )
+        time.sleep(max(0.0, 0.4 - (time.perf_counter() - settled)) + 0.3)
+        after = pipeline.repack_status(job, item)
+        c.check(
+            after["repacks"] == 4 and after["status"] == "done",
+            f"[archive] and the mid-pass edit's own timer was cancelled -- no third "
+            f"pass over inputs the second already covered: {after}",
+        )
+        if out5 is not None:
+            with zipfile.ZipFile(archive_path) as zf:
+                in_zip5 = zf.read(second["member"])
+            with open(out5["output"], "rb") as fh:
+                loose5 = fh.read()
+            c.check(
+                in_zip5 == loose5 and in_zip5 != in_zip2,
+                "[archive] and the archive carries the LAST edit, the one that "
+                "landed mid-pass",
+            )
+    finally:
+        release.set()
+        pipeline.repack_item, pipeline.REPACK_DELAY = real_repack, saved_delay
+
+    # The failure path. A loose page gone before the pass runs is a pass that
+    # cannot be honest about the volume, so it says so: status failed, the
+    # error naming the page, and the archive on disk untouched -- the last
+    # good one, not an empty or partial one.
+    with zipfile.ZipFile(archive_path) as zf:
+        in_zip_before = zf.read(second["member"])
+    good = _sha(archive_path)
+    pipeline.REPACK_DELAY = 0.05
+    try:
+        out6 = _call(c, "[archive]", pipeline.rerender, job, item, second["page"], rid2,
+                     "GONE", out_dir)
+        if out6 is None:
+            return
+        gone = out6["output"]
+        os.remove(gone)
+        deadline = time.time() + 30
+        status = pipeline.repack_status(job, item)
+        while status["status"] not in ("done", "failed") and time.time() < deadline:
+            time.sleep(0.05)
+            status = pipeline.repack_status(job, item)
+    finally:
+        pipeline.REPACK_DELAY = saved_delay
+    c.check(
+        status["status"] == "failed" and os.path.basename(gone) in status["error"],
+        f"[archive] a loose page missing when the pass runs is a FAILED status "
+        f"naming the page, not a done: {status}",
+    )
+    with zipfile.ZipFile(archive_path) as zf:
+        in_zip_after = zf.read(second["member"])
+    c.check(
+        _sha(archive_path) == good and in_zip_after == in_zip_before,
+        "[archive] and the archive on disk is the last good one, byte for byte",
     )
 
 

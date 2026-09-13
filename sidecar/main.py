@@ -84,6 +84,14 @@ def watch_parent(stdin=None) -> threading.Thread:
             print("sidecar: stdin closed -- parent gone, exiting", file=sys.stderr, flush=True)
         except OSError:
             pass  # stderr is on the same dead pipe
+        # The archive an edit scheduled, before the process goes: this is
+        # the app's ONLY exit path on quit, and a repack pending here would
+        # otherwise never run. Bounded, so a hung one cannot hold the port
+        # against the next launch.
+        try:
+            pipeline.flush_repacks()
+        except Exception:  # noqa: BLE001 -- exiting anyway; nothing to report to
+            pass
         os._exit(0)
 
     t = threading.Thread(target=watch, name="parent-watch", daemon=True)
@@ -604,7 +612,15 @@ def shutdown(request: Request, response: Response):
 
     # Exit after the response is on the wire, or the caller sees a dropped
     # connection instead of the 200 that tells it the shutdown was accepted.
-    threading.Timer(0.25, lambda: os._exit(0)).start()
+    # The archive an edit scheduled lands first -- see watch_parent.
+    def _exit():
+        try:
+            pipeline.flush_repacks()
+        except Exception:  # noqa: BLE001 -- exiting anyway; nothing to report to
+            pass
+        os._exit(0)
+
+    threading.Timer(0.25, _exit).start()
     return {"status": "shutting down"}
 
 

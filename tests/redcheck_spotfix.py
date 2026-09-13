@@ -263,6 +263,37 @@ CASES = [
         "the loose page shows the edit and the volume beside it never does",
     ),
     (
+        "the exit-path flush never runs the pending repack",
+        PIPELINE,
+        "    for k in keys:\n"
+        "        _repack_worker(k)  # inline when idle; returns at once when a worker has it",
+        "    for k in keys:\n"
+        "        pass",
+        "[archive]",
+        "an edit made just before quitting is on the loose page and never in "
+        "the volume",
+    ),
+    (
+        "a failed repack reported as done",
+        PIPELINE,
+        "            out, err = \"\", f\"{type(e).__name__}: {e}\"",
+        "            out, err = \"\", \"\"",
+        "[archive]",
+        "the editor says the archive is up to date after the rebuild raised",
+    ),
+    (
+        "the mid-pass edit's timer left armed",
+        PIPELINE,
+        "                if st[\"timer\"] is not None:\n"
+        "                    st[\"timer\"].cancel()\n"
+        "                    st[\"timer\"] = None\n"
+        "                continue",
+        "                continue",
+        "[archive]",
+        "a third repack over identical inputs after every mid-pass edit, and the "
+        "editor reads 'up to date' while it runs",
+    ),
+    (
         "an edit pins a page with no job",
         CACHE,
         "    if refs and has_edits(page_hash_):",

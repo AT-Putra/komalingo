@@ -22,6 +22,7 @@ import json
 import os
 import re
 import threading
+import time
 from dataclasses import asdict
 
 from PIL import Image
@@ -938,9 +939,15 @@ def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,
     dest = archive.output_path(src_path, dest_dir)
 
     def entries():
+        # Read, close, THEN yield: the writer deflates (or LZMA-compresses,
+        # for 7z) the payload while the generator is suspended, and a handle
+        # held open across that is a sharing violation for the re-render
+        # that wants to replace this very file. open_retry for the other
+        # half -- the read that lands in the instant of that replace.
         for record in records:
-            with open(atomic.long_path(record["output"]), "rb") as fh:
-                yield record["member"], fh.read()
+            with atomic.open_retry(atomic.long_path(record["output"]), "rb") as fh:
+                payload = fh.read()
+            yield record["member"], payload
 
     # A FRESH budget for the re-read below, not the one the page loop
     # exhausted: that one has already counted every page of this archive, so
@@ -1005,6 +1012,13 @@ def repack_item(job_id, item_id, dest_dir, lang=DEFAULT_LANG) -> str:
 # that the volume is current by the time they open it.
 REPACK_DELAY = 1.0
 
+# A pass running longer than this is reported as failed rather than running:
+# repack_item cannot be interrupted, and a dest_dir on a network share or an
+# antivirus holding the temp file could otherwise leave the editor saying
+# "updating" for the rest of the session. Five minutes is ten times a
+# 200-page volume's measured repack.
+REPACK_STALL = 300.0
+
 _REPACK_LOCK = threading.Lock()
 _REPACKS: dict[tuple[str, str], dict] = {}
 _REPACK_PUBLIC = ("status", "archive", "error", "edits", "repacks")
@@ -1029,10 +1043,12 @@ def schedule_repack(job_id, item_id, dest_dir, lang=DEFAULT_LANG) -> dict:
     with _REPACK_LOCK:
         st = _REPACKS.setdefault(key, {
             "status": "idle", "archive": "", "error": "", "edits": 0, "repacks": 0,
-            "running": False, "timer": None,
+            "running": False, "timer": None, "since": 0.0,
         })
         st["edits"] += 1
-        st["status"], st["error"] = "pending", ""
+        # A pass under way keeps saying so: it will go again for this edit
+        # (see _repack_worker), so "pending" would be a step backwards.
+        st["status"], st["error"] = ("running" if st["running"] else "pending"), ""
         st["dest_dir"], st["lang"] = os.fspath(dest_dir), lang
         if st["timer"] is not None:
             st["timer"].cancel()
@@ -1049,7 +1065,14 @@ def repack_status(job_id, item_id) -> dict:
         st = _REPACKS.get((str(job_id), str(item_id)))
         if st is None:
             return {"status": "idle", "archive": "", "error": "", "edits": 0, "repacks": 0}
-        return {k: st[k] for k in _REPACK_PUBLIC}
+        public = {k: st[k] for k in _REPACK_PUBLIC}
+        stalled = st["running"] and time.monotonic() - st["since"] > REPACK_STALL
+        if stalled:
+            public["status"] = "failed"
+            public["error"] = (f"the archive rebuild has been running for "
+                               f"{time.monotonic() - st['since']:.0f}s; check the "
+                               f"output folder, and run the item again if it is behind")
+        return public
 
 
 def _repack_worker(key: tuple[str, str]) -> None:
@@ -1062,7 +1085,7 @@ def _repack_worker(key: tuple[str, str]) -> None:
         st["running"] = True
     while True:
         with _REPACK_LOCK:
-            st["status"] = "running"
+            st["status"], st["since"] = "running", time.monotonic()
             seen, dest_dir, lang = st["edits"], st["dest_dir"], st["lang"]
         try:
             out, err = repack_item(key[0], key[1], dest_dir, lang), ""
@@ -1071,10 +1094,45 @@ def _repack_worker(key: tuple[str, str]) -> None:
         with _REPACK_LOCK:
             st["repacks"] += 1
             if st["edits"] != seen:
-                continue  # an edit landed mid-repack: the archive just written is already behind
+                # An edit landed mid-pass: the archive just written is already
+                # behind, so go again. Its own timer is still armed and would
+                # run a third pass over inputs this next one covers; cancel it.
+                if st["timer"] is not None:
+                    st["timer"].cancel()
+                    st["timer"] = None
+                continue
             st["status"] = "failed" if err else "done"
             st["archive"], st["error"], st["running"] = out, err, False
             return
+
+
+def flush_repacks(timeout: float = 30.0) -> None:
+    """Every pending repack, now, on this thread. For the exit paths.
+
+    The app does not call /api/shutdown on quit: it closes the sidecar's
+    stdin and watch_parent exits on the EOF. A daemon timer armed one second
+    ago never fires across that, and a worker mid-write is killed with its
+    temp file beside the archive -- so an edit made and then the app closed
+    would leave the loose page current and the volume behind, the exact
+    state this machinery exists to end. Called before os._exit: pending
+    timers are cancelled and their repacks run inline; a worker already
+    running is waited for, up to `timeout`, so a 200-page volume finishes
+    and a hung one does not hold the port past the next launch.
+    """
+    deadline = time.monotonic() + timeout
+    with _REPACK_LOCK:
+        keys = [k for k, st in _REPACKS.items() if st["status"] in ("pending", "running")]
+        for k in keys:
+            if _REPACKS[k]["timer"] is not None:
+                _REPACKS[k]["timer"].cancel()
+                _REPACKS[k]["timer"] = None
+    for k in keys:
+        _repack_worker(k)  # inline when idle; returns at once when a worker has it
+    while time.monotonic() < deadline:
+        with _REPACK_LOCK:
+            if not any(_REPACKS[k]["running"] for k in keys):
+                return
+        time.sleep(0.05)
 
 
 def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
