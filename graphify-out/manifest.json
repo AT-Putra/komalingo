@@ -54,10 +54,10 @@
     "semantic_hash": "3cdc2bc87fd2005fea0c1ed900935158"
   },
   "sidecar/llm.py": {
-    "mtime": 1789231725.474084,
-    "seen": 1789308309.0354228,
-    "ast_hash": "0856bcb403c80224e7ee0f6a7706df48",
-    "semantic_hash": "0856bcb403c80224e7ee0f6a7706df48"
+    "mtime": 1789315329.5643628,
+    "seen": 1789315430.7142453,
+    "ast_hash": "ee88f0675863bd6d5a1da0671d2c8891",
+    "semantic_hash": ""
   },
   "sidecar/main.py": {
     "mtime": 1789302837.3525257,
@@ -240,10 +240,10 @@
     "semantic_hash": "9f5f915b3185c20551c61e0f01401b1c"
   },
   "tests/check_provider.py": {
-    "mtime": 1789223603.5303373,
-    "seen": 1789308309.0354228,
-    "ast_hash": "547f26a9bb835bbbd7b1c677d97b45ce",
-    "semantic_hash": "547f26a9bb835bbbd7b1c677d97b45ce"
+    "mtime": 1789315291.8774555,
+    "seen": 1789315430.7142453,
+    "ast_hash": "7744bb7a0d68f2930a24904c7cf93005",
+    "semantic_hash": ""
   },
   "tests/check_settings.py": {
     "mtime": 1789210372.5556705,
@@ -294,10 +294,10 @@
     "semantic_hash": "7b51563e20b72541de1d3c7a799e7b0b"
   },
   "tests/lib/stub_provider.py": {
-    "mtime": 1789203934.6294043,
-    "seen": 1789308309.0354228,
-    "ast_hash": "c8cfa7e86225981093ad8b5a0894cecb",
-    "semantic_hash": "c8cfa7e86225981093ad8b5a0894cecb"
+    "mtime": 1789315291.8761272,
+    "seen": 1789315430.7142453,
+    "ast_hash": "1f8f9c9cad6ceefb90051e4643edee31",
+    "semantic_hash": ""
   },
   "tests/run_all.py": {
     "mtime": 1789198861.247298,
