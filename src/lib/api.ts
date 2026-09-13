@@ -201,6 +201,26 @@ export interface JobStatus {
   cancelled: boolean;
 }
 
+/** The page cache as cache.stats() reports it. */
+export interface CacheStats {
+  root: string;
+  bytes: number;
+  pages: number;
+  /** Pages holding a spot-fix correction; clearing drops those too. */
+  edited_pages: number;
+  cap_bytes: number;
+}
+
+/** What cache.clear() removed and what it had to leave. */
+export interface CacheClearResult {
+  removed: number;
+  /** Pages a running job holds, or that the OS would not let go of. */
+  held: number;
+  freed_bytes: number;
+  /** What the cache holds after the clear. */
+  bytes: number;
+}
+
 async function call<T>(
   path: string,
   method: "GET" | "POST" = "GET",
@@ -280,6 +300,12 @@ export const api = {
     call<RepackStatus>(
       `/api/repack?job_id=${encodeURIComponent(jobId)}&item_id=${encodeURIComponent(itemId)}`,
     ),
+
+  /** The page cache: how big, and a clear that keeps running jobs' pages. */
+  cache: {
+    stats: () => call<CacheStats>("/api/cache"),
+    clear: () => call<CacheClearResult>("/api/cache/clear", "POST"),
+  },
 
   /** AC-7: a folder through the queue. `start` answers at once; poll `status`. */
   job: {

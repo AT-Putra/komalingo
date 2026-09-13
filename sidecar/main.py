@@ -606,6 +606,23 @@ def repack_status(job_id: str, item_id: str):
     return pipeline.repack_status(job_id, item_id)
 
 
+@app.get("/api/cache")
+def cache_stats():
+    """Size, page count and corrections in the page cache, for the Settings card."""
+    return cache.stats()
+
+
+@app.post("/api/cache/clear")
+def cache_clear():
+    """Empty the page cache, keeping only pages a running job holds.
+
+    POST, never GET, for /api/shutdown's reason: an <img> pointed at a GET
+    would wipe the cache from any page the user visits. Delivered files in
+    output folders are not touched; see cache.clear for what stays and why.
+    """
+    return cache.clear()
+
+
 @app.get("/api/shutdown")
 def shutdown_get():
     """GET can never shut anything down. A link or an <img> is a GET."""

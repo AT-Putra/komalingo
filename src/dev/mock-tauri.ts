@@ -197,6 +197,9 @@ async function runJob(job: JobStatus) {
   job.done = true;
 }
 
+// The page cache the Settings card reads; a clear empties it for the session.
+let mockCache = { bytes: 851_968_000, pages: 214, edited_pages: 3 };
+
 async function api(path: string, method: string, body: Record<string, unknown> | null) {
   if (path === "/api/health") return { status: "ok", pid: 4242 };
   if (path.startsWith("/api/models")) {
@@ -263,6 +266,20 @@ async function api(path: string, method: string, body: Record<string, unknown> |
       .map((x) => x.id);
     page.output = pageImage(page.page, page.regions);
     return page;
+  }
+  if (path === "/api/cache") {
+    await sleep(300);
+    return {
+      root: "C:\\Users\\reader\\AppData\\Local\\Komalingo\\cache",
+      ...mockCache,
+      cap_bytes: 4 * 1024 ** 3,
+    };
+  }
+  if (path === "/api/cache/clear" && method === "POST") {
+    await sleep(800);
+    const r = { removed: mockCache.pages, held: 0, freed_bytes: mockCache.bytes, bytes: 0 };
+    mockCache = { bytes: 0, pages: 0, edited_pages: 0 };
+    return r;
   }
   if (path === "/api/job" && method === "POST") {
     const job_id = String(body?.job_id);

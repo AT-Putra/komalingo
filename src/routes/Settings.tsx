@@ -23,9 +23,26 @@ import {
   displayPath,
   loadSettings,
   saveSettings,
+  type CacheStats,
   type ModelInfo,
   type ProviderSettings,
 } from "../lib/api";
+
+const BYTES = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+
+/** 812.4 MB, 4 GB. Binary units, because the sidecar's cap is 4 * 1024**3. */
+function formatBytes(n: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  // A no-break space: "812.5" and "MB" on two lines of a narrow card read as two values.
+  return `${BYTES.format(n)} ${units[i]}`;
+}
+
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /**
  * Where the sample run reads from and writes to. Both ABSOLUTE.
@@ -45,7 +62,7 @@ async function samplePaths(): Promise<{ src: string; dest: string }> {
 }
 
 /** Which card a message belongs under. */
-type Where = "provider" | "test";
+type Where = "provider" | "test" | "cache";
 
 export default function Settings() {
   const [s, setS] = useState<ProviderSettings>(loadSettings);
@@ -70,10 +87,70 @@ export default function Settings() {
   const modelBox = useRef<ModelComboboxHandle>(null);
   // Shown in the card so the user knows where the test wrote, before running it.
   const [sample, setSample] = useState<{ src: string; dest: string } | null>(null);
+  // null while the first read is in flight; the card says "Reading…" then.
+  const [cache, setCache] = useState<CacheStats | null>(null);
+  // Clearing is two presses: the first one asks, in place, and says what
+  // goes. A browser confirm() would block the webview's event loop and could
+  // not say how many of the pages hold the user's own corrections.
+  const [confirming, setConfirming] = useState(false);
+  const clearBtn = useRef<HTMLButtonElement>(null);
+  const cancelBtn = useRef<HTMLButtonElement>(null);
 
   // Persist on every edit, so settings survive a restart without a Save button
   // the user can forget to press.
   useEffect(() => saveSettings(s), [s]);
+
+  async function readCache() {
+    try {
+      setCache(await api.cache.stats());
+    } catch (e) {
+      setError({ where: "cache", text: describeError(e) });
+    }
+  }
+
+  useEffect(() => {
+    void readCache();
+  }, []);
+
+  // Focus lands on Cancel, the safe answer, when the question opens, and back
+  // on the button that asked it when the question closes. In an effect, not
+  // in the handlers: the button being focused is only mounted after the
+  // render that swaps the two branches.
+  const asked = useRef(false);
+  useEffect(() => {
+    if (confirming) {
+      asked.current = true;
+      cancelBtn.current?.focus();
+    } else if (asked.current) {
+      asked.current = false;
+      clearBtn.current?.focus();
+    }
+  }, [confirming]);
+
+  const cancelClear = () => setConfirming(false);
+
+  async function clearCache() {
+    setBusy("cache");
+    setError(null);
+    setNote(null);
+    try {
+      const r = await api.cache.clear();
+      const kept = r.held
+        ? ` ${plural(r.held, "page")} kept: a running job is still using them.`
+        : "";
+      setNote({
+        where: "cache",
+        tone: r.held ? "info" : "success",
+        text: `Cleared ${plural(r.removed, "page")}, ${formatBytes(r.freed_bytes)} freed.${kept}`,
+      });
+    } catch (e) {
+      setError({ where: "cache", text: describeError(e) });
+    } finally {
+      setConfirming(false);
+      setBusy("");
+      await readCache();
+    }
+  }
 
   useEffect(() => {
     let live = true;
@@ -276,35 +353,121 @@ export default function Settings() {
           {messages("provider")}
         </section>
 
-        <section className="card stack">
-          <div className="card-head" style={{ marginBottom: 0 }}>
-            <span className="icon-tile">
-              <Icon name="zap" />
-            </span>
-            <div>
-              <h2>Check it works</h2>
-              <p className="sub">One bundled page, end to end.</p>
+        <div className="settings-side">
+          <section className="card stack">
+            <div className="card-head" style={{ marginBottom: 0 }}>
+              <span className="icon-tile">
+                <Icon name="zap" />
+              </span>
+              <div>
+                <h2>Check it works</h2>
+                <p className="sub">One bundled page, end to end.</p>
+              </div>
             </div>
-          </div>
-          <dl className="kv">
-            <dt>Input</dt>
-            <dd className="mono">{sample?.src ?? "bundled sample page"}</dd>
-            <dt>Output</dt>
-            <dd className="mono">{sample?.dest ?? "the app's data folder"}</dd>
-          </dl>
-          <button
-            className="btn primary"
-            onClick={testSample}
-            disabled={!ready || busy !== ""}
-          >
-            {busy === "test" ? <Icon name="loader" className="spin" /> : <Icon name="play" />}
-            {busy === "test" ? "Translating…" : "Test with sample image"}
-          </button>
-          {!ready && (
-            <p className="hint">Needs a base URL and a model.</p>
-          )}
-          {messages("test")}
-        </section>
+            <dl className="kv">
+              <dt>Input</dt>
+              <dd className="mono">{sample?.src ?? "bundled sample page"}</dd>
+              <dt>Output</dt>
+              <dd className="mono">{sample?.dest ?? "the app's data folder"}</dd>
+            </dl>
+            <button
+              className="btn primary"
+              onClick={testSample}
+              disabled={!ready || busy !== ""}
+            >
+              {busy === "test" ? <Icon name="loader" className="spin" /> : <Icon name="play" />}
+              {busy === "test" ? "Translating…" : "Test with sample image"}
+            </button>
+            {!ready && (
+              <p className="hint">Needs a base URL and a model.</p>
+            )}
+            {messages("test")}
+          </section>
+
+          <section className="card stack" aria-busy={busy === "cache"}>
+            <div className="card-head" style={{ marginBottom: 0 }}>
+              <span className="icon-tile">
+                <Icon name="database" />
+              </span>
+              <div>
+                <h2>Page cache</h2>
+                <p className="sub">Pages already read and translated, so a re-run skips them.</p>
+              </div>
+            </div>
+            <dl className="kv">
+              <dt>Size</dt>
+              <dd className="num">
+                {cache ? `${formatBytes(cache.bytes)} of ${formatBytes(cache.cap_bytes)}` : "Reading…"}
+              </dd>
+              <dt>Pages</dt>
+              <dd className="num">
+                {cache
+                  ? `${cache.pages}${cache.edited_pages ? ` (${cache.edited_pages} with your corrections)` : ""}`
+                  : "—"}
+              </dd>
+              {cache && (
+                <>
+                  <dt>Folder</dt>
+                  <dd className="mono">{displayPath(cache.root)}</dd>
+                </>
+              )}
+            </dl>
+
+            {confirming ? (
+              <div
+                className="stack"
+                role="group"
+                aria-label="Confirm clearing the page cache"
+                onKeyDown={(e) => e.key === "Escape" && busy === "" && cancelClear()}
+              >
+                <Alert tone="warn" title={`Delete ${plural(cache?.pages ?? 0, "cached page")}?`}>
+                  Translated files in your output folders stay. Re-running an item reads and
+                  translates it again, and its pages can’t be spot-fixed until then.
+                  {cache?.edited_pages
+                    ? ` ${plural(cache.edited_pages, "page")} with your corrections go too.`
+                    : ""}
+                </Alert>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="btn danger"
+                    onClick={clearCache}
+                    disabled={busy !== ""}
+                  >
+                    {busy === "cache" ? <Icon name="loader" className="spin" /> : <Icon name="trash" />}
+                    {busy === "cache" ? "Clearing…" : "Delete pages"}
+                  </button>
+                  <button
+                    ref={cancelBtn}
+                    type="button"
+                    className="btn ghost"
+                    onClick={cancelClear}
+                    disabled={busy !== ""}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                ref={clearBtn}
+                type="button"
+                className="btn danger"
+                onClick={() => {
+                  setError(null);
+                  setNote(null);
+                  setConfirming(true);
+                }}
+                disabled={!cache || cache.pages === 0 || busy !== ""}
+              >
+                <Icon name="trash" />
+                Clear cache…
+              </button>
+            )}
+            {cache?.pages === 0 && !note && <p className="hint">Nothing cached yet.</p>}
+            {messages("cache")}
+          </section>
+        </div>
       </div>
     </div>
   );

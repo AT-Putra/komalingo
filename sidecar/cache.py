@@ -943,3 +943,67 @@ def enforce_cap(job_id: str | None = None) -> str | None:
         f"page cache is {size / 1024 / 1024:.1f}MB, over its "
         f"{cap / 1024 / 1024:.1f}MB cap: every remaining page is held by {held}"
     )
+
+
+# -- the user's clear ------------------------------------------------------
+
+
+def _page_hashes() -> list[str]:
+    proot = atomic.long_path(pages_root())
+    return os.listdir(proot) if os.path.isdir(proot) else []
+
+
+def stats() -> dict:
+    """What the Settings card shows before the user decides to clear.
+
+    `edited_pages` is in here because it is the one fact that makes the
+    confirmation honest: a correction lives only in this cache, and the
+    delivered file that carries it cannot be spot-fixed again once its page
+    is gone. Counted by the same has_edits the eviction skip reads.
+    """
+    hashes = _page_hashes()
+    return {
+        "root": root(),
+        "bytes": disk_bytes(),
+        "pages": len(hashes),
+        "edited_pages": sum(1 for h in hashes if has_edits(h)),
+        "cap_bytes": _cap_bytes(),
+    }
+
+
+def clear() -> dict:
+    """Remove every page no running job holds. Returns what went and what stayed.
+
+    Eviction with the target at zero and ONE skip, not two: the user asked for
+    their corrections to go, which the cap never may decide for them -- but a
+    running job's input is still not theirs to pull out from under it, so
+    those pages stay and the answer counts them.
+
+    Job directories stay too. They are a few kilobytes of placement, and they
+    are what lets a spot-fix on a cleared page answer CacheMiss "cache" --
+    "evicted, run the item again" -- instead of "placement", which says the
+    job never ran that page and would be a lie. repack_item reads the
+    delivered files and the placement, never a page directory, so an archive
+    rebuild already scheduled still lands.
+
+    Under _LOCK for the whole sweep, for enforce_cap's reason. `freed` is
+    measured before and after rather than summed as it goes: a raster held
+    open by antivirus survives rmtree(ignore_errors=True), and a total that
+    counted it would claim space the disk still holds.
+    """
+    before = disk_bytes()
+    removed = held = 0
+    with _LOCK:
+        for h in _page_hashes():
+            if any(r in _running for r in read_refs(h)):
+                held += 1
+                continue
+            shutil.rmtree(atomic.long_path(page_dir(h)), ignore_errors=True)
+            _tier.discard_page(h)
+            if os.path.isdir(atomic.long_path(page_dir(h))):
+                held += 1
+            else:
+                removed += 1
+    left = disk_bytes()
+    return {"removed": removed, "held": held, "freed_bytes": max(0, before - left),
+            "bytes": left}

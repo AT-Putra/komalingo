@@ -1416,6 +1416,16 @@ td.id {
   color: var(--fg);
   overflow-wrap: anywhere;
 }
+.kv dd.num {
+  font-variant-numeric: tabular-nums;
+}
+/* The narrow column: the sample test, then the page cache under it. */
+.settings-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  min-width: 0;
+}
 
 /* ---------- Theme toggle ---------- */
 

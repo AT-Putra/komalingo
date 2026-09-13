@@ -947,6 +947,79 @@ def section_cap(c: Checks, cache_dir: str, record: dict):
     )
 
 
+def section_clear(c: Checks, cache_dir: str, out_dir: str, record: dict):
+    """[clear] the Settings clear: every page but a running job's, jobs kept."""
+    from fastapi.testclient import TestClient
+
+    from sidecar import main, pipeline
+
+    cache = _reset(cache_dir)
+    hashes = sorted({p["page_hash"] for p in record["pages"]})
+    running, idle = hashes[0], hashes[1:]
+    cache.write_edit(idle[0], "en", "offline", 1, "a correction")
+    cache.read_raster(idle[0])  # resident in the tier, which must let go of it too
+    cache.add_ref(running, "clear-running")
+    cache.mark_running("clear-running")
+
+    with TestClient(main.app) as client:
+        get = client.get("/api/cache/clear")
+        c.check(
+            get.status_code == 405 and all(os.path.isdir(cache.page_dir(h)) for h in hashes),
+            f"[clear] a GET clears nothing -- an <img> is a GET: {get.status_code}",
+        )
+        before = client.get("/api/cache").json()
+        c.check(
+            before["pages"] == len(hashes) and before["edited_pages"] == 1
+            and before["bytes"] == cache.disk_bytes() > 0,
+            f"[clear] /api/cache reports the pages, the corrections among them "
+            f"and the size: {before}",
+        )
+        r = client.post("/api/cache/clear")
+        body = r.json() if r.status_code == 200 else {}
+    cache.clear_running("clear-running")
+
+    c.check(
+        r.status_code == 200 and body.get("removed") == len(idle) and body.get("held") == 1,
+        f"[clear] every idle page is removed and the running job's is held: "
+        f"{r.status_code} {body}",
+    )
+    c.check(
+        not any(os.path.isdir(cache.page_dir(h)) for h in idle),
+        "[clear] including the page holding a correction -- the user asked, "
+        "which the cap may never decide for them",
+    )
+    c.check(
+        cache.has_page(running),
+        "[clear] a page a running job holds survives the clear",
+    )
+    c.check(
+        body.get("freed_bytes", 0) > 0 and body.get("bytes") == cache.disk_bytes(),
+        f"[clear] freed is measured, and the size after matches the disk: {body} "
+        f"vs {cache.disk_bytes()}",
+    )
+    c.check(
+        not any(k.split("/", 1)[0] in idle for k in cache._tier._items),
+        "[clear] no raster of a cleared page stays resident in the memory tier",
+    )
+    c.check(
+        bool(cache.read_placement(JOB_A)),
+        "[clear] job placement stays, so a spot-fix names the page as evicted",
+    )
+
+    page = next(p for p in record["pages"] if p["page_hash"] in idle)
+    rid = page["regions"][0]["id"] if page["regions"] else 1
+    try:
+        _quiet(pipeline.rerender, JOB_A, record["item_id"], page["page"], rid, "x", out_dir)
+        kind = None
+    except pipeline.CacheMiss as e:
+        kind = e.kind
+    c.check(
+        kind == "cache",
+        f"[clear] a spot-fix on a cleared page is a CacheMiss of kind 'cache' "
+        f"('run the item again'), not 'placement': {kind!r}",
+    )
+
+
 def section_cap_wiring(c: Checks, cache_dir: str, out_dir: str, record: dict):
     """[cap-wired] the cap is connected to the job, not only to the check."""
     cache = _reset(cache_dir)
@@ -2302,6 +2375,7 @@ def main():
         _guarded(c, "[parallel]", section_parallel, os.path.join(tmp, "par-cache"),
                  os.path.join(tmp, "par-out"))
         _guarded(c, "[cap]", section_cap, fork("cap")[0], record)
+        _guarded(c, "[clear]", section_clear, *fork("clear"), record)
         _guarded(c, "[tier]", section_tier, fork("tier")[0], record)
         _guarded(c, "[persist]", section_persistence, fork("persist")[0], record)
 
