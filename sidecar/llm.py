@@ -106,6 +106,19 @@ NOT_TEXT_INSTRUCTION = (
     "for that region and translate nothing there.\n"
 )
 
+
+def is_null_word(text) -> bool:
+    """The instruction's null, written as the STRING "null".
+
+    Measured on a real 32-page job: the model answered `"text":"null"` for 49
+    regions and a JSON null for 261 on the same pages. The string is a
+    translation as far as the types go, so it was typeset -- the word "null",
+    painted into the bubble, on every one of them. Nobody translates a line
+    to the English word "null", and the only place that word reaches this
+    client from is the instruction above, so it means what the null means.
+    """
+    return isinstance(text, str) and text.strip().strip("\"'").lower() == "null"
+
 # "At that spot" meant nothing while the spot was not in the request: the
 # model got each region's OCR text and had to guess where on the page it was.
 # Measured on three hand-labelled real pages, 21 runs per prompt: without
@@ -406,7 +419,8 @@ class LLMClient:
         pipeline drops the first before inpaint while the second reaches the
         page as a visible fit_failed. Anything that is not a string or null
         is treated as "" rather than raising -- a provider that answers with a
-        number for one region does not get to fail the page.
+        number for one region does not get to fail the page. The string
+        "null" is the null -- see is_null_word.
         """
         raw = reply["choices"][0]["message"]["content"]
         if isinstance(raw, list):  # some providers return content parts
@@ -418,6 +432,8 @@ class LLMClient:
         out = {}
         for t in parsed.get("translations", []):
             text = t.get("text", "")
+            if is_null_word(text):
+                text = None
             out[int(t["id"])] = text if text is None or isinstance(text, str) else ""
         return out
 

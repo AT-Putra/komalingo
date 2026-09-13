@@ -31,7 +31,7 @@ from PIL import Image
 from . import atomic, cache, imaging, inpainter, models, ocr_cjk, ocr_ja, safety, typeset
 from . import detect as detector
 from .containers import archive, pdf
-from .llm import MAX_CONCURRENT
+from .llm import MAX_CONCURRENT, is_null_word
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
 
@@ -311,10 +311,16 @@ def dismiss(regions: list[dict]) -> tuple[list[dict], list[dict]]:
     stays as drawn. It is kept on the record under `dismissed`, with what the
     OCR read there, so a page that lost a real bubble to a wrong null can be
     seen to have lost it rather than never having found it.
+
+    `editable` marks the model's dismissals, which the editor lists and lets
+    the user translate by hand: a wrong null is the model's call, and the
+    user overrules it. OCR's punctuation-only set-asides are not editable --
+    there is nothing there a translation could change.
     """
     kept = [r for r in regions if not r.get("not_text")]
     gone = [{"id": r["id"], "polygon": r["polygon"], "text": r.get("text"),
-             "reason": r.get("dismiss_reason", "")}
+             "reason": r.get("dismiss_reason", ""),
+             "editable": r.get("dismiss_reason") == VISION_REASON}
             for r in regions if r.get("not_text")]
     return kept, gone
 
@@ -656,7 +662,10 @@ def _apply_translations(regions: list[dict], h: str, lang: str, model: str,
     that way), and it is asked once more. A null on a region OCR already set
     aside (punctuation only) is content, not a decision, and is never re-asked.
     A stored translation lifts a vision dismissal left on the region by an
-    earlier pass over the same dicts.
+    earlier pass over the same dicts. A stored "null" STRING that the user did
+    not type is a null (llm.is_null_word): files written before the parser
+    knew that hold it as text, and reading it as text painted "null" onto the
+    page. It is not re-asked -- the model already answered.
 
     The caller translates only the returned ids, and writes only those back:
     a page with one gap is re-asked for the gap, with every stored translation
@@ -677,8 +686,11 @@ def _apply_translations(regions: list[dict], h: str, lang: str, model: str,
             missing.add(r["id"])
             continue
         text = entry.get("text", "")
+        worded = not entry.get("edited") and is_null_word(text)
+        if worded:
+            text = None
         if text is None:
-            if recheck and not entry.get("boxed") and not r.get("not_text"):
+            if recheck and not entry.get("boxed") and not worded and not r.get("not_text"):
                 missing.add(r["id"])
                 continue
             r["not_text"] = True
@@ -1517,6 +1529,20 @@ def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
                                 client, lang)
 
 
+def _pair_decisions(regions: list[dict], h: str, lang: str, model: str) -> list[dict]:
+    """The page's regions with this (lang, model)'s translations and nulls on them.
+
+    A region the pair holds no entry for predates it: the record gained
+    regions another model had once dismissed, and this pair never saw them.
+    Those are off this pair's page, as they were when it was translated.
+    """
+    never_seen = _apply_translations(regions, h, lang, model)
+    for r in regions:
+        if r["id"] in never_seen:
+            r["not_text"], r["dismiss_reason"] = True, VISION_REASON
+    return regions
+
+
 def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir,
                      client, lang) -> dict:
     h = placed["page_hash"]
@@ -1549,22 +1575,42 @@ def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir
             f"for regions {uncovered}; run the item at that language first",
             "translation",
         )
-    if stored and stored.get(str(region_id), {}).get("text", "") is None:
-        raise CacheMiss(f"region {region_id} is not on page {ordinal} under model {model!r}",
-                        "region")
+    # A region the MODEL dismissed is editable: its null was a call, and the
+    # user typing a translation overrules it. One OCR set aside as punctuation
+    # is not -- the edit would be saved and the region would stay off the
+    # page, and the editor would say "re-rendered" over no change at all.
+    target = next(r for r in regions if r["id"] == region_id)
+    if target.get("not_text") and target.get("dismiss_reason") != VISION_REASON:
+        raise CacheMiss(
+            f"region {region_id} on page {ordinal} was set aside "
+            f"({target.get('dismiss_reason') or 'not text'}); there is nothing to translate there",
+            "region")
     complete = bool(record.get("all_regions"))
+    # The erased set BEFORE the edit, from a copy: an edit to a skipped region
+    # grows the set by that region, and its raster is the base it is erased
+    # onto below.
+    kept_before = {r["id"] for r in dismiss(_pair_decisions([dict(r) for r in regions],
+                                                            h, lang, model))[0]}
     cache.write_edit(h, lang, model, region_id, text)
-    never_seen = _apply_translations(regions, h, lang, model)
-    for r in regions:
-        if r["id"] in never_seen:
-            r["not_text"], r["dismiss_reason"] = True, VISION_REASON
-    detected = regions
-    regions, _dismissed = dismiss(detected)
+    detected = _pair_decisions(regions, h, lang, model)
+    regions, dismissed = dismiss(detected)
+    kept = {r["id"] for r in regions}
     # The raster for THIS pair's kept set, or none: the page was last erased
     # under another model's or language's set, and typesetting over that raster
     # would leave the original text under the edit (review). The edit is saved;
     # the next run of the item draws it.
-    cleaned = cache.read_raster(h, {r["id"] for r in regions})
+    cleaned = cache.read_raster(h, kept)
+    if cleaned is None and kept - kept_before == {region_id}:
+        # A skipped region, translated by hand. The source page is inside an
+        # archive this path never re-opens, but it does not need to be: the
+        # raster of the set without this region still shows its original
+        # lettering, and erasing that one region's glyphs onto it is the
+        # raster of the set with it. Cached under the new set, like any other.
+        base = cache.read_raster(h, kept_before)
+        if base is not None:
+            cleaned, _calls = inpaint(base, [r for r in regions if r["id"] == region_id],
+                                      ordinal)
+            cache.write_raster(h, cleaned, src=base, kept=kept)
     if cleaned is None:
         raise CacheMiss(
             f"page {ordinal} was last erased for another model's or language's regions; "
@@ -1598,6 +1644,9 @@ def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir
         inpaint_calls=0,
         fit_summary=fit_summary,
         regions=regions,
+        # The editor's skipped list comes from here after an edit, as it comes
+        # from run_item's record before one.
+        dismissed=dismissed,
         edited_region=region_id,
         edit_on_other_model=cache.has_edit_for_other_model(h, lang, model),
         # The repacked volume on disk no longer contains this page. Re-packing

@@ -132,6 +132,16 @@ function fakePage(item_id: string, n: number): PageRecord {
     cached: false,
     detections: regions.length,
     regions,
+    // One line the vision model called art, for the editor's skipped list.
+    dismissed: [
+      {
+        id: 4,
+        polygon: rect(560, 820, 240, 110),
+        text: "ふふっ",
+        reason: "not on the page (vision model)",
+        editable: true,
+      },
+    ],
     fit_summary: {
       fit_compromised: regions.filter((r) => r.fit_compromised).map((r) => r.id),
       fit_failed: regions.filter((r) => r.fit_failed).map((r) => r.id),
@@ -251,6 +261,15 @@ async function api(path: string, method: string, body: Record<string, unknown> |
   if (path === "/api/rerender") {
     await sleep(700);
     const page = fakePage(String(body?.item_id), Number(body?.ordinal));
+    // A skipped region translated by hand joins the page, as the sidecar does.
+    const was = page.dismissed?.find((d) => d.id === Number(body?.region_id));
+    if (was) {
+      page.dismissed = page.dismissed?.filter((d) => d !== was);
+      page.regions.push({
+        id: was.id, polygon: was.polygon, text: was.text, translation: "", typeset: "",
+        fit_compromised: false, fit_failed: false,
+      });
+    }
     const r = page.regions.find((x) => x.id === Number(body?.region_id));
     if (r) {
       r.translation = String(body?.text);

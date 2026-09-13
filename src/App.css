@@ -1366,6 +1366,18 @@ td.id {
 .region .top .flag.failed { color: var(--danger-text); }
 .region .top .flag.compromised { color: var(--warn-text); }
 .region .top .flag.edited { color: var(--info-text); }
+.region .top .flag.skipped { color: var(--fg-muted); }
+.regions-sub {
+  margin: var(--s-4) 0 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.regions-note {
+  margin: 2px 0 var(--s-2);
+  font-size: 0.8rem;
+  color: var(--fg-faint);
+}
 .region .text {
   color: var(--fg-muted);
   font-size: 0.85rem;

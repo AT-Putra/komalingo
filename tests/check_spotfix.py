@@ -1020,6 +1020,118 @@ def section_clear(c: Checks, cache_dir: str, out_dir: str, record: dict):
     )
 
 
+def section_skipped(c: Checks, cache_dir: str, out_dir: str, record: dict):
+    """[skipped] "null" is never painted, and a skipped region is the user's to translate."""
+    from PIL import ImageChops
+
+    from sidecar import pipeline
+    from sidecar.llm import LLMClient
+
+    cache = _reset(cache_dir)
+    reply = {"choices": [{"message": {"content": json.dumps({"translations": [
+        {"id": 1, "text": "null"}, {"id": 2, "text": None},
+        {"id": 3, "text": " Null "}, {"id": 4, "text": "nullify"}]})}}]}
+    parsed = LLMClient._parse(reply)
+    c.check(
+        parsed == {1: None, 2: None, 3: None, 4: "nullify"},
+        f"[skipped] the model's null written as the string \"null\" parses as the "
+        f"null, and a word that merely starts with it does not: {parsed}",
+    )
+
+    item = record["item_id"]
+    page = next(p for p in record["pages"] if len(p["regions"]) >= 2)
+    h, ordinal = page["page_hash"], page["page"]
+    rid, other = page["regions"][0]["id"], page["regions"][1]["id"]
+    kept_all = {r["id"] for r in page["regions"]}
+
+    # A translation file written before the parser knew: the string, stored as text.
+    cache.write_translation(h, "en", "offline", {rid: "null"})
+    ran = _call(c, "[skipped]", pipeline.run_item, CBZ, out_dir, JOB_B)
+    if ran is None:
+        return
+    fresh = next(p for p in ran["pages"] if p["page"] == ordinal)
+    c.check(
+        rid not in {r["id"] for r in fresh["regions"]}
+        and not any((r.get("typeset") or "").strip().lower() == "null" for r in fresh["regions"]),
+        f"[skipped] a cached \"null\" string is off the page -- nothing typesets "
+        f"the word: {[(r['id'], r.get('typeset')) for r in fresh['regions']]}",
+    )
+    skipped = {d["id"]: d for d in fresh.get("dismissed", [])}
+    c.check(
+        rid in skipped and skipped[rid].get("editable") is True,
+        f"[skipped] and it is listed as dismissed and editable, for the editor: "
+        f"{fresh.get('dismissed')}",
+    )
+    c.check(
+        cache.read_translation(h, "en", "offline")[str(rid)].get("text") == "null",
+        "[skipped] and it was not re-asked: the model already answered",
+    )
+
+    # The raster WITH the region goes, so the edit has to build it from the one without.
+    with_it = os.path.join(cache.page_dir(h), cache.raster_name(kept_all))
+    if os.path.exists(with_it):
+        os.remove(with_it)
+    cache.clear_tier()
+    base = cache.read_raster(h, kept_all - {rid})
+    c.check(base is not None, "[skipped] the raster without the skipped region is cached")
+
+    calls, undo = _no_detect_or_ocr()
+    try:
+        out = _call(c, "[skipped]", pipeline.rerender, JOB_B, item, ordinal, rid,
+                    "BY HAND", out_dir)
+    finally:
+        undo()
+    if out is None or base is None:
+        return
+    mine = next((r for r in out["regions"] if r["id"] == rid), None)
+    c.check(
+        mine is not None and mine.get("typeset") == "BY HAND"
+        and rid not in {d["id"] for d in out.get("dismissed", [])},
+        f"[skipped] translating a skipped region by hand puts it on the page and "
+        f"off the skipped list: {mine and mine.get('typeset')!r}, {out.get('dismissed')}",
+    )
+    c.check(
+        calls == {"detect": 0, "ocr": 0},
+        f"[skipped] with neither detection nor OCR: {calls}",
+    )
+    now = cache.read_raster(h, kept_all)
+    x0, y0, x1, y1 = pipeline._bbox(mine["polygon"]) if mine else (0, 0, 1, 1)
+    box = (int(x0), int(y0), int(x1) + 1, int(y1) + 1)
+    c.check(
+        now is not None and ImageChops.difference(base.crop(box), now.crop(box)).getbbox() is not None,
+        "[skipped] its original lettering is erased onto the cached raster, and the "
+        "result is cached under the set that now includes it",
+    )
+    c.check(
+        cache.read_translation(h, "en", "offline")[str(rid)] == {"text": "BY HAND", "edited": True},
+        "[skipped] the hand translation is an edit like any other",
+    )
+
+    # "null" the USER typed is their text, not a dismissal.
+    cache.write_edit(h, "en", "offline", other, "null")
+    regions = [dict(r) for r in cache.read_regions(h)["regions"]]
+    pipeline._apply_translations(regions, h, "en", "offline")
+    typed = next(r for r in regions if r["id"] == other)
+    c.check(
+        not typed.get("not_text") and typed.get("translation") == "null",
+        f"[skipped] a \"null\" the user typed stays on the page as typed: {typed.get('translation')!r}",
+    )
+
+    aside = next(((p, r) for p in record["pages"]
+                  for r in cache.read_regions(p["page_hash"])["regions"]
+                  if r.get("dismiss_reason") == "punctuation only"), None)
+    if aside is not None:
+        try:
+            _quiet(pipeline.rerender, JOB_B, item, aside[0]["page"], aside[1]["id"], "x", out_dir)
+            kind = None
+        except pipeline.CacheMiss as e:
+            kind = e.kind
+        c.check(
+            kind == "region",
+            f"[skipped] a region OCR set aside as punctuation is not editable: {kind!r}",
+        )
+
+
 def section_cap_wiring(c: Checks, cache_dir: str, out_dir: str, record: dict):
     """[cap-wired] the cap is connected to the job, not only to the check."""
     cache = _reset(cache_dir)
@@ -2370,6 +2482,9 @@ def main():
             _guarded(c, "[archive]", section_archive, *fork("archive"))
             _guarded(c, "[cap-wired]", section_cap_wiring, *fork("cap-wired"), cross)
             _guarded(c, "[not-text]", section_not_text, *fork("not-text"), cross)
+            scache, sout = fork("skipped")
+            _seed(scache, sout, cross)
+            _guarded(c, "[skipped]", section_skipped, scache, sout, cross)
 
         _guarded(c, "[safe-path]", section_safe_paths, os.path.join(tmp, "safe-paths"))
         _guarded(c, "[parallel]", section_parallel, os.path.join(tmp, "par-cache"),

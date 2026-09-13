@@ -112,6 +112,20 @@ export interface Region {
   edited?: boolean;
 }
 
+/**
+ * A region taken off the page before it was erased: the art under it is left
+ * as drawn. `editable` is the vision model's null -- a call the user can
+ * overrule by typing a translation; OCR's punctuation-only set-asides are not.
+ */
+export interface DismissedRegion {
+  id: number;
+  polygon: [number, number][];
+  /** What the OCR read there. */
+  text: string | null;
+  reason: string;
+  editable: boolean;
+}
+
 export interface PageRecord {
   page: number;
   page_hash: string;
@@ -121,6 +135,8 @@ export interface PageRecord {
   cached: boolean;
   detections: number;
   regions: Region[];
+  /** Off the page, left as drawn. The editor lists the editable ones. */
+  dismissed?: DismissedRegion[];
   fit_summary: {
     fit_compromised: number[];
     fit_failed: number[];

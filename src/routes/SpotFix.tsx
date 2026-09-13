@@ -28,6 +28,7 @@ import {
   api,
   describeError,
   loadSettings,
+  type DismissedRegion,
   type PageRecord,
   type Region,
   type RepackStatus,
@@ -99,6 +100,13 @@ export default function SpotFix({
       ),
     [page.regions],
   );
+  // The model's nulls: left as drawn, and the user's to translate if the
+  // model was wrong. Punctuation OCR set aside is not listed -- nothing there
+  // a translation could change.
+  const skipped = useMemo(
+    () => (page.dismissed ?? []).filter((d) => d.editable),
+    [page.dismissed],
+  );
 
   // The delivered page, redrawn whenever the server hands back a new one. The
   // cache-buster is the point: the re-render writes to the SAME path, so
@@ -126,12 +134,24 @@ export default function SpotFix({
           r.id === selected ? "#2b7" : r.fit_failed ? "#d33" : "#e90";
         ctx.stroke();
       }
+      // Skipped regions dashed, so the user can find what the model left
+      // untranslated without it reading as a problem the typesetter had.
+      ctx.setLineDash([10, 6]);
+      for (const d of skipped) {
+        ctx.beginPath();
+        d.polygon.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+        ctx.closePath();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = d.id === selected ? "#2b7" : "#7c8594";
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
     };
     // No cache-buster on a data: URL: a query string would corrupt it, and an
     // inline image cannot be stale anyway.
     const src = pageSrc(page.output);
     img.src = src.startsWith("data:") ? src : `${src}?v=${Date.now()}`;
-  }, [page, selected]);
+  }, [page, selected, skipped]);
 
   function pick(e: React.MouseEvent<HTMLCanvasElement>) {
     const el = canvas.current;
@@ -142,12 +162,15 @@ export default function SpotFix({
     const x = ((e.clientX - box.left) * el.width) / box.width;
     const y = ((e.clientY - box.top) * el.height) / box.height;
     const hit = page.regions.find((r) => inPolygon(x, y, laidInto(r)));
-    if (hit) select(hit);
+    if (hit) return select(hit);
+    const miss = skipped.find((d) => inPolygon(x, y, d.polygon));
+    if (miss) select(miss);
   }
 
-  function select(r: Region) {
+  /** A skipped region starts from an empty draft: it has no translation. */
+  function select(r: Region | DismissedRegion) {
     setSelected(r.id);
-    setDraft(r.translation);
+    setDraft("translation" in r ? r.translation : "");
     setError("");
     setLanded(false);
   }
@@ -212,6 +235,7 @@ export default function SpotFix({
   }
 
   const current = ordered.find((r) => r.id === selected) ?? null;
+  const currentSkipped = current ? null : (skipped.find((d) => d.id === selected) ?? null);
   const failed = page.fit_summary.fit_failed.length;
   const tight = page.fit_summary.fit_compromised.length;
 
@@ -241,6 +265,12 @@ export default function SpotFix({
             <span className="pill ok">
               <Icon name="check" size={12} />
               Every bubble fits
+            </span>
+          )}
+          {skipped.length > 0 && (
+            <span className="pill">
+              <Icon name="skip-forward" size={12} />
+              {skipped.length} skipped
             </span>
           )}
           {repack && (repack.status === "pending" || repack.status === "running") && (
@@ -311,6 +341,12 @@ export default function SpotFix({
             <span>
               <i style={{ background: "#e90" }} /> tight
             </span>
+            {skipped.length > 0 && (
+              <span>
+                <i style={{ background: "transparent", outline: "2px dashed #7c8594", outlineOffset: -2 }} />{" "}
+                skipped
+              </span>
+            )}
             <span className="spacer" />
             <span className="mono">{page.member}</span>
           </div>
@@ -362,9 +398,43 @@ export default function SpotFix({
                 </li>
               ))}
               {ordered.length === 0 && (
-                <li className="empty">No text was detected on this page.</li>
+                <li className="empty">
+                  {skipped.length
+                    ? "Nothing on this page was translated."
+                    : "No text was detected on this page."}
+                </li>
               )}
             </ol>
+            {skipped.length > 0 && (
+              <>
+                <h3 className="regions-sub">Skipped by the model · {skipped.length}</h3>
+                <p className="regions-note">
+                  Marked as not text, so left as drawn. Pick one to translate it yourself.
+                </p>
+                <ol className="regions">
+                  {skipped.map((d) => (
+                    <li key={d.id}>
+                      <button
+                        type="button"
+                        className="region"
+                        onClick={() => select(d)}
+                        disabled={busy}
+                        aria-pressed={d.id === selected}
+                      >
+                        <span className="top">
+                          <span className="id">#{d.id}</span>
+                          <span className="flag skipped">
+                            <Icon name="skip-forward" size={12} />
+                            skipped
+                          </span>
+                        </span>
+                        {d.text && <span className="text" lang="ja">{d.text}</span>}
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
           </section>
 
           {current ? (
@@ -409,6 +479,54 @@ export default function SpotFix({
                 >
                   {busy ? <Icon name="loader" className="spin" /> : <Icon name="refresh" />}
                   {busy ? "Re-rendering…" : "Re-render this page"}
+                </button>
+              </div>
+            </section>
+          ) : currentSkipped ? (
+            <section className="card stack" key={`skipped-${currentSkipped.id}`}>
+              <div className="card-head" style={{ marginBottom: 0 }}>
+                <span className="icon-tile">
+                  <Icon name="skip-forward" />
+                </span>
+                <div>
+                  <h2>Skipped #{currentSkipped.id}</h2>
+                  <p className="sub">Left as drawn. Ctrl+Enter erases it and draws yours.</p>
+                </div>
+              </div>
+              {currentSkipped.text && (
+                <div className="source-text" lang="ja">{currentSkipped.text}</div>
+              )}
+              <div className="field">
+                <label className="label" htmlFor="spotfix-text">
+                  Translation
+                </label>
+                <textarea
+                  id="spotfix-text"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && draft.trim()) {
+                      e.preventDefault();
+                      confirm();
+                    }
+                  }}
+                  rows={4}
+                  disabled={busy}
+                  aria-describedby="skipped-hint"
+                />
+                <span id="skipped-hint" className="hint">
+                  The model marked this as not text. If it is, type the translation and the
+                  original lettering is erased under it.
+                </span>
+              </div>
+              <div className="row end">
+                <button
+                  className="btn primary"
+                  onClick={confirm}
+                  disabled={busy || !draft.trim()}
+                >
+                  {busy ? <Icon name="loader" className="spin" /> : <Icon name="pencil" />}
+                  {busy ? "Re-rendering…" : "Translate this bubble"}
                 </button>
               </div>
             </section>
