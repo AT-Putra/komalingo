@@ -14,6 +14,7 @@ import os
 import sys
 import types
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -260,7 +261,6 @@ def check_warmup(c):
     this offline check depend on the box it runs on.
     """
     import tempfile
-    import time as _time
 
     from fastapi.testclient import TestClient
 
@@ -321,16 +321,15 @@ def check_warmup(c):
         built = []
 
         def slow_session(weights, progress=None):
-            _time.sleep(0.5)
+            time.sleep(0.5)
             built.append(object())
             return built[-1]
 
         textmask.session, textmask._SESSION = slow_session, None
         detect._model = ocr_ja._get_model = inpainter._lama = (lambda: None)
-        import threading as _threading
-        warm = _threading.Thread(target=pipeline.warm_models, kwargs={"log": logs.append})
+        warm = threading.Thread(target=pipeline.warm_models, kwargs={"log": logs.append})
         warm.start()
-        _time.sleep(0.15)  # the warm-up holds the lock inside the slow build
+        time.sleep(0.15)  # the warm-up holds the lock inside the slow build
         with pipeline._MODEL_LOCK:
             page_view = textmask._model()
         warm.join(5)
@@ -340,17 +339,17 @@ def check_warmup(c):
 
         # -- the lifespan never waits on it --------------------------------
         def slow_warm(log=None):
-            _time.sleep(4)
+            time.sleep(4)
             return []
 
         pipeline.warm_models = slow_warm
         os.environ[pipeline.WARMUP_ENV] = "1"
         with tempfile.TemporaryDirectory(prefix="mt-warm-cache-") as tmp:
             os.environ["MT_CACHE_DIR"] = tmp
-            t0 = _time.perf_counter()
+            t0 = time.perf_counter()
             with TestClient(main.app) as client:
                 r = client.get("/api/health")
-                waited = _time.perf_counter() - t0
+                waited = time.perf_counter() - t0
             c.check(r.status_code == 200 and waited < 2.0,
                     f"[warmup] /api/health answers while a 4 s warm-up is still running: "
                     f"{r.status_code} in {waited:.2f}s")

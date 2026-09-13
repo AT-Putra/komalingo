@@ -1013,8 +1013,6 @@ def section_tier(c: Checks, cache_dir: str, record: dict):
     # pages per item inside four job workers. The GIL hides the race at the
     # default switch interval, so the interval is forced down for the run:
     # unlocked, 15 of 16 threads then died with KeyError from move_to_end.
-    import sys as _sys
-    import threading as _threading
 
     hammer = cache._Tier()
     tiles = [Image.new("L", (64, 64)) for _ in range(40)]
@@ -1034,16 +1032,16 @@ def section_tier(c: Checks, cache_dir: str, record: dict):
         except Exception as e:  # noqa: BLE001 -- the assert reports it
             errors.append(f"{type(e).__name__}: {e}")
 
-    workers = [_threading.Thread(target=churn, args=(s,)) for s in range(16)]
-    switch = _sys.getswitchinterval()
-    _sys.setswitchinterval(1e-6)
+    workers = [threading.Thread(target=churn, args=(s,)) for s in range(16)]
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
     try:
         for w in workers:
             w.start()
         for w in workers:
             w.join()
     finally:
-        _sys.setswitchinterval(switch)
+        sys.setswitchinterval(switch)
     c.check(not errors and len(hammer._items) <= cache.MAX_RASTERS,
             f"[tier] sixteen threads churning one LRU raise nothing and keep the bound: "
             f"{errors[:2]} ({len(hammer._items)} resident)")
@@ -1271,8 +1269,6 @@ def section_archive(c: Checks, cache_dir: str, out_dir: str):
     byte-for-byte, and two edits inside REPACK_DELAY cost one repack.
     """
     import zipfile
-
-    from fastapi.testclient import TestClient
 
     cache = _reset(cache_dir)
     from sidecar import main, pipeline

@@ -18,6 +18,7 @@ names of its own.
 """
 
 import asyncio
+import io
 import os
 import sys
 import tempfile
@@ -25,6 +26,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+from PIL import Image  # noqa: E402
 from sidecar.llm import LLMClient, ProviderError, Region  # noqa: E402
 from lib.env_local import load_env_local  # noqa: E402
 from lib.result import Checks, run  # noqa: E402
@@ -187,22 +189,18 @@ def main():
                 )
 
     # --- the page context is a JPEG, labelled as what it is ------------------
-    import io as _io
-
-    from PIL import Image as _Image
-
     from sidecar import pipeline
     from sidecar.llm import image_data_url
 
-    big = _Image.new("L", (1800, 2600), 255)
+    big = Image.new("L", (1800, 2600), 255)
     shot = pipeline.page_context_image(big)
-    with _Image.open(_io.BytesIO(shot)) as im:
+    with Image.open(io.BytesIO(shot)) as im:
         fmt, size = im.format, im.size
     c.check(fmt == "JPEG" and max(size) == pipeline.PAGE_CONTEXT_LONG_EDGE,
             f"[image] the page context is a JPEG downscaled to {pipeline.PAGE_CONTEXT_LONG_EDGE} px "
             f"on its long edge: {fmt} {size}, {len(shot)} bytes")
-    small = pipeline.page_context_image(_Image.new("P", (400, 600)))
-    with _Image.open(_io.BytesIO(small)) as im:
+    small = pipeline.page_context_image(Image.new("P", (400, 600)))
+    with Image.open(io.BytesIO(small)) as im:
         c.check(im.format == "JPEG" and im.size == (400, 600) and im.mode == "RGB",
                 f"[image] a page smaller than that is not upscaled, and a palette page is "
                 f"converted to RGB first: {im.format} {im.size} {im.mode}")

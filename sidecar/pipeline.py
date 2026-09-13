@@ -795,7 +795,6 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     _check_lang(lang)
     item_id = item_id or os.path.basename(os.fspath(src_path))
     model = _model_id(client)
-    records: list[dict] = []
     warning = None
     # Phase 6: every format AC-6 names, read through the AC-11 budget. The
     # budget's destination is dest_dir because that is where a member WOULD
@@ -973,7 +972,7 @@ def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
     # Each future holds its exception, and so do the loop variables: drop
     # them all, or the raise below cycles exception -> traceback -> this
     # frame -> future -> exception.
-    del futures
+    futures.clear()
     f = e = future = None  # noqa: F841
     if reader_error is not None:
         errors.append(reader_error)

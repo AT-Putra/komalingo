@@ -45,12 +45,14 @@ moved here from a live endpoint:
 import asyncio
 import contextlib
 import io
+import itertools
 import json
 import os
 import shutil
 import sys
 import tempfile
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
@@ -654,11 +656,11 @@ def check_page_window(c, tmp):
             # and a cold manga-ocr load inside the timed run is not.
             with contextlib.redirect_stdout(io.StringIO()):
                 pipeline.warm_models(log=lambda _m: None)
-            t0 = __import__("time").perf_counter()
+            t0 = time.perf_counter()
             with contextlib.redirect_stdout(captured):
                 record = pipeline.run_item(src, os.path.join(tmp, "window-out"), "check-window",
                                            client=client)
-            elapsed = __import__("time").perf_counter() - t0
+            elapsed = time.perf_counter() - t0
             peak, requests = slow.peak_concurrency, slow.chat_requests
     finally:
         if saved_cache is None:
@@ -702,9 +704,6 @@ def check_page_slots(c):
     Pages are faked here (the pipeline's page function is replaced by a
     sleeper that counts), so this is about _run_pages' scheduling alone.
     """
-    import sys as _sys
-    import time as _time
-
     real = (pipeline._run_cached_page, cache.page_hash, cache.put_placement)
     lock, live, peak = threading.Lock(), [0], [0]
 
@@ -719,7 +718,7 @@ def check_page_slots(c):
         with lock:
             live[0] += 1
             peak[0] = max(peak[0], live[0])
-        _time.sleep(0.05)
+        time.sleep(0.05)
         with lock:
             live[0] -= 1
         return {"page": ordinal}
@@ -727,8 +726,7 @@ def check_page_slots(c):
     # Distinct leading digits: _page_lock stripes on the first eight, and
     # id()-based hashes all shared one stripe, which serialised every page
     # and let the bound assert pass at a peak of 1.
-    import itertools as _itertools
-    serial = _itertools.count(1)
+    serial = itertools.count(1)
     cache.page_hash = lambda img: f"{(next(serial) * 2654435761) & 0xFFFFFFFF:08x}{0:08x}"
     cache.put_placement = lambda *a, **k: None
     try:
@@ -755,14 +753,14 @@ def check_page_slots(c):
         def failing_page(h, img, member, ordinal, *a, **k):
             started.append(ordinal)
             if ordinal == 1:
-                _time.sleep(0.01)
+                time.sleep(0.01)
                 raise RuntimeError("provider said no")
-            _time.sleep(0.3)
+            time.sleep(0.3)
             return {"page": ordinal}
 
         pipeline._run_cached_page = failing_page
-        switch = _sys.getswitchinterval()
-        _sys.setswitchinterval(1e-6)
+        switch = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
         extra = 0
         try:
             for _ in range(40):
@@ -774,7 +772,7 @@ def check_page_slots(c):
                     pass
                 extra += pipeline.PAGE_WINDOW + 1 in started
         finally:
-            _sys.setswitchinterval(switch)
+            sys.setswitchinterval(switch)
         c.check(extra == 0,
                 f"[slots] after page 1 fails, no page beyond the window is started: "
                 f"{extra}/40 trials started page {pipeline.PAGE_WINDOW + 1}")
@@ -840,9 +838,9 @@ def check_page_slots(c):
                 held += 1
             t = threading.Thread(target=image_item)
             t.start()
-            __import__("time").sleep(0.3)
+            time.sleep(0.3)
             cancel.set()
-            __import__("time").sleep(0.1)
+            time.sleep(0.1)
         finally:
             for _ in range(held):
                 slots.release()
