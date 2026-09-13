@@ -26,6 +26,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -126,7 +127,27 @@ async def lifespan(_app: FastAPI):
         # that will not launch because of a directory the user could delete.
         print(f"cache: startup prune skipped ({type(e).__name__}: {e})",
               file=sys.stderr, flush=True)
+    if os.environ.get(pipeline.WARMUP_ENV, "") == "1":
+        start_warmup()
     yield
+
+
+def start_warmup() -> threading.Thread:
+    """pipeline.warm_models on a daemon thread; the lifespan never waits on it.
+
+    /api/health answers the moment the server is up, as it did before: the
+    app's splash waits on health, and a splash that waited 16 s of model
+    loading would be the same wait moved somewhere worse.
+    """
+    def run():
+        t0 = time.monotonic()
+        loaded = pipeline.warm_models()
+        print(f"warm-up: {', '.join(loaded) or 'nothing'} loaded in {time.monotonic() - t0:.1f}s",
+              file=sys.stderr, flush=True)
+
+    t = threading.Thread(target=run, name="model-warmup", daemon=True)
+    t.start()
+    return t
 
 
 app = FastAPI(title="Komalingo sidecar", lifespan=lifespan)

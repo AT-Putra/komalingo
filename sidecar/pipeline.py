@@ -21,13 +21,14 @@ import io
 import json
 import os
 import re
+import sys
 import threading
 import time
 from dataclasses import asdict
 
 from PIL import Image
 
-from . import atomic, cache, imaging, inpainter, ocr_cjk, ocr_ja, safety, typeset
+from . import atomic, cache, imaging, inpainter, models, ocr_cjk, ocr_ja, safety, typeset
 from . import detect as detector
 from .containers import archive, pdf
 
@@ -427,6 +428,55 @@ def write_regions(record: dict, dest_dir) -> str:
 # Serialises the models -- detector, OCR, and since Phase 2c the text-mask and
 # LaMa sessions inpaint() runs -- across concurrent jobs. See run_item.
 _MODEL_LOCK = threading.Lock()
+
+# Set by Tauri, and only by Tauri, like MT_EXIT_ON_STDIN_EOF: the app's own
+# sidecar warms its models at launch, while a check that starts a sidecar or
+# a TestClient does not load a GPU model it never asked for.
+WARMUP_ENV = "MT_WARMUP"
+
+
+def warm_models(log=None) -> list[str]:
+    """Load the models every page needs, before the first page asks. Returns what loaded.
+
+    Measured on a real page that needs all of them: 19.1 s for the first page
+    of a fresh process against 3.3 s once loaded -- manga-ocr, the text-mask
+    session and the LaMa session are the difference, and without this the
+    user pays it on the first page of every launch.
+
+    Each model loads under _MODEL_LOCK through the same lazy global the
+    pipeline uses, so a page that arrives mid-warm-up waits for the model
+    rather than building a second copy. A model not yet on disk is skipped,
+    not fetched: a download belongs on a page, where its progress is shown.
+    A failure is logged and skipped; the page that needs the model raises
+    the same named error it always did.
+    """
+    log = log or (lambda msg: print(msg, file=sys.stderr, flush=True))
+    steps = [
+        ("detector", [detector.WEIGHTS], detector._model),
+        ("manga-ocr", ["manga-ocr"], ocr_ja._get_model),
+    ]
+    try:
+        erasing = inpainter.resolve() != inpainter.FILL
+    except inpainter.EraseError as e:
+        log(f"warm-up: erase models skipped ({e.reason})")
+        erasing = False
+    if erasing:
+        steps += [
+            ("text-mask", [inpainter.textmask.WEIGHTS], inpainter.textmask._model),
+            ("lama", [inpainter.WEIGHTS], inpainter._lama),
+        ]
+    loaded = []
+    for name, weights, load in steps:
+        if not all(models.on_disk(w) for w in weights):
+            log(f"warm-up: {name} not downloaded yet; the first page fetches it")
+            continue
+        try:
+            with _MODEL_LOCK:
+                load()
+            loaded.append(name)
+        except Exception as e:  # noqa: BLE001 -- logged; the page raises it properly
+            log(f"warm-up: {name} failed to load ({type(e).__name__}: {e})")
+    return loaded
 
 
 class Cancelled(Exception):

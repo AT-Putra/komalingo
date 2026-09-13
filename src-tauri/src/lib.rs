@@ -124,6 +124,11 @@ fn spawn(app: &tauri::AppHandle) -> Result<(), String> {
         // to bind, and the UI talked to the orphan (sidecar/main.py,
         // watch_parent).
         .env("MT_EXIT_ON_STDIN_EOF", "1")
+        // Load the OCR and erase models in the background as soon as the
+        // sidecar is up, so the first page does not pay ~16 s for them
+        // (sidecar/pipeline.py, warm_models). Only this sidecar: checks that
+        // launch one do not load GPU models they never asked for.
+        .env("MT_WARMUP", "1")
         .spawn()
         .map_err(|e| e.to_string())?;
 

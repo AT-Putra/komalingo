@@ -331,6 +331,28 @@ def _ensure_directory(name: str, entry: dict, progress=None) -> str:
     return atomic.long_path(directory)
 
 
+def on_disk(name: str) -> bool:
+    """Whether MANIFEST entry `name` is fully downloaded, by name and size only.
+
+    No hashing: this answers "would ensure() have to download?", cheaply, for
+    the launch warm-up, which must load what is there and never start a
+    download nobody can see progress for. ensure() still verifies digests
+    when the model is actually used.
+    """
+    entry = MANIFEST.get(name)
+    if entry is None:
+        return False
+    if "files" in entry:
+        base = os.path.join(model_dir(), name)
+        files = [(os.path.join(base, f), meta["size"]) for f, meta in entry["files"].items()]
+    else:
+        files = [(os.path.join(model_dir(), os.path.basename(entry["url"].split("?")[0])), entry["size"])]
+    try:
+        return all(os.path.getsize(atomic.long_path(p)) == size for p, size in files)
+    except OSError:
+        return False
+
+
 def ensure(name: str, progress=None) -> str:
     """Fetch MANIFEST entry `name` if it is not already on disk. Returns its path.
 
@@ -435,4 +457,13 @@ def onnx_session(path: str):
     provider, _ = select_provider()
     options = onnxruntime.SessionOptions()
     options.log_severity_level = 3  # errors only
+    if provider == "CUDAExecutionProvider":
+        # HEURISTIC, not onnxruntime's EXHAUSTIVE default: exhaustive benchmarks
+        # every cuDNN convolution algorithm per shape. Measured on the LaMa
+        # session (RTX 5070 Ti): ~2 s more to create and ~0.7 s more on the
+        # first run, for the same ~80 ms steady run -- the search found nothing
+        # the heuristic did not.
+        return onnxruntime.InferenceSession(
+            path, sess_options=options,
+            providers=[(provider, {"cudnn_conv_algo_search": "HEURISTIC"})])
     return onnxruntime.InferenceSession(path, sess_options=options, providers=[provider])
