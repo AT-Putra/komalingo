@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { BrandMark } from "./components/BrandMark";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Icon, type IconName } from "./components/Icon";
 import { ProgressBar } from "./components/Progress";
@@ -290,7 +291,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">
-            <Icon name="book" size={18} />
+            <BrandMark size={28} />
           </span>
           <div>
             <div className="brand-name">Komalingo</div>

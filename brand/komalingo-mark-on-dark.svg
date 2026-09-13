@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Komalingo">
+  <title>Komalingo</title>
+  <defs>
+    <mask id="m-gutter" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <line x1="306" y1="-10" x2="206" y2="522" stroke="#000" stroke-width="30"/>
+    </mask>
+    <clipPath id="m-left"><polygon points="0,0 304,0 208,512 0,512"/></clipPath>
+    <clipPath id="m-right"><polygon points="304,0 512,0 512,512 208,512"/></clipPath>
+  </defs>
+  <g mask="url(#m-gutter)">
+    <g clip-path="url(#m-left)" fill="#F1F5F9"><ellipse cx="262" cy="232" rx="206" ry="176"/><path d="M128 350 L78 474 L240 396 Z"/></g>
+    <g clip-path="url(#m-right)" fill="#E8452C"><ellipse cx="262" cy="232" rx="206" ry="176"/><path d="M128 350 L78 474 L240 396 Z"/></g>
+  </g>
+</svg>

@@ -227,9 +227,7 @@ pre,
   place-items: center;
   width: 32px;
   height: 32px;
-  border-radius: var(--r-sm);
-  background: var(--accent);
-  color: var(--on-accent);
+  color: var(--fg);
   flex: none;
 }
 .brand-name {

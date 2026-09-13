@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/svg+xml" href="/komalingo.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Komalingo</title>
     <script>
@@ -37,11 +37,11 @@
       html[data-theme="light"] #splash { background: #f4f6fa; color: #526176; }
       #splash.out { opacity: 0; pointer-events: none; }
       .splash-mark {
-        display: grid; place-items: center; width: 48px; height: 48px;
-        border-radius: 10px; background: #22c55e; color: #052e16;
+        display: grid; place-items: center; width: 56px; height: 56px;
+        color: #f1f5f9;
         animation: splash-breathe 1.6s ease-in-out infinite;
       }
-      html[data-theme="light"] .splash-mark { background: #16a34a; color: #fff; }
+      html[data-theme="light"] .splash-mark { color: #0f172a; }
       .splash-name { font-weight: 600; letter-spacing: -0.01em; color: #f1f5f9; }
       html[data-theme="light"] .splash-name { color: #0f172a; }
       .splash-bar {
@@ -75,8 +75,20 @@
     <div id="root"></div>
     <div id="splash" role="status" aria-busy="true" aria-live="polite">
       <div class="splash-mark" aria-hidden="true">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" />
+        <!-- brand/komalingo-mark.svg; the left half follows the theme via currentColor -->
+        <svg width="56" height="56" viewBox="0 0 512 512">
+          <defs>
+            <mask id="splash-g" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+              <rect width="512" height="512" fill="#fff" />
+              <line x1="306" y1="-10" x2="206" y2="522" stroke="#000" stroke-width="30" />
+            </mask>
+            <clipPath id="splash-l"><polygon points="0,0 304,0 208,512 0,512" /></clipPath>
+            <clipPath id="splash-r"><polygon points="304,0 512,0 512,512 208,512" /></clipPath>
+          </defs>
+          <g mask="url(#splash-g)">
+            <g clip-path="url(#splash-l)" fill="currentColor"><ellipse cx="262" cy="232" rx="206" ry="176" /><path d="M128 350 L78 474 L240 396 Z" /></g>
+            <g clip-path="url(#splash-r)" fill="#E8452C"><ellipse cx="262" cy="232" rx="206" ry="176" /><path d="M128 350 L78 474 L240 396 Z" /></g>
+          </g>
         </svg>
       </div>
       <div class="splash-name">Komalingo</div>
