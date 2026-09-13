@@ -213,6 +213,32 @@ def main():
         c.check(len(sent) == 1 and sent[0]["image_url"]["url"].startswith("data:image/jpeg;base64,"),
                 "[image] and the request carries the page as image/jpeg")
 
+    # --- region boxes travel with the page image, and only with it ----------
+    boxed = [Region(1, "a", box=[10, 20, 300, 400]), Region(2, "b", box=[500, 600, 900, 950])]
+    with StubProvider(delay=0) as stub:
+        client = LLMClient(stub.url, None, MODEL)
+        asyncio.run(client.translate_page(boxed, page_image=shot))
+        vision_text = stub.last_payload["messages"][0]["content"][0]["text"]
+        from lib.stub_provider import requested_items
+        vision_items = requested_items(stub.last_payload)
+        asyncio.run(client.translate_page(boxed))
+        text_only = stub.last_payload["messages"][0]["content"]
+        text_items = requested_items(stub.last_payload)
+    c.check([i.get("box") for i in vision_items] == [[10, 20, 300, 400], [500, 600, 900, 950]]
+            and "thousandths of the page" in vision_text,
+            f"[boxes] with the page image each region carries its box and the instruction says "
+            f"what the numbers are: {vision_items}")
+    c.check(isinstance(text_only, str) and all("box" not in i for i in text_items)
+            and "thousandths" not in text_only and [i["id"] for i in text_items] == [1, 2],
+            f"[boxes] a text-only request carries no boxes and no box instruction, and the stub "
+            f"still reads its ids: {text_items}")
+
+    from sidecar import pipeline as _pl
+    page = Image.new("RGB", (1000, 2000))
+    c.check(_pl._box({"polygon": [[100, 200], [300, 200], [300, 1000], [100, 1000]]}, page)
+            == [100, 100, 300, 500] and _pl._box({"polygon": []}, page) is None,
+            "[boxes] pipeline._box scales a polygon's bounding box to thousandths of the page")
+
     # --- a 200 framed as an event stream is still a reply --------------------
     # Measured on a gateway model (ag/gemini-pro-agent): a request that never
     # asked to stream came back as text/event-stream, and the client's

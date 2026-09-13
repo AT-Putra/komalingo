@@ -683,8 +683,14 @@ def read_translation(page_hash_: str, lang: str, model: str) -> dict:
     return {str(k): v for k, v in data.items()} if isinstance(data, dict) else {}
 
 
-def write_translation(page_hash_: str, lang: str, model: str, texts: dict) -> dict:
+def write_translation(page_hash_: str, lang: str, model: str, texts: dict,
+                      boxed: bool = False) -> dict:
     """Merge a fresh translation in, and never overwrite an ``edited`` entry.
+
+    ``boxed`` marks the nulls in ``texts`` as decided by a model that saw the
+    page AND each region's box (llm.BOX_INSTRUCTION). A null without the mark
+    was decided blind -- see pipeline._apply_translations, which asks it once
+    more.
 
     A re-run must not silently discard the user's correction, so the merge is
     by region id with the stored edit winning. An edited region that the new
@@ -701,10 +707,28 @@ def write_translation(page_hash_: str, lang: str, model: str, texts: dict) -> di
         if existing.get(rid, {}).get("edited"):
             continue
         merged[rid] = {"text": text, "edited": False}
+        if text is None and boxed:
+            merged[rid]["boxed"] = True
     _write_json(
         os.path.join(page_dir(page_hash_), translation_name(lang, model)), merged
     )
     return merged
+
+
+def has_unmarked_nulls(page_hash_: str) -> bool:
+    """Whether any translation file of the page holds a null decided without boxes."""
+    d = atomic.long_path(page_dir(page_hash_))
+    try:
+        names = [n for n in os.listdir(d) if n.startswith("tr_") and n.endswith(".json")]
+    except OSError:
+        return False
+    for name in names:
+        data = _read_json(os.path.join(d, name), {}) or {}
+        if isinstance(data, dict) and any(
+                isinstance(v, dict) and v.get("text", "") is None and not v.get("boxed")
+                for v in data.values()):
+            return True
+    return False
 
 
 def write_edit(page_hash_: str, lang: str, model: str, region_id, text: str) -> dict:

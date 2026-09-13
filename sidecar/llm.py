@@ -106,6 +106,19 @@ NOT_TEXT_INSTRUCTION = (
     "for that region and translate nothing there.\n"
 )
 
+# "At that spot" meant nothing while the spot was not in the request: the
+# model got each region's OCR text and had to guess where on the page it was.
+# Measured on three hand-labelled real pages, 21 runs per prompt: without
+# boxes 13-15 of 47 regions flipped between null and translated from run to
+# run -- faces the detector fired on were typeset over on some runs, and a
+# real line was dropped on others; with boxes 4-5 of 47 flipped, no dialogue
+# was dropped, and the misfires were rejected every time. The cost measured
+# one request at a time was about 5 s a page.
+BOX_INSTRUCTION = (
+    "Each region's box is [x0,y0,x1,y1] in thousandths of the page's width and "
+    "height, from the top-left corner.\n"
+)
+
 # Phase 5: the prompt is ASSEMBLED from the job's source and target rather
 # than hardcoding "Japanese to English". The names are what the model reads;
 # the codes are what the pipeline, the cache and the API carry.
@@ -241,6 +254,9 @@ class Region:
     id: int
     text: str
     polygon: list = field(default_factory=list)
+    # [x0, y0, x1, y1] in thousandths of the page (see BOX_INSTRUCTION). Sent
+    # only with the page image: a text-only model has no page to place it on.
+    box: list | None = None
 
 
 class LLMClient:
@@ -360,14 +376,17 @@ class LLMClient:
         # The glossary sits between the instruction and the regions, and the
         # regions stay LAST: the stub provider and check_id read the request
         # back from the text after the final "regions " marker.
+        boxes = with_image and any(r.box for r in regions)
+        listed = [{"id": r.id, "text": r.text, **({"box": r.box} if boxes and r.box else {})}
+                  for r in regions]
         instruction = (
             f"Translate the {SOURCE_NAMES[source]} in each region to {target}. "
             f"Reply with JSON: {{\"translations\":[{{\"id\":<id>,\"text\":<{target.lower()}>}}]}}. "
             "Use the whole page as context.\n"
             + (NOT_TEXT_INSTRUCTION if with_image else "")
+            + (BOX_INSTRUCTION if boxes else "")
             + glossary_text(lang)
-            + "regions " + json.dumps([{"id": r.id, "text": r.text} for r in regions],
-                                      ensure_ascii=False)
+            + "regions " + json.dumps(listed, ensure_ascii=False)
         )
         if with_image:
             content = [

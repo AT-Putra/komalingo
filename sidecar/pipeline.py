@@ -262,7 +262,8 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
         from .llm import Region
 
         out = asyncio.run(
-            client.translate_page([Region(id=r["id"], text=r["text"]) for r in asked],
+            client.translate_page([Region(id=r["id"], text=r["text"], box=_box(r, img))
+                                   for r in asked],
                                   page_image=page_context_image(img) if img is not None else None,
                                   lang=lang, source=source)
         ) if asked else {}
@@ -274,11 +275,31 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
             # translation cache so a cache hit makes the same call.
             if text is None:
                 r["not_text"] = True
-                r["dismiss_reason"] = "not on the page (vision model)"
+                r["dismiss_reason"] = VISION_REASON
             r["translation"] = text or ""
     for r in regions:
         r.setdefault("translation", "")
     emit("translate", f"{len(regions)} regions", page, 50)
+
+
+def _box(region: dict, img: Image.Image | None) -> list[int] | None:
+    """The region's bounding box in thousandths of the page, for the vision model.
+
+    Thousandths of the SOURCE page, which is the frame the polygon is in; the
+    context image is a scaled copy of the same page, so the fractions hold for
+    it too.
+    """
+    if img is None or not region.get("polygon"):
+        return None
+    w, h = img.size
+    x0, y0, x1, y1 = _bbox(region["polygon"])
+    return [round(1000 * x0 / w), round(1000 * y0 / h), round(1000 * x1 / w), round(1000 * y1 / h)]
+
+
+# Why a region the vision model answered null for is off the page. A DECISION,
+# per (lang, model), not a property of the page: _content_region strips it
+# before the record is cached, and the translation file puts it back.
+VISION_REASON = "not on the page (vision model)"
 
 
 def dismiss(regions: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -574,8 +595,36 @@ class CacheMiss(Exception):
 CONTENT_KEYS = ("page_hash", "src_format", "source", "detections", "fit_summary", "regions")
 
 
-def _persist(h: str, record: dict) -> None:
-    cache.write_regions(h, {k: record[k] for k in CONTENT_KEYS if k in record})
+def _persist(h: str, record: dict, detected: list[dict], erased, complete: bool = True) -> None:
+    """Write the page's content record: EVERY detected region, not the kept ones.
+
+    Until this, the record held only the regions the run's model kept, so a
+    null from one model removed the region for every model and language that
+    read the page later -- the translation file of the next (lang, model) had
+    no chance to disagree, because the region was gone from the page (124 of
+    165 cached pages on the developer's box carried such nulls). Now the
+    regions are stored as detected, vision decisions stripped, and each run's
+    own translation file dismisses what that model dismissed.
+
+    `erased` is the id set the cached raster has erased, so a run that keeps
+    a different set re-inpaints instead of typesetting over text nobody
+    erased, or leaving white where a dismissed region's art belongs.
+    `complete` is False for a legacy record re-cached without re-detection:
+    its regions are still the old kept set, and all_regions must not claim
+    otherwise.
+    """
+    content = {k: record[k] for k in CONTENT_KEYS if k in record}
+    content["regions"] = [_content_region(r) for r in detected]
+    content["erased"] = sorted(erased)
+    content["all_regions"] = complete
+    cache.write_regions(h, content)
+
+
+def _content_region(region: dict) -> dict:
+    """The region as the page holds it: a vision model's null is not content."""
+    if region.get("dismiss_reason") != VISION_REASON:
+        return region
+    return {k: v for k, v in region.items() if k not in ("not_text", "dismiss_reason")}
 
 
 def _model_id(client) -> str:
@@ -589,29 +638,51 @@ def _model_id(client) -> str:
 
 
 def _load_translations(regions: list[dict], h: str, lang: str, model: str) -> bool:
-    """Fill translations from the cache. True only if EVERY region was covered.
+    """Fill translations from the cache. True only if EVERY region was covered."""
+    return not _apply_translations(regions, h, lang, model)
 
-    Partial coverage returns False and the caller re-translates the whole page.
-    That is one wasted request against a half-written entry; the alternative is
-    a page where some bubbles carry last run's text and some carry none, with
-    nothing on screen saying which.
+
+def _apply_translations(regions: list[dict], h: str, lang: str, model: str,
+                        recheck: bool = False) -> set:
+    """Fill translations from the cache. Returns the ids still to translate.
+
+    A stored null dismisses its region, as the model decided -- unless
+    `recheck` is set (the client can see the page) and the null carries no
+    `boxed` mark: it was decided before regions carried their boxes, blind to
+    where the region was (measured: 13-15 of 47 regions flipped between runs
+    that way), and it is asked once more. A null on a region OCR already set
+    aside (punctuation only) is content, not a decision, and is never re-asked.
+    A stored translation lifts a vision dismissal left on the region by an
+    earlier pass over the same dicts.
+
+    The caller translates only the returned ids, and writes only those back:
+    a page with one gap is re-asked for the gap, with every stored translation
+    and every edit left exactly as it was.
     """
     stored = cache.read_translation(h, lang, model)
-    if not stored:
-        return False
-    covered = True
+    missing = set()
     for r in regions:
         entry = stored.get(str(r["id"]))
+        vision_flag = r.get("dismiss_reason") == VISION_REASON
         if entry is None:
-            covered = False
+            missing.add(r["id"])
             continue
         text = entry.get("text", "")
-        if text is None:  # stored null: dismissed on the first run
+        if text is None:
+            if recheck and not entry.get("boxed") and (vision_flag or not r.get("not_text")):
+                if vision_flag:
+                    r.pop("not_text", None)
+                    r.pop("dismiss_reason", None)
+                missing.add(r["id"])
+                continue
             r["not_text"] = True
-            r.setdefault("dismiss_reason", "not on the page (vision model)")
+            r.setdefault("dismiss_reason", VISION_REASON)
+        elif vision_flag:
+            r.pop("not_text", None)
+            r.pop("dismiss_reason", None)
         r["translation"] = text or ""
         r["edited"] = bool(entry.get("edited"))
-    return covered
+    return missing
 
 
 _UNSAFE_SEGMENT = re.compile(r'[<>:"|?*\x00-\x1f]')
@@ -1035,8 +1106,19 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         # other engine's. A miss, so this run's engine reads the page.
         cached = None
 
-    if cached is not None:
+    # A client that sees the page decides not-text with each region's box, so
+    # its nulls are trusted -- and a legacy null, decided without one, is
+    # asked again. A legacy record (kept regions only) whose page holds such a
+    # null has lost the very regions to re-ask, so the page is re-detected
+    # once to get them back; detection is deterministic on the same pixels,
+    # and a record it does not reproduce is left as it was.
+    recheck = client is not None and not getattr(client, "text_only", False)
+    legacy = (cached is not None and not cached.get("all_regions") and recheck
+              and cache.has_unmarked_nulls(h))
+    erased = None
+    if cached is not None and not legacy:
         regions = cached["regions"]
+        erased = set(cached.get("erased", [r["id"] for r in regions]))
         fmt, ocr_calls = cached.get("src_format", "PNG"), 0
         if src_fmt == pdf.PDF and fmt not in ("JPEG", "PNG"):
             # The page was first seen as, say, a WEBP member of a
@@ -1062,8 +1144,18 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         with _MODEL_LOCK:
             regions = detect(img, ordinal)
             ocr_calls = ocr(regions, img, ordinal, source)
+        if legacy:
+            before = {r["id"]: json.dumps(r["polygon"]) for r in cached["regions"]}
+            again = {r["id"]: json.dumps(r["polygon"]) for r in regions}
+            erased = set(before)
+            if any(again.get(rid) != poly for rid, poly in before.items()):
+                print(f"cache: page {h[:12]} re-detected differently from its cached record; "
+                      f"its not-text answers are kept as they were", file=sys.stderr, flush=True)
+                regions, recheck, legacy = cached["regions"], False, False
+    complete = cached is None or legacy or bool(cached.get("all_regions"))
 
-    if _load_translations(regions, h, lang, model):
+    missing = _apply_translations(regions, h, lang, model, recheck=recheck)
+    if not missing:
         emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
     else:
         # The second check, before the stage that talks to the provider.
@@ -1076,9 +1168,14 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         # cost is one page's re-detect on the next run.
         _check_cancel(cancel, item_id, pages_done)
         translate(regions, ordinal, client, lang, source, img=img)
+        # The whole page was asked, for context; only what was missing is
+        # written. A stored translation the model now words differently is
+        # not replaced, and the read-back below puts it back on the region.
         cache.write_translation(
             h, lang, model,
-            {r["id"]: None if r.get("not_text") else r.get("translation", "") for r in regions},
+            {r["id"]: None if r.get("not_text") else r.get("translation", "")
+             for r in regions if r["id"] in missing},
+            boxed=recheck,
         )
         # Read back, deliberately. write_translation refuses to
         # overwrite an `edited` entry, so the file it just wrote and
@@ -1096,10 +1193,17 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
     # Its translation is already cached for the resume; its detect and OCR
     # are not yet persisted, so the resume re-detects it, as before.
     _check_cancel(cancel, item_id, pages_done)
-    regions, dismissed = dismiss(regions)
+    detected = regions
+    regions, dismissed = dismiss(detected)
 
-    if cached is not None:
-        cleaned, inpaint_calls = cache.read_raster(h), 0
+    # The cached raster erased one set of regions. This run's model may keep
+    # another -- a region another model dismissed, or dismiss one it kept --
+    # and then the raster is wrong for this page either way: text left under
+    # a translation, or a patch of erased art where nothing will be drawn.
+    kept = {r["id"] for r in regions}
+    cleaned = cache.read_raster(h) if erased == kept else None
+    if cleaned is not None:
+        inpaint_calls = 0
         emit("inpaint", "0 calls (cached)", ordinal, 65)
     else:
         cleaned, inpaint_calls = inpaint(img, regions, ordinal)
@@ -1116,7 +1220,7 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         "src_format": fmt,
         "source": source,
         "output": out_path,
-        "cached": cached is not None,
+        "cached": cached is not None and not ocr_calls,
         "detections": len(regions),
         "ocr_calls": ocr_calls,
         "inpaint_calls": inpaint_calls,
@@ -1132,7 +1236,7 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
     # by render, so a cached record whose region was edited shorter must
     # not keep last run's fit_compromised. Nothing here reads a stored
     # flag back in as input -- see cache.py's closing paragraph.
-    _persist(h, record)
+    _persist(h, record, detected, kept, complete)
     return record
 
 
@@ -1419,8 +1523,15 @@ def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
             f"for regions {uncovered}; run the item at that language first",
             "translation",
         )
+    if stored.get(str(region_id), {}).get("text", "") is None:
+        raise CacheMiss(f"region {region_id} is not on page {ordinal} under model {model!r}",
+                        "region")
+    erased = set(record.get("erased", [r["id"] for r in regions]))
+    complete = bool(record.get("all_regions"))
     cache.write_edit(h, lang, model, region_id, text)
     _load_translations(regions, h, lang, model)
+    detected = regions
+    regions, _dismissed = dismiss(detected)
 
     drawn, fit_summary = render(
         cleaned, regions, ordinal, client, allow_retranslate=False
@@ -1462,7 +1573,7 @@ def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
         archive_stale=True,
         repack=None,
     )
-    _persist(h, record)
+    _persist(h, record, detected, erased, complete)
     record["cache_warning"] = cache.enforce_cap(job_id)
     # A placement written before src_path existed has no archive to rebuild
     # from here: the flag stays, the status stays None, and the UI says the

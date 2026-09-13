@@ -1517,6 +1517,166 @@ def _archive_edits(c, pipeline, main, job, item, archive_path, before,
     )
 
 
+def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
+    """[not-text] each (lang, model) decides dismissal; legacy nulls are asked again.
+
+    Model A dismisses a region; model B, reading the same cached page, is
+    still offered it and typesets it, and the raster is re-erased for B's
+    set; back under A nothing is requested and the region's art comes back.
+    Then the page is rewritten in the LEGACY shape -- regions.json without the
+    dismissed region, the null unmarked, one stored translation and one edit
+    beside it -- and: a text-only client leaves it alone; a record that
+    re-detection does not reproduce is left alone and says so; a vision
+    client re-detects once, asks once, changes only the null region, keeps
+    the translation and the edit, and writes the new format; a second run
+    asks nothing.
+    """
+    import contextlib
+    import io
+
+    import numpy as np
+
+    from sidecar import pipeline
+    from sidecar.containers import read_cbz
+    from sidecar.llm import LLMClient
+
+    cache = _reset(cache_dir)
+    # Two regions a page in this fixture; not ordinal 3 or 7, which share one
+    # page hash and would move under each other's runs.
+    page = next(p for p in record["pages"] if len(p["regions"]) >= 2 and p["page"] not in (3, 7))
+    h, ordinal = page["page_hash"], page["page"]
+    target = page["regions"][0]["id"]
+    source = next(img for o, _m, img in _quiet(lambda: list(read_cbz.pages(CBZ)))[0] if o == ordinal)
+    source = np.asarray(source.convert("RGB"), dtype=np.int16)
+
+    def run(client, job):
+        rec, _ = _quiet(pipeline.run_item, CBZ, out_dir, job, client=client)
+        return next(p for p in rec["pages"] if p["page"] == ordinal)
+
+    def tr_path(model):
+        return os.path.join(cache.page_dir(h), cache.translation_name("en", model))
+
+    def under(region_id):
+        rec = cache.read_regions(h)
+        poly = next(r["polygon"] for r in rec["regions"] if r["id"] == region_id)
+        from PIL import Image, ImageDraw
+        mask = Image.new("L", (source.shape[1], source.shape[0]), 0)
+        ImageDraw.Draw(mask).polygon([tuple(p) for p in poly], fill=1)
+        inside = np.asarray(mask, dtype=bool)
+        raster = np.asarray(cache.read_raster(h).convert("RGB"), dtype=np.int16)
+        return float(np.abs(raster[inside] - source[inside]).max()) if inside.any() else 0.0
+
+    with StubProvider(delay=0, replies={target: None}) as stub_a, StubProvider(delay=0) as stub_b:
+        a = LLMClient(stub_a.url, "", "model-a")
+        b = LLMClient(stub_b.url, "", "model-b")
+
+        got = run(a, "nt-a")
+        rec = cache.read_regions(h)
+        entry = json.load(open(tr_path("model-a"), encoding="utf-8")).get(str(target))
+        c.check(target in [d["id"] for d in got["dismissed"]]
+                and target in [r["id"] for r in rec["regions"]]
+                and not any(r.get("not_text") and r["id"] == target for r in rec["regions"])
+                and rec.get("all_regions") is True and target not in rec.get("erased", []),
+                f"[not-text] model A's null dismisses the region on the page, but the cached "
+                f"record keeps it, undecided, and records it as not erased "
+                f"(all_regions={rec.get('all_regions')}, erased={rec.get('erased')})")
+        c.check(entry == {"text": None, "edited": False, "boxed": True},
+                f"[not-text] and A's null is stored with the boxed mark: {entry}")
+
+        before = stub_b.chat_requests
+        got_b = run(b, "nt-b")
+        kept_b = {r["id"]: r for r in got_b["regions"]}
+        c.check(target in kept_b and kept_b[target].get("translation") == f"STUB {target}"
+                and got_b["inpaint_calls"] > 0 and target in cache.read_regions(h)["erased"]
+                and stub_b.chat_requests > before,
+                f"[not-text] model B is offered the region A dismissed, typesets it, and the "
+                f"page is re-erased for B's set (inpaint_calls={got_b['inpaint_calls']}, "
+                f"erased={cache.read_regions(h)['erased']})")
+
+        before = stub_a.chat_requests
+        got_a2 = run(a, "nt-a2")
+        c.check(stub_a.chat_requests == before and target in [d["id"] for d in got_a2["dismissed"]]
+                and got_a2["inpaint_calls"] > 0 and under(target) == 0.0,
+                f"[not-text] back under A: zero requests, the region dismissed again, and its art "
+                f"restored in the re-erased raster (requests +{stub_a.chat_requests - before}, "
+                f"max delta under it {under(target):.0f})")
+
+    # -- the legacy shape ------------------------------------------------------
+    rec = cache.read_regions(h)
+    kept = [r for r in rec["regions"] if r["id"] != target]
+    other = kept[0]["id"]
+    legacy = {k: v for k, v in rec.items() if k not in ("all_regions", "erased")}
+    legacy["regions"] = kept
+    base = json.load(open(tr_path("model-a"), encoding="utf-8"))
+
+    def make_legacy(other_entry, tamper=False):
+        shape = json.loads(json.dumps(legacy))
+        if tamper:
+            shape["regions"][0]["polygon"][0][0] += 1
+        cache.write_regions(h, shape)
+        stored = dict(base, **{str(target): {"text": None, "edited": False},
+                               str(other): other_entry})
+        cache._write_json(tr_path("model-a"), stored)
+
+    keep = {"text": "KEEP ME", "edited": False}
+    edit = {"text": "MY EDIT", "edited": True}
+    with StubProvider(delay=0, replies={target: "NOW TEXT"}) as stub:
+        blind = LLMClient(stub.url, "", "model-a")
+        blind.text_only = True
+        make_legacy(keep)
+        got = run(blind, "nt-legacy-textonly")
+        after = json.load(open(tr_path("model-a"), encoding="utf-8"))
+        c.check(stub.chat_requests == 0
+                and target not in [r["id"] for r in got["regions"]]
+                and after.get(str(target)) == {"text": None, "edited": False},
+                f"[not-text] a text-only client never re-asks a legacy null nor brings the region "
+                f"back: {stub.chat_requests} requests, stored {after.get(str(target))}")
+        c.check(cache.read_regions(h).get("all_regions") is False,
+                "[not-text] and re-caching a legacy record without re-detection does not claim "
+                "all_regions")
+
+        seeing = LLMClient(stub.url, "", "model-a")
+        make_legacy(keep, tamper=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            run(seeing, "nt-legacy-mismatch")
+        c.check(stub.chat_requests == 0 and "re-detected differently" in err.getvalue()
+                and json.load(open(tr_path("model-a"), encoding="utf-8")).get(str(target))
+                == {"text": None, "edited": False},
+                f"[not-text] a legacy record re-detection does not reproduce is left as it was, "
+                f"and says so: {stub.chat_requests} requests, stderr {err.getvalue()[-120:]!r}")
+
+        for label, other_entry in (("stored translation", keep), ("edit", edit)):
+            make_legacy(other_entry)
+            before = stub.chat_requests
+            got = run(seeing, f"nt-legacy-vision-{label[:5]}")
+            after = json.load(open(tr_path("model-a"), encoding="utf-8"))
+            kept_now = {r["id"]: r for r in got["regions"]}
+            rec_now = cache.read_regions(h)
+            c.check(stub.chat_requests == before + 1,
+                    f"[not-text] ({label}) a vision client re-asks the legacy page once: "
+                    f"+{stub.chat_requests - before} requests")
+            c.check(after.get(str(target)) == {"text": "NOW TEXT", "edited": False}
+                    and after.get(str(other)) == other_entry,
+                    f"[not-text] ({label}) only the null region takes the new answer; the "
+                    f"{label} beside it is untouched: {after.get(str(target))}, {after.get(str(other))}")
+            c.check(target in kept_now and kept_now[target]["translation"] == "NOW TEXT"
+                    and kept_now[other]["translation"] == other_entry["text"]
+                    and got["ocr_calls"] > 0 and got["inpaint_calls"] > 0,
+                    f"[not-text] ({label}) the page is re-detected once and re-erased, with the "
+                    f"answer on the page (ocr_calls={got['ocr_calls']}, "
+                    f"inpaint_calls={got['inpaint_calls']})")
+            c.check(rec_now.get("all_regions") is True
+                    and target in [r["id"] for r in rec_now["regions"]],
+                    f"[not-text] ({label}) and the page is cached in the new shape with the region "
+                    f"back (all_regions={rec_now.get('all_regions')})")
+            before = stub.chat_requests
+            run(seeing, f"nt-legacy-again-{label[:5]}")
+            c.check(stub.chat_requests == before,
+                    f"[not-text] ({label}) a second run asks nothing: "
+                    f"+{stub.chat_requests - before} requests")
+
+
 def section_persistence(c: Checks, cache_dir: str, record: dict):
     """[persist] the cache survives process exit, and every write is atomic."""
     cache = _reset(cache_dir)
@@ -1985,6 +2145,7 @@ def main():
             _guarded(c, "[edit-rendered]", section_rendered_edit, *fork("edit-rendered"), cross)
             _guarded(c, "[archive]", section_archive, *fork("archive"))
             _guarded(c, "[cap-wired]", section_cap_wiring, *fork("cap-wired"), cross)
+            _guarded(c, "[not-text]", section_not_text, *fork("not-text"), cross)
 
         _guarded(c, "[safe-path]", section_safe_paths, os.path.join(tmp, "safe-paths"))
         _guarded(c, "[parallel]", section_parallel, os.path.join(tmp, "par-cache"),
