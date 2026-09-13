@@ -55,6 +55,27 @@ function loadTheme(): Theme {
 }
 
 /** The two bracketing lines read better as words than as identifiers. */
+/**
+ * Record `p` and return the event to display: the latest one for the lowest
+ * page of `p`'s item that has not been written yet, or `p` itself when no
+ * page of that item is still in flight (its last write, and the item events).
+ */
+function frontPage(pages: Map<string, Progress>, p: Progress): Progress {
+  const key = `${p.item}\u001f${p.page}`;
+  if (p.stage === "item_done") {
+    for (const k of [...pages.keys()]) if (k.startsWith(`${p.item}\u001f`)) pages.delete(k);
+    return p;
+  }
+  if (p.page <= 0) return p;
+  if (p.stage === "write") pages.delete(key);
+  else pages.set(key, p);
+  let front: Progress | undefined;
+  for (const [k, e] of pages) {
+    if (k.startsWith(`${p.item}\u001f`) && (!front || e.page < front.page)) front = e;
+  }
+  return front ?? p;
+}
+
 function stageWord(stage: string): string {
   return stage === "item_start" ? "starting" : stage === "item_done" ? "done" : stage;
 }
@@ -75,6 +96,12 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [sidecar, setSidecar] = useState<SidecarState>("starting");
   const [progress, setProgress] = useState<Progress | null>(null);
+  // The newest event per (item, page) still short of `write`. The sidecar runs
+  // an item's pages three at a time, so the raw stream interleaves them --
+  // page 2 translating, page 3 detecting, page 2 erasing -- and a strip that
+  // showed the last line received would jump between pages and run its stage
+  // pips backwards. It shows the earliest unfinished page of the item instead.
+  const inFlight = useRef(new Map<string, Progress>());
   const [log, setLog] = useState<string[]>([]);
   const [showLog, setShowLog] = useState(false);
   const [error, setError] = useState("");
@@ -119,7 +146,7 @@ export default function App() {
     // anyone is listening and the bar sits empty through the opening stages.
     const subs = [
       onProgress((p) => {
-        setProgress(p);
+        setProgress(frontPage(inFlight.current, p));
         if (p.stage === "write") setPagesDone((n) => n + 1);
         if (p.stage === "item_start" || p.stage === "item_done") {
           setRunningItems((prev) => {
@@ -197,6 +224,7 @@ export default function App() {
     setError("");
     setPagesDone(0);
     setProgress(null);
+    inFlight.current.clear();
     try {
       // Before the run, not after: the editor opens on the first page the
       // moment the result lands, and the canvas must already be allowed in.
@@ -229,6 +257,7 @@ export default function App() {
     setError("");
     setPagesDone(0);
     setProgress(null);
+    inFlight.current.clear();
     try {
       const settings = loadSettings();
       const status = await api.job.start({

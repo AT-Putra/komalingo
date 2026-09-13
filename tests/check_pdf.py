@@ -276,11 +276,23 @@ def check_round_trip(c, expected, tmp):
             events.append(json.loads(line))
         except ValueError:
             continue
-    page_stages = [e["stage"] for e in events if e["stage"] in pipeline.STAGES]
+    # Per item and per page, not as one flat sequence: an item's pages run
+    # pipeline.PAGE_WINDOW at a time, so page 2's detect can land between
+    # page 1's translate and its erase. What must hold is each page's own
+    # seven, once and in order. The items themselves still run one after
+    # another here, so item_start splits the stream.
+    per_page, item = {}, None
+    for e in events:
+        if e.get("stage") == "item_start":
+            item = e["item"]
+        elif e.get("stage") in pipeline.STAGES:
+            per_page.setdefault((item, e["page"]), []).append(e["stage"])
     n_pages = sum(expected[n]["pages"] for n in ALL)
-    c.check(page_stages == list(pipeline.STAGES) * n_pages,
+    c.check(len(per_page) == n_pages
+            and all(stages == list(pipeline.STAGES) for stages in per_page.values()),
             f"seven stages emitted once per page, in order, over {n_pages} pages "
-            f"({len(page_stages)} stage events)")
+            f"({len(per_page)} pages seen, "
+            f"{sum(len(s) for s in per_page.values())} stage events)")
 
     fallbacks = 0
     for name in ALL:

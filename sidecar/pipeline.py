@@ -31,6 +31,7 @@ from PIL import Image
 from . import atomic, cache, imaging, inpainter, models, ocr_cjk, ocr_ja, safety, typeset
 from . import detect as detector
 from .containers import archive, pdf
+from .llm import MAX_CONCURRENT
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
 
@@ -739,11 +740,13 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
              source=DEFAULT_SOURCE, cancel=None):
     """Every page of one archive or PDF, through the cache. Returns the record.
 
-    `cancel` (Phase 9, AC-13) is the job's token. It is checked at the top of
-    every page and once more inside the page, immediately before translate --
-    so a cancel that landed during detect/OCR does not go on to spend a
-    provider request; a request already in flight is not interrupted and the
-    token is seen at the next page. A set token raises Cancelled with the count of pages
+    `cancel` (Phase 9, AC-13) is the job's token. It is checked when each page
+    has been read, inside the page immediately before translate -- so a cancel
+    that landed during detect/OCR does not go on to spend a provider request --
+    again when the reply is in, before erase and render, and before the
+    repack. A request already in flight is not interrupted. Pages run
+    PAGE_WINDOW at a time (see _run_pages); the ones past the last check when
+    the token is set finish and are delivered. A set token raises Cancelled with the count of pages
     DELIVERED so far; the enforce_cap warning and the repack do not run,
     clear_running still does. No partial file can result, by construction
     rather than by care: every write in this module lands through
@@ -795,22 +798,20 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     cache.mark_running(job_id)
     try:
         with expecting(expected):
-            for ordinal, member, img in read_pages(src_path, budget):
-                _check_cancel(cancel, item_id, len(records))
-                h = cache.page_hash(img)
-                cache.put_placement(job_id, item_id, ordinal, h, member,
-                                    src_path=os.fspath(src_path))
-                with _page_lock(h):
-                    record = _run_cached_page(
-                        h, img, member, ordinal, item_id, out_dir, client, lang,
-                        source, model, src_fmt, cancel, len(records))
-                records.append(record)
+            records = _run_pages(
+                read_pages(src_path, budget), job_id, item_id, src_path, out_dir,
+                client, lang, source, model, src_fmt, cancel, expected)
         # Once, at the end, and not per page. The plan says disk is "never
         # evicted mid-job", and per page it could not have reclaimed this job's
         # own pages anyway -- every one is pinned by its running marker -- while
         # walking the whole cache tree two hundred times for a two-hundred-page
         # item. It runs inside the try so the job is still marked running:
         # its pages are what the cap must not touch.
+        #
+        # A cancel that arrived while the last pages were finishing still
+        # means no archive: the pages are delivered and cached, and the
+        # resume repacks them without running a page.
+        _check_cancel(cancel, item_id, len(records))
         warning = cache.enforce_cap(job_id)
         out_archive = _repack(src_path, out_dir, src_fmt, records, lang, budget)
     finally:
@@ -825,6 +826,99 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
         "src_format": src_fmt,
         "format_warning": format_warning,
     }
+
+
+# Pages of one item in flight at once. The translation request is most of a
+# page's wall time (measured: 19-27 s of a 25-50 s page against a gateway
+# model, the GPU stages about 2 s), and one page at a time left the other
+# two provider slots idle while the next pages waited to be detected. The
+# window matches llm.MAX_CONCURRENT: more pages than slots would only queue
+# decoded images at the gate. CV stages stay serialised under _MODEL_LOCK,
+# so the window buys concurrent TRANSLATION plus detect/OCR/erase of the
+# next pages while earlier ones wait on the provider.
+PAGE_WINDOW = MAX_CONCURRENT
+
+
+def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
+               model, src_fmt, cancel, expected) -> list[dict]:
+    """Run an item's pages, up to PAGE_WINDOW at once. Returns records in page order.
+
+    The reader stays on THIS thread -- pypdfium2 and the archive budget are
+    not thread-safe, and a decoded page is only pulled once a window slot is
+    free, so no more than PAGE_WINDOW decoded pages exist at a time (AC-12's
+    peak RSS). Placements are written here too, in page order.
+
+    Cancel keeps its page-boundary meaning (AC-13): the token is checked when
+    the next page has been read, exactly where the sequential loop checked it,
+    and inside each page before its translation request. Pages already past
+    that point finish and are delivered; the raised Cancelled counts every
+    page that was. A failure on one page stops new pages, lets the pages in
+    flight finish -- their files are whole either way, as after a cancel --
+    and is raised once they have, earliest page first.
+    """
+    import concurrent.futures  # noqa: PLC0415 -- only the item path needs it
+
+    slots = threading.Semaphore(PAGE_WINDOW)
+    futures: list[concurrent.futures.Future] = []
+
+    def one(h, img, member, ordinal):
+        try:
+            # _EXPECTED is per thread: the worker publishes the item's page
+            # count again, or its emits lose the `total` the UI's bar runs to.
+            with expecting(expected), _page_lock(h):
+                return _run_cached_page(h, img, member, ordinal, item_id, out_dir, client,
+                                        lang, source, model, src_fmt, cancel, 0)
+        finally:
+            slots.release()
+
+    def failed():
+        return any(f.done() and f.exception() is not None
+                   and not isinstance(f.exception(), Cancelled) for f in futures)
+
+    reader_error, cancelled = None, False
+    pages = iter(pages)
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=PAGE_WINDOW, thread_name_prefix=f"pages-{item_id}"[:40]) as pool:
+        try:
+            while True:
+                slots.acquire()
+                if failed():
+                    slots.release()
+                    break
+                try:
+                    ordinal, member, img = next(pages)
+                except StopIteration:
+                    slots.release()
+                    break
+                if cancel is not None and cancel.is_set():
+                    slots.release()
+                    cancelled = True
+                    break
+                h = cache.page_hash(img)
+                cache.put_placement(job_id, item_id, ordinal, h, member,
+                                    src_path=os.fspath(src_path))
+                futures.append(pool.submit(one, h, img, member, ordinal))
+                del img  # the worker holds the only reference now
+        except BaseException as e:  # noqa: BLE001 -- the reader's own failure, raised below
+            reader_error = e
+        # Leaving the with-block waits for every page in flight.
+
+    records, first_error = [], None
+    for f in futures:
+        e = f.exception()
+        if e is None:
+            records.append(f.result())
+        elif isinstance(e, Cancelled):
+            cancelled = True
+        elif first_error is None:
+            first_error = e
+    if first_error is not None:
+        raise first_error
+    if reader_error is not None:
+        raise reader_error
+    if cancelled:
+        raise Cancelled(item_id, len(records))
+    return records
 
 
 # Per-page-hash locks, striped so the table stays bounded. Two workers on the
@@ -925,6 +1019,12 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         # just not on the page. Reachable when coverage was partial (a
         # half-written translation file) and an edit exists.
         _load_translations(regions, h, lang, model)
+    # And once more after it, since pages run PAGE_WINDOW at a time: a page
+    # whose reply arrives after the cancel stops here, before the erase and
+    # the render, instead of finishing because it happened to be in flight.
+    # Its translation is already cached for the resume; its detect and OCR
+    # are not yet persisted, so the resume re-detects it, as before.
+    _check_cancel(cancel, item_id, pages_done)
     regions, dismissed = dismiss(regions)
 
     if cached is not None:

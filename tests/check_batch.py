@@ -610,6 +610,92 @@ def check_cancel(c, src, out):
             f"status() counts the cancelled items ({status['cancelled_items']})")
 
 
+def check_page_window(c, tmp):
+    """[window] one item's pages overlap at the provider, in order on disk.
+
+    A six-page archive against a stub that takes 3 s per request. One page at
+    a time would spend at least 18 s in the stub alone; PAGE_WINDOW pages at a
+    time must overlap requests (peak above 1, never above the cap) and finish
+    well inside that floor. The delay is long on purpose: detect, OCR and
+    erase stay serialised under _MODEL_LOCK, and with a 1 s stub those
+    ~0.5 s per synthetic page capped the overlap at 2 -- the check would be
+    timing the model lock, where real pages spend 10x longer translating. Everything the sequential loop guaranteed is
+    re-read here from the outputs: records and archive members in source
+    order, the seven stages once per page and in order per page, and the
+    item's page count on every page event -- the `total` a worker thread
+    would lose if it did not republish it.
+    """
+    import zipfile
+
+    from PIL import Image
+
+    pages = 6
+    src = os.path.join(tmp, "window.cbz")
+    with zipfile.ZipFile(os.path.join(FIXTURES, "archives", "benign.cbz")) as zf:
+        bases = [zf.read(n) for n in sorted(n for n in zf.namelist() if n.endswith(".png"))]
+    members = [f"ch1/p{i + 1:02d}.png" for i in range(pages)]
+    with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as out:
+        for i, name in enumerate(members):
+            with Image.open(io.BytesIO(bases[i % len(bases)])) as im:
+                page = im.convert("RGB")
+            page.putpixel((0, 0), (29 * (i + 1) % 256, 3, 77))
+            buf = io.BytesIO()
+            page.save(buf, "PNG")
+            out.writestr(name, buf.getvalue())
+
+    saved_cache = os.environ.get("MT_CACHE_DIR")
+    os.environ["MT_CACHE_DIR"] = os.path.join(tmp, "window-cache")
+    captured = io.StringIO()
+    try:
+        with StubProvider(delay=3.0) as slow:
+            vision_capable(slow, "stub-model")
+            client = LLMClient(slow.url, "", "stub-model")
+            # Warm the models first: the window is about translation overlap,
+            # and a cold manga-ocr load inside the timed run is not.
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.warm_models(log=lambda _m: None)
+            t0 = __import__("time").perf_counter()
+            with contextlib.redirect_stdout(captured):
+                record = pipeline.run_item(src, os.path.join(tmp, "window-out"), "check-window",
+                                           client=client)
+            elapsed = __import__("time").perf_counter() - t0
+            peak, requests = slow.peak_concurrency, slow.chat_requests
+    finally:
+        if saved_cache is None:
+            os.environ.pop("MT_CACHE_DIR", None)
+        else:
+            os.environ["MT_CACHE_DIR"] = saved_cache
+
+    c.check(1 < peak <= llm.MAX_CONCURRENT,
+            f"[window] an item's pages overlap at the provider: peak {peak} in flight, "
+            f"above 1 and within the cap of {llm.MAX_CONCURRENT} ({requests} requests)")
+    floor = pages * 3.0
+    c.check(elapsed < 0.75 * floor,
+            f"[window] and the {pages}-page item finishes in {elapsed:.1f}s, well inside the "
+            f"{floor:.0f}s a page at a time spends in the stub alone")
+    got = [p["page"] for p in record["pages"]]
+    c.check(got == list(range(1, pages + 1)) and [p["member"] for p in record["pages"]] == members,
+            f"[window] records come back in source order: {got}")
+    with zipfile.ZipFile(record["archive"]) as zf:
+        packed = [n for n in zf.namelist() if n.endswith(".png")]
+    c.check(packed == members, f"[window] and the repacked archive lists its pages in source order: {packed}")
+    events = [e for e in events_of(captured.getvalue()) if e["stage"] in pipeline.STAGES]
+    per_page = {}
+    for e in events:
+        per_page.setdefault(e["page"], []).append(e["stage"])
+    c.check(sorted(per_page) == list(range(1, pages + 1))
+            and all(v == list(pipeline.STAGES) for v in per_page.values()),
+            f"[window] every page emits the seven stages once, in order, however the pages "
+            f"interleave: {[(p, len(v)) for p, v in sorted(per_page.items())]}")
+    c.check(all(e.get("total") == pages for e in events),
+            f"[window] and every page event carries the item's page count ({pages}), from "
+            f"whichever worker thread emitted it")
+    interleaved = [e["page"] for e in events]
+    c.check(interleaved != sorted(interleaved),
+            "[window] control: the stream really did interleave pages -- the per-page order "
+            "assert above was not satisfied by a sequential run")
+
+
 def main():
     for sub in ("archives", "pdf", "smoke"):
         if not os.path.isdir(os.path.join(FIXTURES, sub)):
@@ -633,6 +719,7 @@ def main():
         check_running_refcount(c, src, out)
         check_cancel(c, src, out)
         check_probe_wiring(c, src, out, stub)
+        check_page_window(c, tmp)
 
     # Recorded, not ratcheted: the peak is a timing under a hard cap the
     # asserts above hold, and the item count is decided by the folder.

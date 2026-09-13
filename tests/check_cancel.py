@@ -13,10 +13,10 @@ AC-13 in the spec's words: a running batch can be cancelled and leaves no
 partial output file in place; completed pages are cached so a re-run skips
 them. Three things are asserted, and the third runs in ANOTHER PROCESS:
 
-  CANCEL. A one-worker job over a three-page archive and a PDF, on a cold
+  CANCEL. A one-worker job over an eight-page archive and a PDF, on a cold
   cache of its own, with the stub answering slowly. The check watches the
   progress stream and calls cancel() the moment page 1 is written. The
-  archive comes back CANCELLED having delivered fewer than three pages, with
+  archive comes back CANCELLED having delivered fewer than eight pages, with
   the count in its reason; the PDF comes back CANCELLED before start; the
   job reaches done; NO output archive or PDF exists for either.
 
@@ -35,7 +35,7 @@ them. Three things are asserted, and the third runs in ANOTHER PROCESS:
   run counts zero and its placement names the same page hashes: the cache
   path is job-independent, as Phase 3 promised and Phase 6's regression note
   demanded. Then the control: the same driver on an EMPTY cache counts
-  three, so the counter assert is known to be able to go red.
+  all eight, so the counter assert is known to be able to go red.
 
 New process and new job id, both deliberately: iteration 1 of the build
 order had a cache layout that would have passed a same-process re-run and
@@ -64,7 +64,11 @@ from lib.stub_provider import StubProvider, vision_capable  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(ROOT, "fixtures")
-ARCHIVE_PAGES = 3
+# More pages than pipeline.PAGE_WINDOW, with room to spare: pages run three
+# at a time, so on a three-page archive every page is in flight when page 1
+# is written and "stopped short" stops meaning anything. Eight distinct pages
+# built from benign.cbz's three (see build_inputs).
+ARCHIVE_PAGES = 8
 
 # The driver the new process runs. Patches BOTH entrypoints to count, runs
 # one archive under the job id it is given, prints one JSON line. Written to
@@ -99,9 +103,33 @@ print("RESULT " + json.dumps({
 def build_inputs(root):
     src = os.path.join(root, "in")
     os.makedirs(src)
-    shutil.copy(os.path.join(FIXTURES, "archives", "benign.cbz"), os.path.join(src, "vol1.cbz"))
+    _eight_page_archive(os.path.join(FIXTURES, "archives", "benign.cbz"), os.path.join(src, "vol1.cbz"))
     shutil.copy(os.path.join(FIXTURES, "pdf", "scan.pdf"), os.path.join(src, "scan.pdf"))
     return src
+
+
+def _eight_page_archive(benign, dest):
+    """ARCHIVE_PAGES pages from benign.cbz's three, each with one pixel of its own.
+
+    Distinct pixels, so distinct page hashes: identical pages share a cache
+    entry, and the resume's detect counter would count the shared ones once.
+    """
+    import zipfile
+
+    from PIL import Image
+
+    with zipfile.ZipFile(benign) as zf:
+        bases = [zf.read(n) for n in sorted(n for n in zf.namelist() if n.endswith(".png"))]
+        credits = zf.read("credits.txt")
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as out:
+        for i in range(ARCHIVE_PAGES):
+            with Image.open(io.BytesIO(bases[i % len(bases)])) as im:
+                page = im.convert("RGB")
+            page.putpixel((0, 0), (37 * (i + 1) % 256, 11, 101))
+            buf = io.BytesIO()
+            page.save(buf, "PNG")
+            out.writestr(f"ch1/p{i + 1:02d}.png", buf.getvalue())
+        out.writestr("credits.txt", credits)
 
 
 def events_of(text):
