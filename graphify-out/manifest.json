@@ -54,9 +54,9 @@
     "semantic_hash": "3cdc2bc87fd2005fea0c1ed900935158"
   },
   "sidecar/llm.py": {
-    "mtime": 1789324578.11653,
-    "seen": 1789325403.1055622,
-    "ast_hash": "fb9a0bbec0533a7525544ba7cdefd38d",
+    "mtime": 1789341298.4412744,
+    "seen": 1789341634.8137705,
+    "ast_hash": "5368246ed1ea01a8c830cd9c883144b6",
     "semantic_hash": ""
   },
   "sidecar/main.py": {
@@ -78,9 +78,9 @@
     "semantic_hash": "368d614e069be415e8f88881bd974ba1"
   },
   "sidecar/pipeline.py": {
-    "mtime": 1789328280.8242817,
-    "seen": 1789328878.67913,
-    "ast_hash": "5b97f3b235088a3d0345b6b66f88e537",
+    "mtime": 1789341335.7617807,
+    "seen": 1789341634.8137705,
+    "ast_hash": "a0ce73be2589a81c0d4c0f9df5f48d60",
     "semantic_hash": ""
   },
   "sidecar/pyproject.toml": {
@@ -156,9 +156,9 @@
     "semantic_hash": ""
   },
   "src/lib/api.ts": {
-    "mtime": 1789338095.6904182,
-    "seen": 1789338414.0226111,
-    "ast_hash": "33d12d46a359664e6f471bb1380e3b74",
+    "mtime": 1789341438.6611686,
+    "seen": 1789341634.8137705,
+    "ast_hash": "6e8d239636bd5cce6379daf488ef80be",
     "semantic_hash": ""
   },
   "src/main.tsx": {
@@ -546,15 +546,15 @@
     "semantic_hash": "6f53e5285357d42dc01d74dee235e353"
   },
   "src/routes/SpotFix.tsx": {
-    "mtime": 1789269955.1331413,
-    "seen": 1789308309.0354228,
-    "ast_hash": "ba26ec1dfc09ec18aba9bbf4c44f1ddd",
-    "semantic_hash": "ba26ec1dfc09ec18aba9bbf4c44f1ddd"
+    "mtime": 1789341583.1516376,
+    "seen": 1789341634.8137705,
+    "ast_hash": "9d80e67abcb81595c3f27c584d96d0e9",
+    "semantic_hash": ""
   },
   "tests/check_spotfix.py": {
-    "mtime": 1789338233.854698,
-    "seen": 1789338414.0226111,
-    "ast_hash": "68bf51ef1f4fb621f76ea4859823bb1a",
+    "mtime": 1789341400.4617085,
+    "seen": 1789341634.8137705,
+    "ast_hash": "181bd0d10d20c5ac5e08300da929276c",
     "semantic_hash": ""
   },
   "tests/redcheck_spotfix.py": {
@@ -792,9 +792,9 @@
     "semantic_hash": "6a9b4ceaafba1d5539b115d42c10cf5c"
   },
   "src/dev/mock-tauri.ts": {
-    "mtime": 1789338210.1582136,
-    "seen": 1789338414.0226111,
-    "ast_hash": "34236c9d685ada00deac9d628a1a8455",
+    "mtime": 1789341511.5026348,
+    "seen": 1789341634.8137705,
+    "ast_hash": "0bb1f98a8366ea2e6cefa4ab87ec720e",
     "semantic_hash": ""
   },
   "src/routes/Translate.tsx": {
