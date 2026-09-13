@@ -6,7 +6,7 @@ Source: _Isekai Tensei de Kenja ni Natte_ vol. 1, user's own scans
 (182 full pages under `fixtures/tategaki/<volume>/`, kept locally only).
 
 The `tategaki/panels/*.png` crops derived from those pages are **not**
-committed: checking copyrighted panels into a public GPL-3.0 repository is
+committed: checking copyrighted panels into a public repository is
 not defensible as fair use for redistribution. What **is** committed:
 
 - `fixtures/tategaki/expected.json` — 24 hand-authored transcriptions
