@@ -182,15 +182,32 @@ def ocr(regions: list[dict], img: Image.Image, page: int, source: str = DEFAULT_
 
 
 # The page image the provider sees for context, bounded. A raw scan is
-# 1500-2500px on the long edge and a few MB as PNG; base64 in a JSON body on
-# every page of a 200-page volume is a payload the request timeout was never
-# sized for. 1280px keeps every bubble legible to a vision model and a
-# mostly-white manga page compresses to well under 500KB.
-PAGE_CONTEXT_LONG_EDGE = 1280
+# 1500-2500px on the long edge and a few MB; base64 in a JSON body on every
+# page of a 200-page volume is a payload the request timeout was never sized
+# for. Both numbers are MEASURED, on three real pages (010-012) against a
+# gateway vision model, two interleaved rounds each:
+#
+#   PNG  1280 px       1215 KB/page   median 21.9 s
+#   JPEG 1280 px q85    294 KB/page   median 20.3 s
+#   JPEG 1024 px q85    203 KB/page   median 16.3 s
+#
+# Translations agreed with the PNG run's as closely as two PNG runs agreed
+# with each other (text similarity 0.65 vs 0.70, null decisions 26 vs 22
+# mismatches over the same regions): the model's own run-to-run variation,
+# not a cost of the smaller image. Bubbles stay legible at 1024 px, and the
+# regions' text travels as text anyway -- the image is context.
+PAGE_CONTEXT_LONG_EDGE = 1024
+PAGE_CONTEXT_QUALITY = 85
 
 
-def page_context_png(img: Image.Image) -> bytes:
-    """The page, downscaled to PAGE_CONTEXT_LONG_EDGE, as PNG bytes."""
+def page_context_image(img: Image.Image) -> bytes:
+    """The page, downscaled to PAGE_CONTEXT_LONG_EDGE, as JPEG bytes.
+
+    JPEG, not PNG: a PNG of a screentoned scan does not compress -- page 012
+    of the real volume was 1.2 MB at 1280 px, where the comment this replaced
+    promised "well under 500KB" for a mostly-white page, and screentone is
+    exactly what a manga page is not mostly-white about.
+    """
     # Convert BEFORE resizing: on a palette or 1-bit source PIL silently
     # downgrades LANCZOS to NEAREST, and a nearest-neighbour downscale of a
     # screentoned page is moire the model has to read through.
@@ -200,7 +217,7 @@ def page_context_png(img: Image.Image) -> bytes:
     small = rgb if scale >= 1 else rgb.resize(
         (max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
     buf = io.BytesIO()
-    small.save(buf, "PNG", optimize=False, compress_level=6)
+    small.save(buf, "JPEG", quality=PAGE_CONTEXT_QUALITY, optimize=True)
     return buf.getvalue()
 
 
@@ -211,7 +228,7 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
     `img` is the page the regions came from, and it TRAVELS with the request
     when the client has vision -- that is the page context AC-9 is about, and
     what makes a vision-capable model worth probing for. Until US-C-02 this
-    function never passed it: the client accepted page_png, honoured
+    function never passed it: the client accepted page_image, honoured
     text_only, and check_provider proved both against a direct call, while
     the pipeline sent text alone on every page. A vision model saw nothing.
     The client drops the image itself when text_only is latched, so this
@@ -239,7 +256,7 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
 
         out = asyncio.run(
             client.translate_page([Region(id=r["id"], text=r["text"]) for r in asked],
-                                  page_png=page_context_png(img) if img is not None else None,
+                                  page_image=page_context_image(img) if img is not None else None,
                                   lang=lang, source=source)
         ) if asked else {}
         for r in asked:

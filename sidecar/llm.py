@@ -225,6 +225,17 @@ def _from_event_stream(text: str, status: int, url: str) -> dict:
          "finish_reason": finish}])
 
 
+def image_data_url(data: bytes) -> str:
+    """A data URL whose media type is what the bytes ARE, by signature.
+
+    The page context is JPEG and the probe image is PNG; a data URL that
+    called both image/png would hand a provider that trusts the label a JPEG
+    it decodes as a PNG.
+    """
+    mime = "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
 @dataclass
 class Region:
     id: int
@@ -339,13 +350,13 @@ class LLMClient:
 
     # -- translation -------------------------------------------------------
 
-    def _messages(self, regions, page_png: bytes | None, lang: str = "en", source: str = "ja"):
+    def _messages(self, regions, page_image: bytes | None, lang: str = "en", source: str = "ja"):
         if lang not in TARGET_NAMES:
             raise SettingsError(f"target language {lang!r} is not one of {sorted(TARGET_NAMES)}")
         if source not in SOURCE_NAMES:
             raise SettingsError(f"source language {source!r} is not one of {sorted(SOURCE_NAMES)}")
         target = TARGET_NAMES[lang]
-        with_image = bool(page_png) and not self.text_only
+        with_image = bool(page_image) and not self.text_only
         # The glossary sits between the instruction and the regions, and the
         # regions stay LAST: the stub provider and check_id read the request
         # back from the text after the final "regions " marker.
@@ -359,10 +370,9 @@ class LLMClient:
                                       ensure_ascii=False)
         )
         if with_image:
-            b64 = base64.b64encode(page_png).decode()
             content = [
                 {"type": "text", "text": instruction},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "image_url", "image_url": {"url": image_data_url(page_image)}},
             ]
         else:
             content = instruction
@@ -392,7 +402,7 @@ class LLMClient:
             out[int(t["id"])] = text if text is None or isinstance(text, str) else ""
         return out
 
-    async def translate_page(self, regions, page_png: bytes | None = None, *,
+    async def translate_page(self, regions, page_image: bytes | None = None, *,
                              lang: str = "en", source: str = "ja") -> dict:
         """All regions of one page. One request unless the page is huge.
 
@@ -406,7 +416,7 @@ class LLMClient:
 
         batches = [regions[i : i + MAX_REGIONS] for i in range(0, len(regions), MAX_REGIONS)]
         payloads = [
-            {"model": self.model, "messages": self._messages(b, page_png, lang, source)}
+            {"model": self.model, "messages": self._messages(b, page_image, lang, source)}
             for b in batches
         ]
         replies = await asyncio.gather(
@@ -488,8 +498,7 @@ class LLMClient:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": "data:image/png;base64,"
-                                + base64.b64encode(png).decode()
+                                "url": image_data_url(png)
                             },
                         },
                     ],

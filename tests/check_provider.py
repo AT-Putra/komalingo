@@ -131,7 +131,7 @@ def main():
 
         # --- batching: 5 regions -> 1 request ------------------------------
         before = stub.chat_requests
-        out = asyncio.run(client.translate_page(regions(5), page_png=b"\x89PNG-fake"))
+        out = asyncio.run(client.translate_page(regions(5), page_image=b"\x89PNG-fake"))
         issued = stub.chat_requests - before
         c.check(issued == 1, f"a 5-region page issues exactly 1 chat request, got {issued}")
         c.check(len(out) == 5, f"all 5 regions come back translated, got {len(out)}")
@@ -185,6 +185,35 @@ def main():
                     e.body == expected,
                     f"the {status} body arrives VERBATIM, not summarised",
                 )
+
+    # --- the page context is a JPEG, labelled as what it is ------------------
+    import io as _io
+
+    from PIL import Image as _Image
+
+    from sidecar import pipeline
+    from sidecar.llm import image_data_url
+
+    big = _Image.new("L", (1800, 2600), 255)
+    shot = pipeline.page_context_image(big)
+    with _Image.open(_io.BytesIO(shot)) as im:
+        fmt, size = im.format, im.size
+    c.check(fmt == "JPEG" and max(size) == pipeline.PAGE_CONTEXT_LONG_EDGE,
+            f"[image] the page context is a JPEG downscaled to {pipeline.PAGE_CONTEXT_LONG_EDGE} px "
+            f"on its long edge: {fmt} {size}, {len(shot)} bytes")
+    small = pipeline.page_context_image(_Image.new("P", (400, 600)))
+    with _Image.open(_io.BytesIO(small)) as im:
+        c.check(im.format == "JPEG" and im.size == (400, 600) and im.mode == "RGB",
+                f"[image] a page smaller than that is not upscaled, and a palette page is "
+                f"converted to RGB first: {im.format} {im.size} {im.mode}")
+    c.check(image_data_url(shot).startswith("data:image/jpeg;base64,")
+            and image_data_url(b"\x89PNG\r\n\x1a\n").startswith("data:image/png;base64,"),
+            "[image] the data URL's media type follows the bytes: JPEG page, PNG probe")
+    with StubProvider(delay=0) as stub:
+        asyncio.run(LLMClient(stub.url, None, MODEL).translate_page(regions(1), page_image=shot))
+        sent = [p for p in stub.last_payload["messages"][0]["content"] if p.get("type") == "image_url"]
+        c.check(len(sent) == 1 and sent[0]["image_url"]["url"].startswith("data:image/jpeg;base64,"),
+                "[image] and the request carries the page as image/jpeg")
 
     # --- a 200 framed as an event stream is still a reply --------------------
     # Measured on a gateway model (ag/gemini-pro-agent): a request that never
