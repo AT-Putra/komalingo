@@ -489,7 +489,7 @@ def read_placement(job_id: str) -> dict:
 
 
 def put_placement(job_id: str, item_id, ordinal: int, page_hash_: str,
-                  member: str | None = None) -> None:
+                  member: str | None = None, src_path: str | None = None) -> None:
     """Record that this job's (item, ordinal) renders this page, under this name.
 
     Separately per ordinal, so two byte-identical pages in one archive share a
@@ -504,12 +504,21 @@ def put_placement(job_id: str, item_id, ordinal: int, page_hash_: str,
     placement can say what it is CALLED at this position. Found by the
     placement assert in check_spotfix, which is the assert that exists for
     exactly this confusion.
+
+    `src_path` is the ITEM's input file, the same on every ordinal of one
+    item. It is here so a re-render can rebuild the item's archive without
+    being told where the archive came from: the editor addresses a page by
+    (job, item, ordinal) and nothing else, and the repack needs the input for
+    its ComicInfo, its extra members and the output's name. Absent on
+    placements written before it existed, and pipeline.rerender treats that
+    as "no archive to rebuild" rather than as an error.
     """
     with _LOCK:
         placement = read_placement(job_id)
         placement[_placement_key(item_id, ordinal)] = {
             "page_hash": page_hash_,
             "member": member,
+            "src_path": src_path,
         }
         _write_json(os.path.join(job_dir(job_id), PLACEMENT), placement)
         add_ref(page_hash_, job_id)
@@ -518,6 +527,23 @@ def put_placement(job_id: str, item_id, ordinal: int, page_hash_: str,
 def get_placement(job_id: str, item_id, ordinal: int):
     """The placement entry for one position, or None. See put_placement."""
     return read_placement(job_id).get(_placement_key(item_id, ordinal))
+
+
+def item_placements(job_id: str, item_id) -> list[tuple[int, dict]]:
+    """Every (ordinal, entry) this job placed for one item, in page order.
+
+    The repack after an edit reads this: the item's pages, in the order the
+    archive listed them, each with the member name its delivered file was
+    written under. Keys are parsed back rather than matched by prefix, because
+    `item_id` is a filename and one item's name can be a prefix of another's.
+    """
+    found = []
+    for key, entry in read_placement(job_id).items():
+        who, _, ordinal = key.rpartition("\x1f")
+        if who == str(item_id) and ordinal.isdigit():
+            found.append((int(ordinal), entry))
+    found.sort(key=lambda pair: pair[0])
+    return found
 
 
 def placed_hashes(job_id: str) -> set[str]:

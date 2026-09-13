@@ -1221,6 +1221,117 @@ def section_rendered_edit(c: Checks, cache_dir: str, out_dir: str, record: dict)
     )
 
 
+def section_archive(c: Checks, cache_dir: str, out_dir: str):
+    """[archive] an edit reaches the delivered ARCHIVE, not only the loose page.
+
+    The re-render writes one loose page and answers inside AC-10's budget; the
+    volume next to it is rebuilt on a worker once the edits go quiet. This
+    section holds three things: the response says the archive is behind and
+    a repack is pending, the archive on disk then carries the edited page
+    byte-for-byte, and two edits inside REPACK_DELAY cost one repack.
+    """
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    cache = _reset(cache_dir)
+    from sidecar import main, pipeline
+
+    job = "archive-job"
+    calls, undo = _no_detect_or_ocr()
+    try:
+        rec, _ = _quiet(pipeline.run_item, CBZ, out_dir, job)
+    finally:
+        undo()
+    archive_path = rec["archive"]
+    item = rec["item_id"]
+    c.check(
+        os.path.exists(archive_path),
+        f"[archive] the run delivered an archive beside the loose pages: {archive_path}",
+    )
+    before = _sha(archive_path)
+    with zipfile.ZipFile(archive_path) as zf:
+        members_before = zf.namelist()
+    c.check(
+        cache.get_placement(job, item, 1).get("src_path") == os.fspath(CBZ),
+        "[archive] the placement remembers the item's input, which is what the "
+        "repack reads ComicInfo and extras from",
+    )
+
+    first, second = rec["pages"][1], rec["pages"][2]
+    rid1, rid2 = first["regions"][0]["id"], second["regions"][0]["id"]
+
+    t0 = time.perf_counter()
+    out1 = _call(c, "[archive]", pipeline.rerender, job, item, first["page"], rid1,
+                 "INTO THE ZIP", out_dir)
+    elapsed = time.perf_counter() - t0
+    if out1 is None:
+        return
+    repack = out1.get("repack") or {}
+    c.check(
+        out1.get("archive_stale") is True and repack.get("status") == "pending",
+        f"[archive] the re-render answers with archive_stale and a PENDING "
+        f"repack, not a finished one: stale={out1.get('archive_stale')} "
+        f"repack={repack}",
+    )
+    c.check(
+        elapsed < BUDGET_S,
+        f"[archive] and it did not wait on the archive: {elapsed:.2f}s",
+    )
+    out2 = _call(c, "[archive]", pipeline.rerender, job, item, second["page"], rid2,
+                 "ALSO IN", out_dir)
+    if out2 is None:
+        return
+
+    with TestClient(main.app) as client:
+        r = client.get("/api/repack", params={"job_id": job, "item_id": item})
+        c.check(
+            r.status_code == 200 and r.json().get("status") in ("pending", "running"),
+            f"[archive] /api/repack serves the worker's status while it is under "
+            f"way: {r.status_code} {r.text[:120]}",
+        )
+        deadline = time.time() + 30
+        status = r.json()
+        while status.get("status") not in ("done", "failed") and time.time() < deadline:
+            time.sleep(0.1)
+            status = client.get("/api/repack", params={"job_id": job, "item_id": item}).json()
+    c.check(
+        status.get("status") == "done" and not status.get("error"),
+        f"[archive] the background repack finished: {status}",
+    )
+    c.check(
+        status.get("repacks") == 1,
+        f"[archive] two edits inside REPACK_DELAY cost ONE repack, not two: "
+        f"{status.get('repacks')}",
+    )
+    c.check(
+        os.path.normcase(status.get("archive", "")) == os.path.normcase(archive_path),
+        f"[archive] and it rewrote the SAME archive the run delivered: "
+        f"{status.get('archive')!r}",
+    )
+    c.check(
+        _sha(archive_path) != before,
+        "[archive] the archive on disk is a different file from before the edits",
+    )
+    with zipfile.ZipFile(archive_path) as zf:
+        members_after = zf.namelist()
+        in_zip1, in_zip2 = zf.read(first["member"]), zf.read(second["member"])
+    with open(out1["output"], "rb") as fh:
+        loose1 = fh.read()
+    with open(out2["output"], "rb") as fh:
+        loose2 = fh.read()
+    c.check(
+        in_zip1 == loose1 and in_zip2 == loose2,
+        "[archive] both edited pages inside the archive are byte-identical to "
+        "the re-rendered loose pages -- the volume shows what the editor shows",
+    )
+    c.check(
+        members_after == members_before,
+        f"[archive] and the member set round-trips unchanged: "
+        f"{len(members_after)} of {len(members_before)}",
+    )
+
+
 def section_persistence(c: Checks, cache_dir: str, record: dict):
     """[persist] the cache survives process exit, and every write is atomic."""
     cache = _reset(cache_dir)
@@ -1687,6 +1798,7 @@ def main():
 
             _guarded(c, "[ingest-llm]", section_ingest_llm, *fork("ingest-llm"), cross)
             _guarded(c, "[edit-rendered]", section_rendered_edit, *fork("edit-rendered"), cross)
+            _guarded(c, "[archive]", section_archive, *fork("archive"))
             _guarded(c, "[cap-wired]", section_cap_wiring, *fork("cap-wired"), cross)
 
         _guarded(c, "[safe-path]", section_safe_paths, os.path.join(tmp, "safe-paths"))

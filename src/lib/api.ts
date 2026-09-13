@@ -130,6 +130,27 @@ export interface PageRecord {
   /** True when an edit for this page exists under a different model. */
   edit_on_other_model?: boolean;
   edited_region?: number;
+  /**
+   * Set by /api/rerender: the loose page carries the edit and the item's
+   * archive does not yet. `repack` is the background rebuild that closes the
+   * gap -- poll `api.repackStatus` while it reads pending or running. Null
+   * when the sidecar has no record of where the item came from (a job run
+   * before the placement carried it): re-running the item rebuilds it.
+   */
+  archive_stale?: boolean;
+  repack?: RepackStatus | null;
+}
+
+/** Where the archive rebuild after an edit has got to. */
+export interface RepackStatus {
+  status: "idle" | "pending" | "running" | "done" | "failed";
+  /** The rebuilt archive's path once `done`. */
+  archive: string;
+  /** Why, once `failed`. */
+  error: string;
+  /** Edits scheduled and repacks run, for the record. */
+  edits: number;
+  repacks: number;
 }
 
 export interface ItemResult {
@@ -250,6 +271,12 @@ export const api = {
     lang?: Target;
     settings?: ProviderSettings;
   }) => call<PageRecord>("/api/rerender", "POST", req),
+
+  /** The background archive rebuild an edit scheduled. See PageRecord.repack. */
+  repackStatus: (jobId: string, itemId: string) =>
+    call<RepackStatus>(
+      `/api/repack?job_id=${encodeURIComponent(jobId)}&item_id=${encodeURIComponent(itemId)}`,
+    ),
 
   /** AC-7: a folder through the queue. `start` answers at once; poll `status`. */
   job: {

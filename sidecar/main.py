@@ -563,6 +563,19 @@ def rerender(req: RerenderRequest):
     return record
 
 
+@app.get("/api/repack")
+def repack_status(job_id: str, item_id: str):
+    """Where the archive rebuild an edit scheduled has got to.
+
+    The same dict /api/rerender returned under `repack`, re-read: pending
+    while the edits are still landing, running while the worker streams the
+    pages, then done with the archive's path or failed with the reason. The
+    editor polls this until it leaves pending/running; the request itself is
+    a dictionary read and never waits on the worker.
+    """
+    return pipeline.repack_status(job_id, item_id)
+
+
 @app.get("/api/shutdown")
 def shutdown_get():
     """GET can never shut anything down. A link or an <img> is a GET."""

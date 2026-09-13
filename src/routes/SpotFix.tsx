@@ -30,6 +30,7 @@ import {
   loadSettings,
   type PageRecord,
   type Region,
+  type RepackStatus,
   type Target,
 } from "../lib/api";
 
@@ -85,6 +86,10 @@ export default function SpotFix({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [landed, setLanded] = useState(false);
+  // The archive rebuild the last re-render scheduled. The loose page is
+  // current the moment the response lands; the volume beside it is not, and
+  // this is the one thing that says when it is.
+  const [repack, setRepack] = useState<RepackStatus | null>(null);
 
   // Sorted for display only. The region objects themselves are the server's.
   const ordered = useMemo(
@@ -153,6 +158,28 @@ export default function SpotFix({
     return () => clearTimeout(t);
   }, [landed]);
 
+  // Poll while the worker is pending or running. It is a dictionary read on
+  // the sidecar, so 500ms costs nothing; the interval ends itself the moment
+  // the status settles, and a re-render mid-poll restarts it on the fresh
+  // status through the dependency.
+  useEffect(() => {
+    if (!repack || (repack.status !== "pending" && repack.status !== "running")) return;
+    let cancelled = false;
+    const t = setInterval(async () => {
+      try {
+        const next = await api.repackStatus(job, page.item_id);
+        if (!cancelled) setRepack(next);
+      } catch {
+        // The sidecar answers this from memory; a failure here is the
+        // sidecar going away, which the app shell already reports.
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [repack, job, page.item_id]);
+
   async function confirm() {
     if (selected === null || busy) return;
     setBusy(true);
@@ -174,6 +201,7 @@ export default function SpotFix({
       });
       onPage(fresh);
       setLanded(true);
+      if (fresh.archive_stale) setRepack(fresh.repack ?? { ...UNREPACKABLE });
     } catch (e) {
       // describeError, never a synonym: the provider's own status and body
       // reach the user verbatim (AC-8).
@@ -215,6 +243,18 @@ export default function SpotFix({
               Every bubble fits
             </span>
           )}
+          {repack && (repack.status === "pending" || repack.status === "running") && (
+            <span className="pill running" role="status">
+              <Icon name="loader" size={12} />
+              Updating archive…
+            </span>
+          )}
+          {repack?.status === "done" && (
+            <span className="pill ok" role="status">
+              <Icon name="check" size={12} />
+              Archive up to date
+            </span>
+          )}
         </div>
       </div>
 
@@ -246,6 +286,12 @@ export default function SpotFix({
         </Alert>
       )}
       {error && <Alert tone="error">{error}</Alert>}
+      {repack?.status === "failed" && (
+        <Alert tone="warn">
+          The page was re-rendered, but the archive beside it was not rebuilt:{" "}
+          {repack.error || "the sidecar has no record of where this item came from -- run it again to rebuild the archive."}
+        </Alert>
+      )}
 
       <div className="editor-grid">
         <div className="canvas-frame">
@@ -388,6 +434,17 @@ export default function SpotFix({
  * for Win32, not for a URL, so it comes off first. A data: URL (the dev
  * mock) passes through untouched.
  */
+/** What a re-render reports when the sidecar cannot rebuild the archive at
+ *  all -- a placement from before it recorded the item's input. Rendered
+ *  as the failed alert, with its own reason. */
+const UNREPACKABLE: RepackStatus = {
+  status: "failed",
+  archive: "",
+  error: "",
+  edits: 0,
+  repacks: 0,
+};
+
 function pageSrc(p: string): string {
   if (p.startsWith("data:")) return p;
   const plain = p.startsWith("\\\\?\\UNC\\")

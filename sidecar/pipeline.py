@@ -730,7 +730,8 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
             for ordinal, member, img in read_pages(src_path, budget):
                 _check_cancel(cancel, item_id, len(records))
                 h = cache.page_hash(img)
-                cache.put_placement(job_id, item_id, ordinal, h, member)
+                cache.put_placement(job_id, item_id, ordinal, h, member,
+                                    src_path=os.fspath(src_path))
                 with _page_lock(h):
                     record = _run_cached_page(
                         h, img, member, ordinal, item_id, out_dir, client, lang,
@@ -904,9 +905,11 @@ def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,
     and what AC-13's resume reads, and the archive is built FROM them rather
     than instead of them -- so a cancelled job leaves the pages it finished
     where the next run can use them, which an archive-only output cannot do
-    (a half-written archive is not half a job, it is nothing). The duplication
-    is the price of both properties and it is paid on disk, not in RSS: the
-    archive repack streams one page at a time. The PDF repack does not quite
+    (a half-written archive is not half a job, it is nothing). They are also
+    what repack_item reads after an edit, so the volume can be rebuilt without
+    rendering a page. The duplication is the price of these properties and it
+    is paid on disk, not in RSS: the archive repack streams one page at a
+    time. The PDF repack does not quite
     -- img2pdf's internal engine holds every page's bytes until it writes,
     about one copy of the output (1.02x measured); see `pdf.write_pdf`.
 
@@ -958,6 +961,120 @@ def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,
     return archive.write_archive(
         dest, entries(), out_fmt, comic, lang, extra_entries=extra,
     )
+
+
+def repack_item(job_id, item_id, dest_dir, lang=DEFAULT_LANG) -> str:
+    """The item's archive, rebuilt from the loose pages already on disk.
+
+    What run_item's closing _repack does, without the page loop in front of
+    it: no page is decoded, rendered or re-encoded here. The delivered files
+    are read back in placement order and streamed into a fresh archive at the
+    same path, so an edit the spot-fix editor wrote into one loose page is in
+    the volume too. Runs off the request thread -- see schedule_repack -- and
+    so is allowed the seconds a two-hundred-page volume takes.
+
+    The output path is derived, not stored: _member_dest is a pure function of
+    (item directory, member name), and _deliver writes to exactly that. Deriving
+    it here keeps one source of truth for where a page lands; storing it in
+    the placement would be a second one that could drift.
+    """
+    placed = cache.item_placements(job_id, item_id)
+    if not placed:
+        raise CacheMiss(f"job {job_id} has no pages of item {item_id!r}", "placement")
+    src_path = placed[0][1].get("src_path")
+    if not src_path:
+        raise CacheMiss(
+            f"job {job_id} did not record where item {item_id!r} came from; "
+            f"run the item again to rebuild its archive", "placement")
+    out_dir = item_dir(dest_dir, item_id)
+    records = []
+    for ordinal, entry in placed:
+        member = entry.get("member") or f"{item_id}_{ordinal:04d}.png"
+        records.append({"member": member, "output": _member_dest(out_dir, member)})
+    missing = [r["output"] for r in records if not os.path.exists(atomic.long_path(r["output"]))]
+    if missing:
+        raise CacheMiss(
+            f"{len(missing)} of item {item_id!r}'s {len(records)} delivered pages "
+            f"are no longer on disk (first: {missing[0]}); run the item again", "placement")
+    return _repack(src_path, out_dir, _container(src_path), records, lang,
+                   safety.Budget(out_dir))
+
+
+# Quiet time after an edit before the archive is rebuilt. Long enough that a
+# user correcting three bubbles on one page pays for one repack, short enough
+# that the volume is current by the time they open it.
+REPACK_DELAY = 1.0
+
+_REPACK_LOCK = threading.Lock()
+_REPACKS: dict[tuple[str, str], dict] = {}
+_REPACK_PUBLIC = ("status", "archive", "error", "edits", "repacks")
+
+
+def schedule_repack(job_id, item_id, dest_dir, lang=DEFAULT_LANG) -> dict:
+    """Rebuild the item's archive soon, on a worker thread. Returns the status.
+
+    rerender calls this and returns; the request never waits on the archive.
+    AC-10 budgets 3.0s for a re-render and the repack of a large volume is
+    more than that, so the response says `archive_stale` and this status says
+    when it stops being true -- /api/repack serves the same dict, and the UI
+    polls it while it reads pending or running.
+
+    Debounced and coalesced: every call restarts one timer per item, and an
+    edit that lands while a repack is running is not lost -- the worker
+    compares the edit counter after each pass and goes again. So the archive
+    on disk always ends up carrying the LAST edit, and a burst of edits costs
+    one repack, or two when one was already under way.
+    """
+    key = (str(job_id), str(item_id))
+    with _REPACK_LOCK:
+        st = _REPACKS.setdefault(key, {
+            "status": "idle", "archive": "", "error": "", "edits": 0, "repacks": 0,
+            "running": False, "timer": None,
+        })
+        st["edits"] += 1
+        st["status"], st["error"] = "pending", ""
+        st["dest_dir"], st["lang"] = os.fspath(dest_dir), lang
+        if st["timer"] is not None:
+            st["timer"].cancel()
+        timer = threading.Timer(REPACK_DELAY, _repack_worker, (key,))
+        timer.daemon = True  # a repack mid-write at exit is a temp file, not a torn archive
+        st["timer"] = timer
+        timer.start()
+        return {k: st[k] for k in _REPACK_PUBLIC}
+
+
+def repack_status(job_id, item_id) -> dict:
+    """The repack status for one item: idle, pending, running, done or failed."""
+    with _REPACK_LOCK:
+        st = _REPACKS.get((str(job_id), str(item_id)))
+        if st is None:
+            return {"status": "idle", "archive": "", "error": "", "edits": 0, "repacks": 0}
+        return {k: st[k] for k in _REPACK_PUBLIC}
+
+
+def _repack_worker(key: tuple[str, str]) -> None:
+    with _REPACK_LOCK:
+        st = _REPACKS[key]
+        if st["running"]:
+            # The pass under way re-checks the edit counter when it finishes
+            # and goes again; a second worker would write the same archive.
+            return
+        st["running"] = True
+    while True:
+        with _REPACK_LOCK:
+            st["status"] = "running"
+            seen, dest_dir, lang = st["edits"], st["dest_dir"], st["lang"]
+        try:
+            out, err = repack_item(key[0], key[1], dest_dir, lang), ""
+        except Exception as e:  # noqa: BLE001 -- the status carries it; a thread has nowhere else to put it
+            out, err = "", f"{type(e).__name__}: {e}"
+        with _REPACK_LOCK:
+            st["repacks"] += 1
+            if st["edits"] != seen:
+                continue  # an edit landed mid-repack: the archive just written is already behind
+            st["status"] = "failed" if err else "done"
+            st["archive"], st["error"], st["running"] = out, err, False
+            return
 
 
 def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
@@ -1040,12 +1157,21 @@ def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
         edited_region=region_id,
         edit_on_other_model=cache.has_edit_for_other_model(h, lang, model),
         # The repacked volume on disk no longer contains this page. Re-packing
-        # here is not an option -- rebuilding a 200-page archive is minutes
-        # against AC-10's 3-second budget -- so the honest move is to SAY the
-        # archive is behind rather than leave the user holding a file that
-        # silently disagrees with the editor. run_item rebuilds it.
+        # on this thread is not an option -- a large volume takes longer than
+        # AC-10's 3-second budget -- so the archive is rebuilt on a worker
+        # thread once the edits go quiet, and the response SAYS it is behind
+        # rather than leave the user holding a file that silently disagrees
+        # with the editor. `repack` is the worker's status; /api/repack
+        # serves the same dict until it reads done.
         archive_stale=True,
+        repack=None,
     )
     _persist(h, record)
     record["cache_warning"] = cache.enforce_cap(job_id)
+    # A placement written before src_path existed has no archive to rebuild
+    # from here: the flag stays, the status stays None, and the UI says the
+    # item must be run again. Placements are rewritten by every run, so this
+    # is a one-run condition, not a permanent one.
+    if placed.get("src_path"):
+        record["repack"] = schedule_repack(job_id, item_id, dest_dir, lang)
     return record

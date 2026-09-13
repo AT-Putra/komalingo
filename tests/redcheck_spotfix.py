@@ -253,6 +253,16 @@ CASES = [
         "one bubble in the new language and the rest in the old one",
     ),
     (
+        "the archive never rebuilt after an edit",
+        PIPELINE,
+        "    if placed.get(\"src_path\"):\n"
+        "        record[\"repack\"] = schedule_repack(job_id, item_id, dest_dir, lang)",
+        "    if False:\n"
+        "        record[\"repack\"] = schedule_repack(job_id, item_id, dest_dir, lang)",
+        "[archive]",
+        "the loose page shows the edit and the volume beside it never does",
+    ),
+    (
         "an edit pins a page with no job",
         CACHE,
         "    if refs and has_edits(page_hash_):",
