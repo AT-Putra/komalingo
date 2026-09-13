@@ -30,8 +30,16 @@ REQUEST_DELAY = 0.2  # seconds. See the module docstring before changing this.
 class StubProvider:
     """Usable as a context manager; `.url` is the OpenAI-compatible base URL."""
 
-    def __init__(self, status=200, delay=REQUEST_DELAY, models_status=200, replies=None):
+    def __init__(self, status=200, delay=REQUEST_DELAY, models_status=200, replies=None,
+                 chat_format="json"):
         self.status = status  # 200, 401 or 500 -- selects the canned body
+        # How a 200 chat reply is framed. "json" is the OpenAI shape. "sse" is
+        # what some gateways send for a request that never asked to stream:
+        # text/event-stream, one `data:` chunk per piece, then [DONE].
+        # "sse-error" is a stream whose one event is an error object, and
+        # "garbage" is a 200 whose body is not JSON at all (a captive portal,
+        # a proxy's login page).
+        self.chat_format = chat_format
         # GET /models answers separately from the chat path, because the
         # Settings dropdown fails on its own: a wrong key is rejected when the
         # user first lists models, long before any page is translated.
@@ -102,6 +110,15 @@ class StubProvider:
                         self._respond(401, fixtures["401"], "application/json")
                     elif stub.status == 500:
                         self._respond(500, fixtures["500"], "text/html")
+                    elif stub.chat_format == "sse":
+                        self._respond(200, _as_event_stream(_chat_reply(stub.last_payload, stub.replies)),
+                                      "text/event-stream")
+                    elif stub.chat_format == "sse-error":
+                        self._respond(200, b'data: {"error":{"message":"model is overloaded",'
+                                           b'"code":529}}\n\ndata: [DONE]\n\n', "text/event-stream")
+                    elif stub.chat_format == "garbage":
+                        self._respond(200, b"<html><body>Sign in to the proxy</body></html>",
+                                      "text/html")
                     else:
                         self._respond(200, _chat_reply(stub.last_payload, stub.replies),
                                       "application/json")
@@ -205,6 +222,25 @@ def _chat_reply(payload, replies=None) -> bytes:
             ],
         }
     ).encode()
+
+
+def _as_event_stream(reply: bytes) -> bytes:
+    """A chat.completion re-framed as the chunks a streaming gateway sends.
+
+    The content is cut into 7-character pieces, so a client that keeps only
+    the first or the last chunk returns a broken JSON fragment rather than
+    passing by accident on a one-chunk stream. A role-only first chunk and a
+    finish-only last chunk, as real gateways send them.
+    """
+    full = json.loads(reply)
+    text = full["choices"][0]["message"]["content"]
+    base = {"id": full["id"], "object": "chat.completion.chunk", "model": full["model"]}
+    events = [dict(base, choices=[{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}])]
+    events += [dict(base, choices=[{"index": 0, "delta": {"content": text[i:i + 7]}, "finish_reason": None}])
+               for i in range(0, len(text), 7)]
+    events.append(dict(base, choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}]))
+    lines = [f"data: {json.dumps(e, ensure_ascii=False)}\n\n" for e in events] + ["data: [DONE]\n\n"]
+    return "".join(lines).encode("utf-8")
 
 
 def vision_capable(stub, model: str) -> None:

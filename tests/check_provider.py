@@ -186,6 +186,46 @@ def main():
                     f"the {status} body arrives VERBATIM, not summarised",
                 )
 
+    # --- a 200 framed as an event stream is still a reply --------------------
+    # Measured on a gateway model (ag/gemini-pro-agent): a request that never
+    # asked to stream came back as text/event-stream, and the client's
+    # json.loads on the first `data:` line escaped as a JSONDecodeError --
+    # a bare 500 from /api/translate with nothing the user could act on.
+    with StubProvider(delay=0, replies={1: "one", 2: "two, with a comma", 3: "三"}) as stub:
+        want = asyncio.run(LLMClient(stub.url, None, MODEL).translate_page(regions(3)))
+    with StubProvider(delay=0, chat_format="sse",
+                      replies={1: "one", 2: "two, with a comma", 3: "三"}) as stub:
+        try:
+            got = asyncio.run(LLMClient(stub.url, None, MODEL).translate_page(regions(3)))
+            c.check(got == want and len(got) == 3,
+                    f"[sse] a text/event-stream reply is reassembled from its chunks into the "
+                    f"same translations the JSON reply gives: {got}")
+        except Exception as e:  # noqa: BLE001 -- the point is to report
+            c.check(False, f"[sse] a text/event-stream reply raised {type(e).__name__}: {e}")
+
+    with StubProvider(delay=0, chat_format="sse-error") as stub:
+        try:
+            asyncio.run(LLMClient(stub.url, None, MODEL).translate_page(regions(1)))
+            c.check(False, "[sse] an error event in a stream raises ProviderError")
+        except ProviderError as e:
+            c.check("model is overloaded" in e.body,
+                    f"[sse] an error event in the stream reaches the caller in the provider's "
+                    f"own words: {e.body[:80]!r}")
+        except Exception as e:  # noqa: BLE001
+            c.check(False, f"[sse] an error event raised {type(e).__name__}, not ProviderError: {e}")
+
+    with StubProvider(delay=0, chat_format="garbage") as stub:
+        try:
+            asyncio.run(LLMClient(stub.url, None, MODEL).translate_page(regions(1)))
+            c.check(False, "[not-json] a 200 that is not JSON raises ProviderError")
+        except ProviderError as e:
+            c.check(e.status == 200 and "Sign in to the proxy" in e.body,
+                    f"[not-json] a 200 whose body is not JSON is a ProviderError carrying that "
+                    f"body, not a JSONDecodeError: {e.status} {e.body[:80]!r}")
+        except Exception as e:  # noqa: BLE001
+            c.check(False, f"[not-json] a non-JSON 200 raised {type(e).__name__}, "
+                           f"not ProviderError: {e}")
+
     # --- an unreachable host is still a ProviderError, not a traceback -----
     client = LLMClient("http://127.0.0.1:1/v1", None, MODEL)
     try:

@@ -162,6 +162,69 @@ class ProviderError(RuntimeError):
         super().__init__(f"HTTP {status}: {body}")
 
 
+def _decode_reply(raw: bytes, content_type: str, status: int, url: str):
+    """A 2xx body as the dict the OpenAI shape describes, or a ProviderError.
+
+    Two framings arrive with a success status. The ordinary one is a single
+    JSON object. The other is text/event-stream: measured on a gateway model
+    (ag/gemini-pro-agent) that streamed a reply the request never asked to
+    stream -- a `data:` line per chunk, then `data: [DONE]`. json.loads on that
+    raised JSONDecodeError, which is neither a ProviderError nor a
+    SettingsError, so /api/translate answered a bare 500 and the user learned
+    nothing. The stream is reassembled into the chat.completion it stands for.
+
+    Anything else with a 2xx status -- a proxy's login page, an empty body --
+    is a ProviderError carrying the body, so AC-8 holds: the caller sees what
+    the provider actually sent, not a traceback.
+    """
+    text = raw.decode("utf-8", "replace")
+    if "text/event-stream" in content_type.lower() or text.lstrip().startswith("data:"):
+        return _from_event_stream(text, status, url)
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise ProviderError(status, f"reply was not JSON: {text[:400]}", url) from None
+
+
+def _from_event_stream(text: str, status: int, url: str) -> dict:
+    """Concatenate the chunks of choice 0 into one chat.completion.
+
+    `delta` is the streaming field and `message` what some gateways put in a
+    single-event stream; content may be a string or a list of parts, as in
+    the non-streaming shape. An `error` event is the provider refusing
+    mid-stream and is raised in its own words.
+    """
+    parts, finish, meta, events = [], None, {}, 0
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue  # blank separators, `event:` and `: keep-alive` comments
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            raise ProviderError(status, f"stream event was not JSON: {data[:400]}", url) from None
+        events += 1
+        if chunk.get("error"):
+            raise ProviderError(status, json.dumps(chunk["error"], ensure_ascii=False), url)
+        meta = meta or {k: chunk[k] for k in ("id", "model") if k in chunk}
+        for choice in chunk.get("choices") or []:
+            if choice.get("index", 0) != 0:
+                continue
+            piece = (choice.get("delta") or choice.get("message") or {}).get("content")
+            if isinstance(piece, list):
+                piece = "".join(p.get("text", "") for p in piece if isinstance(p, dict))
+            if isinstance(piece, str):
+                parts.append(piece)
+            finish = choice.get("finish_reason") or finish
+    if not events:
+        raise ProviderError(status, f"reply was an empty event stream: {text[:400]}", url)
+    return dict(meta, object="chat.completion", choices=[
+        {"index": 0, "message": {"role": "assistant", "content": "".join(parts)},
+         "finish_reason": finish}])
+
+
 @dataclass
 class Region:
     id: int
@@ -211,7 +274,8 @@ class LLMClient:
             with _GATE:
                 try:
                     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-                        return json.loads(r.read())
+                        return _decode_reply(r.read(), r.headers.get("Content-Type", ""),
+                                             r.status, url)
                 except urllib.error.HTTPError as e:
                     # Read the body BEFORE raising -- and inside the gate,
                     # so the whole exchange, error body included, is one
