@@ -18,6 +18,7 @@ names of its own.
 """
 
 import asyncio
+import contextlib
 import io
 import os
 import sys
@@ -238,6 +239,18 @@ def main():
     c.check(_pl._box({"polygon": [[100, 200], [300, 200], [300, 1000], [100, 1000]]}, page)
             == [100, 100, 300, 500] and _pl._box({"polygon": []}, page) is None,
             "[boxes] pipeline._box scales a polygon's bounding box to thousandths of the page")
+    # And the pipeline's own translate stage puts them in the request -- the
+    # unit above proves the scaling, this proves the wiring: a region dict as
+    # detect() shapes it, through pipeline.translate with the page, reaches
+    # the provider with its box.
+    detected = [{"id": 1, "text": "a", "polygon": [[100, 200], [300, 200], [300, 1000], [100, 1000]]},
+                {"id": 2, "text": "b", "polygon": [[500, 1200], [900, 1200], [900, 1900], [500, 1900]]}]
+    with StubProvider(delay=0) as stub:
+        with contextlib.redirect_stdout(io.StringIO()):
+            _pl.translate(detected, 1, LLMClient(stub.url, None, MODEL), "en", "ja", img=page)
+        wired = requested_items(stub.last_payload)
+    c.check([i.get("box") for i in wired] == [[100, 100, 300, 500], [500, 600, 900, 950]],
+            f"[boxes] and pipeline.translate sends each detected region's box with the page: {wired}")
 
     # --- a 200 framed as an event stream is still a reply --------------------
     # Measured on a gateway model (ag/gemini-pro-agent): a request that never

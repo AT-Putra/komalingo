@@ -57,7 +57,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 
 from PIL import Image  # noqa: E402
 
-from sidecar import cache, job  # noqa: E402
+from sidecar import job  # noqa: E402
 from sidecar.llm import LLMClient  # noqa: E402
 from lib.result import Checks, run, skip  # noqa: E402
 from lib.stub_provider import StubProvider, vision_capable  # noqa: E402
@@ -226,7 +226,7 @@ def check_no_partial(c, out, cache_dir):
     c.check(not bad_images, f"every image under the output and the cache decodes fully ({bad_images})")
     c.check(not bad_json, f"every JSON under the cache parses ({bad_json})")
     rasters = [os.path.join(d, f) for d, _s, files in os.walk(cache_dir) for f in files
-               if f == cache.RASTER]
+               if f.startswith("inpainted-v2-") and f.endswith(".png")]
     c.check(len(rasters) >= 1, f"the cancelled run left cached pages behind to resume from "
                                f"({len(rasters)} rasters)")
 

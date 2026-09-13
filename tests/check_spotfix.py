@@ -391,8 +391,9 @@ def section_layout(c: Checks, cache_dir: str, record: dict):
     d = cache.page_dir(h)
     files = sorted(os.listdir(d)) if os.path.isdir(d) else []
     c.check(
-        "regions.json" in files and cache.RASTER in files and "refs.json" in files,
-        f"[layout] a page directory holds regions.json, {cache.RASTER} and "
+        "regions.json" in files and any(f.startswith("inpainted-v2-") for f in files)
+        and "refs.json" in files,
+        "[layout] a page directory holds regions.json, an inpainted-v2-<set>.png and "
         f"refs.json: {files or f'no directory at {d}'}",
     )
     c.check(
@@ -1521,15 +1522,19 @@ def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
     """[not-text] each (lang, model) decides dismissal; legacy nulls are asked again.
 
     Model A dismisses a region; model B, reading the same cached page, is
-    still offered it and typesets it, and the raster is re-erased for B's
-    set; back under A nothing is requested and the region's art comes back.
-    Then the page is rewritten in the LEGACY shape -- regions.json without the
-    dismissed region, the null unmarked, one stored translation and one edit
-    beside it -- and: a text-only client leaves it alone; a record that
-    re-detection does not reproduce is left alone and says so; a vision
-    client re-detects once, asks once, changes only the null region, keeps
-    the translation and the edit, and writes the new format; a second run
-    asks nothing.
+    still offered it and typesets it, over a raster erased for B's set; back
+    under A nothing is requested, nothing is re-erased, and A's raster still
+    holds the region's art. The editor draws over the raster of the pair's
+    own set, or refuses and keeps the edit. Then the page is rewritten in
+    the LEGACY shape -- regions.json without the dismissed region, one
+    undigested raster, the null unmarked, one stored translation and one
+    edit beside it -- and: a text-only client leaves it alone; a record that
+    re-detection does not reproduce is left alone, says so, and is not
+    re-detected again; a vision client re-detects once, asks once, changes
+    only the null region, keeps the translation and the edit, and writes
+    the new format; a run cut off between the answer and the end has still
+    saved the regions; a second run asks nothing; a flag another pass left
+    on a region does not count as this pair's answer.
     """
     import contextlib
     import io
@@ -1556,15 +1561,24 @@ def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
     def tr_path(model):
         return os.path.join(cache.page_dir(h), cache.translation_name("en", model))
 
-    def under(region_id):
+    def under(region_id, kept):
+        """How far the raster erased for `kept` differs from the source under a region."""
         rec = cache.read_regions(h)
         poly = next(r["polygon"] for r in rec["regions"] if r["id"] == region_id)
         from PIL import Image, ImageDraw
         mask = Image.new("L", (source.shape[1], source.shape[0]), 0)
         ImageDraw.Draw(mask).polygon([tuple(p) for p in poly], fill=1)
         inside = np.asarray(mask, dtype=bool)
-        raster = np.asarray(cache.read_raster(h).convert("RGB"), dtype=np.int16)
+        raster = np.asarray(cache.read_raster(h, kept).convert("RGB"), dtype=np.int16)
         return float(np.abs(raster[inside] - source[inside]).max()) if inside.any() else 0.0
+
+    def rasters():
+        return sorted(n for n in os.listdir(cache.page_dir(h)) if n.startswith("inpainted"))
+
+    # The page starts with no erased raster: the sections before this one
+    # erased it for the full set, and this one counts erases per set.
+    for name in rasters():
+        os.remove(os.path.join(cache.page_dir(h), name))
 
     with StubProvider(delay=0, replies={target: None}) as stub_a, StubProvider(delay=0) as stub_b:
         a = LLMClient(stub_a.url, "", "model-a")
@@ -1572,42 +1586,125 @@ def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
 
         got = run(a, "nt-a")
         rec = cache.read_regions(h)
+        all_ids = {r["id"] for r in rec["regions"]}
+        set_a, set_b = all_ids - {target}, all_ids
         entry = json.load(open(tr_path("model-a"), encoding="utf-8")).get(str(target))
         c.check(target in [d["id"] for d in got["dismissed"]]
-                and target in [r["id"] for r in rec["regions"]]
+                and target in all_ids
                 and not any(r.get("not_text") and r["id"] == target for r in rec["regions"])
-                and rec.get("all_regions") is True and target not in rec.get("erased", []),
+                and rec.get("all_regions") is True,
                 f"[not-text] model A's null dismisses the region on the page, but the cached "
-                f"record keeps it, undecided, and records it as not erased "
-                f"(all_regions={rec.get('all_regions')}, erased={rec.get('erased')})")
+                f"record keeps it, undecided (all_regions={rec.get('all_regions')})")
         c.check(entry == {"text": None, "edited": False, "boxed": True},
                 f"[not-text] and A's null is stored with the boxed mark: {entry}")
+        c.check(rasters() == [cache.raster_name(set_a)]
+                and cache.read_raster(h, set_a) is not None and cache.read_raster(h, set_b) is None,
+                f"[not-text] the raster is named by the set it erased, A's: {rasters()}")
 
         before = stub_b.chat_requests
         got_b = run(b, "nt-b")
         kept_b = {r["id"]: r for r in got_b["regions"]}
         c.check(target in kept_b and kept_b[target].get("translation") == f"STUB {target}"
-                and got_b["inpaint_calls"] > 0 and target in cache.read_regions(h)["erased"]
-                and stub_b.chat_requests > before,
+                and got_b["inpaint_calls"] > 0 and stub_b.chat_requests > before
+                and rasters() == sorted([cache.raster_name(set_a), cache.raster_name(set_b)])
+                and under(target, set_b) > 0.0,
                 f"[not-text] model B is offered the region A dismissed, typesets it, and the "
-                f"page is re-erased for B's set (inpaint_calls={got_b['inpaint_calls']}, "
-                f"erased={cache.read_regions(h)['erased']})")
+                f"page is erased once more for B's set, beside A's (inpaint_calls="
+                f"{got_b['inpaint_calls']}, rasters {rasters()})")
 
         before = stub_a.chat_requests
         got_a2 = run(a, "nt-a2")
         c.check(stub_a.chat_requests == before and target in [d["id"] for d in got_a2["dismissed"]]
-                and got_a2["inpaint_calls"] > 0 and under(target) == 0.0,
-                f"[not-text] back under A: zero requests, the region dismissed again, and its art "
-                f"restored in the re-erased raster (requests +{stub_a.chat_requests - before}, "
-                f"max delta under it {under(target):.0f})")
+                and got_a2["inpaint_calls"] == 0 and under(target, set_a) == 0.0,
+                f"[not-text] back under A: zero requests, zero erases, the region dismissed "
+                f"again, and its art intact in A's raster (requests +{stub_a.chat_requests - before}, "
+                f"inpaint_calls={got_a2['inpaint_calls']}, max delta under it "
+                f"{under(target, set_a):.0f})")
+
+        # -- the editor, over the pair's OWN raster ------------------------------
+        item = got_b["item_id"]
+        other = next(iter(set_a))
+        before = stub_b.chat_requests
+        out = _call(c, "[not-text]", pipeline.rerender, "nt-b", item, ordinal, other, "B EDIT",
+                    out_dir, client=b)
+        if out is not None:
+            drawn = {r["id"]: r.get("translation") for r in out["regions"]}
+            c.check(drawn.get(other) == "B EDIT" and drawn.get(target) == f"STUB {target}"
+                    and stub_b.chat_requests == before and rasters() == sorted(
+                        [cache.raster_name(set_a), cache.raster_name(set_b)]),
+                    f"[not-text] an edit under B is drawn over B's raster, with the region A "
+                    f"dismissed still on the page and nothing asked: {drawn}")
+        out = _call(c, "[not-text]", pipeline.rerender, "nt-a", item, ordinal, other, "A EDIT",
+                    out_dir, client=a)
+        if out is not None:
+            c.check(target not in [r["id"] for r in out["regions"]]
+                    and any(r["id"] == other and r.get("translation") == "A EDIT"
+                            for r in out["regions"]),
+                    "[not-text] and an edit under A is drawn over A's, the region A dismissed "
+                    "left off the page")
+        # An edit waits for a run holding the page: one that read the record
+        # mid-migration and persisted after it would put the legacy regions
+        # back, with nothing left to trigger the re-detect again.
+        held, edited = pipeline._page_lock(h), threading.Event()
+        held.acquire()
+        outcome = {}
+
+        def edit_while_held():
+            try:
+                outcome["out"] = _quiet(pipeline.rerender, "nt-b", item, ordinal, other,
+                                        "B WAITED", out_dir, client=b)[0]
+            except Exception as e:  # noqa: BLE001 -- reported by the assert below
+                outcome["error"] = e
+            edited.set()
+
+        threading.Thread(target=edit_while_held, daemon=True).start()
+        waited = not edited.wait(0.5)
+        held.release()
+        finished = edited.wait(10)
+        drawn = {r["id"]: r.get("translation") for r in outcome.get("out", {}).get("regions", [])}
+        c.check(waited and finished and drawn.get(other) == "B WAITED",
+                f"[not-text] an edit waits for a run holding the page's lock, then draws "
+                f"(waited={waited}, finished={finished}, {outcome.get('error') or drawn})")
+        # B's raster gone -- evicted, or never made because the page was last
+        # run under A -- and an edit under B is refused, not drawn over A's
+        # raster with the original text still under it; the edit is kept.
+        os.remove(os.path.join(cache.page_dir(h), cache.raster_name(set_b)))
+        cache._tier.discard_page(h)
+        try:
+            _quiet(pipeline.rerender, "nt-b", item, ordinal, other, "B EDIT 2", out_dir, client=b)
+            refused = None
+        except pipeline.CacheMiss as e:
+            refused = e
+        stored_b = json.load(open(tr_path("model-b"), encoding="utf-8")).get(str(other))
+        c.check(refused is not None and getattr(refused, "kind", None) == "raster"
+                and stored_b == {"text": "B EDIT 2", "edited": True},
+                f"[not-text] with no raster for B's set the edit is refused as a raster miss and "
+                f"kept for the next run: {refused!r}, stored {stored_b}")
+        before = stub_b.chat_requests
+        got_b2 = run(b, "nt-b2")
+        drawn = {r["id"]: r.get("translation") for r in got_b2["regions"]}
+        c.check(stub_b.chat_requests == before and got_b2["inpaint_calls"] > 0
+                and drawn.get(other) == "B EDIT 2" and cache.read_raster(h, set_b) is not None,
+                f"[not-text] and that next run asks nothing, erases B's set again, and draws the "
+                f"kept edit: +{stub_b.chat_requests - before} requests, "
+                f"inpaint_calls={got_b2['inpaint_calls']}, {drawn}")
+
+    # -- a flag left on the region by another pass is not this pair's answer --
+    flagged = {"id": target, "text": "x", "polygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
+               "not_text": True, "dismiss_reason": pipeline.VISION_REASON}
+    missing = pipeline._apply_translations([flagged], h, "en", "never-asked", recheck=False)
+    c.check(missing == {target} and "not_text" not in flagged and "dismiss_reason" not in flagged,
+            f"[not-text] a vision flag already on the region is stripped before a pair that was "
+            f"never asked decides: missing {missing}, region {flagged}")
 
     # -- the legacy shape ------------------------------------------------------
     rec = cache.read_regions(h)
     kept = [r for r in rec["regions"] if r["id"] != target]
-    other = kept[0]["id"]
-    legacy = {k: v for k, v in rec.items() if k not in ("all_regions", "erased")}
+    legacy = {k: v for k, v in rec.items() if k not in ("all_regions", "redetect_failed")}
     legacy["regions"] = kept
     base = json.load(open(tr_path("model-a"), encoding="utf-8"))
+    with open(os.path.join(cache.page_dir(h), cache.raster_name(set_a)), "rb") as fh:
+        raster_a = fh.read()
 
     def make_legacy(other_entry, tamper=False):
         shape = json.loads(json.dumps(legacy))
@@ -1617,6 +1714,12 @@ def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
         stored = dict(base, **{str(target): {"text": None, "edited": False},
                                str(other): other_entry})
         cache._write_json(tr_path("model-a"), stored)
+        # One undigested raster, as the cache held before sets had names.
+        for name in rasters():
+            os.remove(os.path.join(cache.page_dir(h), name))
+        cache._tier.discard_page(h)
+        with open(os.path.join(cache.page_dir(h), cache.raster_name()), "wb") as fh:
+            fh.write(raster_a)
 
     keep = {"text": "KEEP ME", "edited": False}
     edit = {"text": "MY EDIT", "edited": True}
@@ -1634,6 +1737,9 @@ def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
         c.check(cache.read_regions(h).get("all_regions") is False,
                 "[not-text] and re-caching a legacy record without re-detection does not claim "
                 "all_regions")
+        c.check(got["inpaint_calls"] > 0 and rasters() == [cache.raster_name(set_a)],
+                f"[not-text] the undigested raster is erased once more under its set's name and "
+                f"retired: inpaint_calls={got['inpaint_calls']}, rasters {rasters()}")
 
         seeing = LLMClient(stub.url, "", "model-a")
         make_legacy(keep, tamper=True)
@@ -1645,6 +1751,48 @@ def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
                 == {"text": None, "edited": False},
                 f"[not-text] a legacy record re-detection does not reproduce is left as it was, "
                 f"and says so: {stub.chat_requests} requests, stderr {err.getvalue()[-120:]!r}")
+        again = run(seeing, "nt-legacy-mismatch-again")
+        c.check(again["ocr_calls"] == 0 and stub.chat_requests == 0
+                and cache.read_regions(h).get("redetect_failed") is True,
+                f"[not-text] and it is not re-detected on every run after that: "
+                f"ocr_calls={again['ocr_calls']}, record marks redetect_failed="
+                f"{cache.read_regions(h).get('redetect_failed')}")
+
+        # Cut off between the answer and the end of the page: a render that
+        # raises after the re-ask wrote its boxed answers. The record must
+        # already hold the regions, or the page is no longer legacy (no
+        # unmarked null left) and the region is gone for good.
+        make_legacy(keep)
+        real_render = pipeline.render
+
+        def cut(cleaned, regions, page, *a, **kw):
+            if page == ordinal:
+                raise RuntimeError("cut off after the re-ask")
+            return real_render(cleaned, regions, page, *a, **kw)
+
+        pipeline.render = cut
+        try:
+            try:
+                _quiet(pipeline.run_item, CBZ, out_dir, "nt-legacy-cut", client=seeing)
+                cut_off = False
+            except RuntimeError:
+                cut_off = True
+        finally:
+            pipeline.render = real_render
+        rec_cut = cache.read_regions(h)
+        after = json.load(open(tr_path("model-a"), encoding="utf-8"))
+        c.check(cut_off and rec_cut.get("all_regions") is True
+                and target in [r["id"] for r in rec_cut["regions"]]
+                and after.get(str(target)) == {"text": "NOW TEXT", "edited": False},
+                f"[not-text] a run cut off after the re-ask has already saved the regions with "
+                f"the answer (all_regions={rec_cut.get('all_regions')}, {after.get(str(target))})")
+        before = stub.chat_requests
+        got = run(seeing, "nt-legacy-after-cut")
+        c.check(stub.chat_requests == before
+                and any(r["id"] == target and r.get("translation") == "NOW TEXT"
+                        for r in got["regions"]),
+                f"[not-text] and the next run asks nothing and draws it: "
+                f"+{stub.chat_requests - before} requests")
 
         for label, other_entry in (("stored translation", keep), ("edit", edit)):
             make_legacy(other_entry)
@@ -1662,10 +1810,11 @@ def section_not_text(c: Checks, cache_dir: str, out_dir: str, record: dict):
                     f"{label} beside it is untouched: {after.get(str(target))}, {after.get(str(other))}")
             c.check(target in kept_now and kept_now[target]["translation"] == "NOW TEXT"
                     and kept_now[other]["translation"] == other_entry["text"]
-                    and got["ocr_calls"] > 0 and got["inpaint_calls"] > 0,
-                    f"[not-text] ({label}) the page is re-detected once and re-erased, with the "
-                    f"answer on the page (ocr_calls={got['ocr_calls']}, "
-                    f"inpaint_calls={got['inpaint_calls']})")
+                    and got["ocr_calls"] > 0 and got["inpaint_calls"] > 0
+                    and rasters() == [cache.raster_name(set_b)],
+                    f"[not-text] ({label}) the page is re-detected once and erased for the new "
+                    f"set, with the answer on the page (ocr_calls={got['ocr_calls']}, "
+                    f"inpaint_calls={got['inpaint_calls']}, rasters {rasters()})")
             c.check(rec_now.get("all_regions") is True
                     and target in [r["id"] for r in rec_now["regions"]],
                     f"[not-text] ({label}) and the page is cached in the new shape with the region "
@@ -1748,7 +1897,9 @@ def section_torn(c: Checks, cache_dir: str, out_dir: str, record: dict):
     from sidecar import pipeline
 
     h = record["pages"][0]["page_hash"]
-    os.remove(os.path.join(cache.page_dir(h), cache.RASTER))
+    for name in os.listdir(cache.page_dir(h)):
+        if name.startswith("inpainted"):
+            os.remove(os.path.join(cache.page_dir(h), name))
     cache.clear_tier()
 
     # has_page is FORCED true for the duration, and that is the whole point of

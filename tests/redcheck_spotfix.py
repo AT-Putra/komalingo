@@ -159,8 +159,8 @@ CASES = [
     (
         "a torn page directory trusted",
         PIPELINE,
-        "            if cached is not None and cache.read_raster(h) is None:",
-        "            if False:",
+        "    if cached is not None and not cache.has_raster(h):",
+        "    if False:",
         "[torn]",
         "has_page says yes, the raster is gone, and the renderer is handed a "
         "None -- a lost entry becomes a crashed run",
@@ -348,6 +348,52 @@ CASES = [
         "[refs]",
         "a job killed mid-run leaks a reference that pins its pages forever",
     ),
+    (
+        "a legacy null never asked again",
+        PIPELINE,
+        '    legacy = (cached is not None and not cached.get("all_regions") and not redetect_failed\n'
+        '              and recheck and cache.has_unmarked_nulls(h))',
+        '    legacy = False',
+        "[not-text]",
+        "a null decided without the region's position stays decided for good",
+    ),
+    (
+        "the whole page written back after a re-ask",
+        PIPELINE,
+        '             for r in regions if r["id"] in missing},',
+        '             for r in regions},',
+        "[not-text]",
+        "a re-ask meant for the null regions rewords every stored translation "
+        "beside them",
+    ),
+    (
+        "one raster whatever the kept set",
+        PIPELINE,
+        "    cleaned = cache.read_raster(h, kept)",
+        "    cleaned = cache.read_raster(h)",
+        "[not-text]",
+        "the page erased for one model's regions is typeset for another's: text "
+        "left under a translation, or white where a dismissed region's art was",
+    ),
+    (
+        "the legacy record saved only at the end of the page",
+        PIPELINE,
+        "                _persist(h, cached, regions, complete=True)",
+        "                pass",
+        "[not-text]",
+        "a run cut off between the re-ask's answer and the end of the page "
+        "leaves a record that is no longer legacy and still lacks the region, "
+        "for good",
+    ),
+    (
+        "the editor drawing over whichever raster the page has",
+        PIPELINE,
+        '    cleaned = cache.read_raster(h, {r["id"] for r in regions})',
+        '    cleaned = cache.read_raster(h)',
+        "[not-text]",
+        "an edit under one model is typeset over the raster erased for another's "
+        "set, with the original text still under it",
+    ),
 ]
 
 
@@ -419,6 +465,12 @@ def main() -> int:
         try:
             before = open(path, encoding="utf-8", newline="").read()
             digest = sha256(path)
+            # The cases are written with "\n"; a Windows checkout has the
+            # source in CRLF, and a multi-line case would then read as stale.
+            nl = "\r\n" if "\r\n" in before else "\n"
+            old, new = old.replace("\n", nl), new.replace("\n", nl)
+            if extra:
+                extra = (extra[0].replace("\n", nl), extra[1].replace("\n", nl))
             if old not in before:
                 print(f"  MISS  {name}: the text to sabotage is not in "
                       f"{os.path.basename(path)} -- the implementation moved, "

@@ -296,10 +296,17 @@ class _Tier:
             self._bytes.pop(k, None)
 
     def discard(self, key) -> None:
-        """Drop `key` if resident. enforce_cap's path; never touch _items directly."""
+        """Drop `key` if resident."""
         with self._lock:
             self._items.pop(key, None)
             self._bytes.pop(key, None)
+
+    def discard_page(self, page_hash_: str) -> None:
+        """Drop every raster of the page -- enforce_cap's path, one per erased set."""
+        with self._lock:
+            for key in [k for k in self._items if k.split("/", 1)[0] == page_hash_]:
+                self._items.pop(key, None)
+                self._bytes.pop(key, None)
 
     def total_bytes(self) -> int:
         with self._lock:
@@ -604,8 +611,48 @@ def read_regions(page_hash_: str):
     return record
 
 
-def write_raster(page_hash_: str, img: Image.Image, src: Image.Image | None = None) -> str:
+def raster_name(kept=None) -> str:
+    """The raster file for the erased region set `kept`; the undigested name for None.
+
+    One raster per SET, not one per page. Which regions a page erases is a
+    per-(lang, model) decision since the not-text answers stopped being baked
+    into the page record, and a single raster slot either thrashed -- the same
+    page re-inpainted on every language switch -- or was reused for a set it
+    was not erased for: text left under a translation, or white where a
+    dismissed region's art belongs (review). Naming the file by its set ties
+    the label to the pixels, so no record can disagree with the raster.
+    """
+    base = _raster()
+    if kept is None:
+        return base
+    digest = hashlib.sha1(",".join(str(i) for i in sorted(kept)).encode()).hexdigest()[:12]
+    stem, ext = os.path.splitext(base)
+    return f"{stem}-{digest}{ext}"
+
+
+def _raster_files(page_hash_: str) -> list[str]:
+    """This eraser's raster files on disk for the page, newest first."""
+    d = atomic.long_path(page_dir(page_hash_))
+    stem, ext = os.path.splitext(_raster())
+    try:
+        names = [n for n in os.listdir(d)
+                 if n == stem + ext or (n.startswith(stem + "-") and n.endswith(ext))]
+    except OSError:
+        return []
+    def mtime(n):
+        try:
+            return os.path.getmtime(os.path.join(d, n))
+        except OSError:  # evicted between the listing and the stat
+            return 0.0
+    return sorted(names, key=mtime, reverse=True)
+
+
+def write_raster(page_hash_: str, img: Image.Image, src: Image.Image | None = None,
+                 kept=None) -> str:
     """The inpainted page, as PNG, through the shared atomic write.
+
+    `kept` is the region id set the raster erased; see raster_name. Writing
+    a set's raster retires the undigested one, whose set nobody recorded.
 
     `src` is the ORIGINAL archive member, and its icc_profile and exif ride
     along into the cached PNG. They have to: the member itself is inside a zip
@@ -615,10 +662,13 @@ def write_raster(page_hash_: str, img: Image.Image, src: Image.Image | None = No
     down. PngInfo() empty suppresses the tIME chunk so a re-store of identical
     pixels is byte-identical.
     """
-    path = os.path.join(page_dir(page_hash_), _raster())
-    for legacy in LEGACY_RASTERS:
+    name = raster_name(kept)
+    path = os.path.join(page_dir(page_hash_), name)
+    retired = LEGACY_RASTERS + ((_raster(),) if kept is not None else ())
+    for legacy in retired:
         with contextlib.suppress(OSError):
             os.remove(atomic.long_path(os.path.join(page_dir(page_hash_), legacy)))
+            _tier.discard(f"{page_hash_}/{legacy}")
     out = img.convert("RGB")
     kw = {"pnginfo": PngInfo()}
     info = (src or img).info
@@ -628,19 +678,31 @@ def write_raster(page_hash_: str, img: Image.Image, src: Image.Image | None = No
         kw["exif"] = info["exif"]
     with atomic.atomic_write(path, "wb") as fh:
         out.save(fh, format="PNG", compress_level=1, **kw)
-    kept = out.copy()
-    kept.info.update({k: v for k, v in kw.items() if k != "pnginfo"})
-    _tier.put(page_hash_, kept)
+    resident = out.copy()
+    resident.info.update({k: v for k, v in kw.items() if k != "pnginfo"})
+    _tier.put(f"{page_hash_}/{name}", resident)
     return atomic.long_path(path)
 
 
-def read_raster(page_hash_: str):
-    """The inpainted page from the memory tier, or from disk, or None."""
-    hit = _tier.get(page_hash_)
+def read_raster(page_hash_: str, kept=None):
+    """The inpainted page from the memory tier, or from disk, or None.
+
+    With `kept`, exactly that set's raster. Without it, whichever raster the
+    page has, newest first -- for callers that only need a page's pixels.
+    """
+    if kept is not None:
+        name = raster_name(kept)
+    else:
+        files = _raster_files(page_hash_)
+        if not files:
+            return None
+        name = files[0]
+    key = f"{page_hash_}/{name}"
+    hit = _tier.get(key)
     if hit is not None:
         touch(page_hash_)
         return hit
-    path = atomic.long_path(os.path.join(page_dir(page_hash_), _raster()))
+    path = atomic.long_path(os.path.join(page_dir(page_hash_), name))
     if not os.path.exists(path):
         return None
     # Through open_retry, for the reason _read_json is: a raster being
@@ -648,16 +710,19 @@ def read_raster(page_hash_: str):
     with atomic.open_retry(path, "rb") as fh, Image.open(fh) as img:
         img.load()
         out = img.convert("RGB")
-    _tier.put(page_hash_, out)
+    _tier.put(key, out)
     touch(page_hash_)
     return out
 
 
+def has_raster(page_hash_: str) -> bool:
+    """Whether the page has any raster on disk, without decoding one."""
+    return bool(_raster_files(page_hash_))
+
+
 def has_page(page_hash_: str) -> bool:
     d = atomic.long_path(page_dir(page_hash_))
-    return os.path.exists(os.path.join(d, REGIONS)) and os.path.exists(
-        os.path.join(d, _raster())
-    )
+    return os.path.exists(os.path.join(d, REGIONS)) and has_raster(page_hash_)
 
 
 def _raster() -> str:
@@ -860,7 +925,7 @@ def enforce_cap(job_id: str | None = None) -> str | None:
                 continue
             freed = _dir_size(page_dir(h))
             shutil.rmtree(atomic.long_path(page_dir(h)), ignore_errors=True)
-            _tier.discard(h)
+            _tier.discard_page(h)
             size -= freed
 
     if size <= target:
