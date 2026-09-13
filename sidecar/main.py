@@ -40,6 +40,7 @@ from . import atomic, cache, job, pipeline  # noqa: E402
 from .detect import DetectError  # noqa: E402
 from .llm import LLMClient, ProviderError, SettingsError  # noqa: E402
 from .models import FetchError  # noqa: E402
+from .textmask import EraseError  # noqa: E402
 from .pipeline import CacheMiss  # noqa: E402
 
 HOST = "127.0.0.1"  # never 0.0.0.0. See the module docstring.
@@ -406,9 +407,9 @@ def translate(req: TranslateRequest):
         # it. The named type is what keeps this handler honest about which of
         # the two it caught.
         return _bad_settings_response(e)
-    except (FetchError, DetectError) as e:
-        # ONE handler for both, because DetectError deliberately mirrors
-        # FetchError's (reason, kind) shape -- see its docstring. A caller that
+    except (FetchError, DetectError, EraseError) as e:
+        # ONE handler for all three, because DetectError and EraseError
+        # deliberately mirror FetchError's (reason, kind) shape. A caller that
         # can show one does not need a second display path for the other.
         #
         # Without this the whole naming discipline underneath stops here.
@@ -456,7 +457,7 @@ def translate_item(req: ItemRequest):
         return _provider_response(e)
     except SettingsError as e:
         return _bad_settings_response(e)
-    except (FetchError, DetectError) as e:
+    except (FetchError, DetectError, EraseError) as e:
         return Response(
             content=json.dumps({"error": e.reason, "kind": e.kind}),
             status_code=503,

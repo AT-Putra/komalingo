@@ -46,8 +46,8 @@ from .containers.read_cbz import _natural_key
 # able to offer the gate more than it will take -- otherwise a broken gate
 # would be hidden by a narrow queue, and check_batch's "the stub could have
 # seen more than 3" control would be vacuous. Wider than 4 buys nothing: the
-# detector and the OCR are serialised behind pipeline._MODEL_LOCK, so the
-# fourth worker is already mostly waiting for a model.
+# detector, the OCR and the eraser's models are serialised behind
+# pipeline._MODEL_LOCK, so the fourth worker is already mostly waiting for a model.
 WORKERS = 4
 
 CANCELLED_REASON = "cancelled before start"

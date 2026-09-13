@@ -131,8 +131,17 @@ def _std_ratio_ok(s_ring: float, s_inner: float) -> tuple[bool, str]:
 # -- the three asserts -----------------------------------------------------
 
 
-def _assert_ring(c, out_gray: np.ndarray, points, rid, skips: list) -> None:
-    """Assert 1. Continuity with the surrounding bubble."""
+def _assert_ring(c, out_gray: np.ndarray, points, rid, skips: list,
+                 src_gray: np.ndarray | None = None) -> None:
+    """Assert 1. Continuity with the surrounding bubble.
+
+    `src_gray`, when given, takes out of the inner band the dark pixels the
+    eraser left exactly as drawn. Phase 2c: a detector quad can reach past its
+    bubble's border -- the smoke page's region 1 does, at a corner, over the
+    outline and the screentone beyond it -- and the eraser now keeps that art
+    instead of whitening it, so it is page, not fill. A box over the tone
+    whitens those pixels, so they stay in the band and the box still fails.
+    """
     size = (out_gray.shape[1], out_gray.shape[0])
     ring = _band(size, points, RING_INNER, RING_OUTER)
     inner = _band(size, points, -RING_OUTER, -RING_INNER)
@@ -143,6 +152,8 @@ def _assert_ring(c, out_gray: np.ndarray, points, rid, skips: list) -> None:
 
     lo, hi = float(out_gray.min()), float(out_gray.max())
     cutoff = lo + DARK_FRAC_OF_RANGE * (hi - lo)
+    if src_gray is not None:
+        inner = inner & ~((out_gray == src_gray) & (src_gray < cutoff))
     valid = ring & (out_gray >= cutoff)
     coverage = valid.sum() / max(ring.sum(), 1)
 
@@ -733,7 +744,7 @@ def main():
     skips: list = []
     for r in regions:
         points, rid = r["polygon"], r["id"]
-        _assert_ring(c, out_gray, points, rid, skips)
+        _assert_ring(c, out_gray, points, rid, skips, src_gray)
         _assert_step_edge(c, src_gray, out_gray, points, rid)
         _assert_ink(c, src_gray, out_gray, points, rid)
 

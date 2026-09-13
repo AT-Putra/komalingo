@@ -60,6 +60,7 @@ this module ever feeds a stored flag back in as input.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -78,7 +79,16 @@ from . import atomic
 PAGES = "pages"
 JOBS = "jobs"
 REGIONS = "regions.json"
-RASTER = "inpainted.png"
+# Versioned with the eraser. A page cached before Phase 2c holds a raster with
+# white boxes over its text; has_page() needs THIS name, so that page reads as
+# a miss and is erased again, instead of rendering the boxes forever. The old
+# file is deleted when the new one is written, or it would sit in the page
+# directory counting against the cap until the whole page was evicted.
+RASTER = "inpainted-v2.png"
+LEGACY_RASTERS = ("inpainted.png",)
+# MT_INPAINTER=fill (the pre-2c eraser, kept for comparison) caches under its
+# own name, so a raster it wrote is never served to a run of the real one.
+FILL_RASTER = "inpainted-fill.png"
 REFS = "refs.json"
 PLACEMENT = "placement.json"
 RUNNING = "running.json"
@@ -562,7 +572,10 @@ def write_raster(page_hash_: str, img: Image.Image, src: Image.Image | None = No
     down. PngInfo() empty suppresses the tIME chunk so a re-store of identical
     pixels is byte-identical.
     """
-    path = os.path.join(page_dir(page_hash_), RASTER)
+    path = os.path.join(page_dir(page_hash_), _raster())
+    for legacy in LEGACY_RASTERS:
+        with contextlib.suppress(OSError):
+            os.remove(atomic.long_path(os.path.join(page_dir(page_hash_), legacy)))
     out = img.convert("RGB")
     kw = {"pnginfo": PngInfo()}
     info = (src or img).info
@@ -584,7 +597,7 @@ def read_raster(page_hash_: str):
     if hit is not None:
         touch(page_hash_)
         return hit
-    path = atomic.long_path(os.path.join(page_dir(page_hash_), RASTER))
+    path = atomic.long_path(os.path.join(page_dir(page_hash_), _raster()))
     if not os.path.exists(path):
         return None
     # Through open_retry, for the reason _read_json is: a raster being
@@ -600,8 +613,21 @@ def read_raster(page_hash_: str):
 def has_page(page_hash_: str) -> bool:
     d = atomic.long_path(page_dir(page_hash_))
     return os.path.exists(os.path.join(d, REGIONS)) and os.path.exists(
-        os.path.join(d, RASTER)
+        os.path.join(d, _raster())
     )
+
+
+def _raster() -> str:
+    """The raster's file name for the eraser this process runs.
+
+    Read from the environment directly rather than through inpainter.resolve:
+    an unknown MT_INPAINTER is the eraser's error to raise, with its reason,
+    not a cache lookup's.
+    """
+    from . import inpainter  # noqa: PLC0415 -- the models behind it load lazily
+
+    flag = os.environ.get(inpainter.ENV_FLAG, "").strip().lower()
+    return FILL_RASTER if flag == inpainter.FILL else RASTER
 
 
 # -- translations and edits ------------------------------------------------

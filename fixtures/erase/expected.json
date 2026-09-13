@@ -1,0 +1,67 @@
+{
+  "page_01.png": {
+    "items": [
+      {
+        "box": [
+          110,
+          150,
+          600,
+          420
+        ],
+        "glyph_px": 120,
+        "kind": "sfx",
+        "text": "ドドド"
+      },
+      {
+        "box": [
+          640,
+          150,
+          1080,
+          720
+        ],
+        "glyph_px": 56,
+        "kind": "translucent",
+        "text": "すごいな"
+      },
+      {
+        "box": [
+          180,
+          930,
+          620,
+          1480
+        ],
+        "glyph_px": 52,
+        "kind": "white",
+        "text": "またあした"
+      },
+      {
+        "box": [
+          720,
+          960,
+          1060,
+          1450
+        ],
+        "glyph_px": 60,
+        "kind": "dark",
+        "text": "待てよ"
+      },
+      {
+        "box": [
+          84,
+          960,
+          154,
+          1440
+        ],
+        "glyph_px": 52,
+        "kind": "tight",
+        "text": "うそだろ"
+      }
+    ],
+    "notes": "Ground-truth glyph ink in page_01_text.png (255). Hatching fills panel 0 behind (a) and (b); (b) is a 60% white veil over it.",
+    "size": [
+      1200,
+      1700
+    ],
+    "truth": "page_01_text.png"
+  }
+}

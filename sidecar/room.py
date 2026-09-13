@@ -84,10 +84,10 @@ EDGE_FILL_MIN = 0.6  # a page-edge flood: the block's share of it along the text
 def room(page, points, others=()) -> list[tuple[float, float]] | None:
     """The bubble interior around `points` on the CLEANED page, or None.
 
-    `page` is the page after inpaint -- the text block is already white, so
-    it seeds the flood. `others` are the page's other regions: their erased
-    quads are white too, and on page 010 two of them bridged a bubble to the
-    box art beside it, so they are walls here. Returns a polygon in page
+    `page` is the page after inpaint -- the text block is erased, and it
+    seeds the flood. `others` are the page's other regions: on page 010 two of
+    their erased quads bridged a bubble to the box art beside it, so they are
+    walls here. Returns a polygon in page
     coordinates that contains (>= CONTAIN_MIN of) the block, sits inside the
     bubble's border with a margin, is round enough to be a bubble and not a
     panel the flood escaped into, and never reaches the window this function
@@ -110,17 +110,27 @@ def room(page, points, others=()) -> list[tuple[float, float]] | None:
         return None
 
     gray = np.asarray(page.convert("L").crop((wx0, wy0, wx1, wy1)))
-    wall = (gray < WALL_THRESHOLD).astype(np.uint8)
+    block = np.zeros(gray.shape, np.uint8)
+    cv2.fillPoly(block, [np.array([(px - wx0, py - wy0) for px, py in points], np.int32)], 1)
+
+    # Phase 2c: the erased block is no longer a white box, it continues the
+    # page -- white in a white bubble, black in a black one, the art showing
+    # through a translucent one. So a wall is measured against the bubble's
+    # OWN interior, read off the erased block: on a light interior it is dark
+    # ink exactly as before, on a dark interior it is light page. And the
+    # block itself is never a wall: it is where the text was, and on a
+    # translucent bubble the rebuilt hatching inside it cut the seed into
+    # cells too small to grow, so the English was set in the bare column.
+    if block.any() and np.median(gray[block == 1]) < WALL_THRESHOLD:
+        wall = (gray > 255 - WALL_THRESHOLD).astype(np.uint8)
+    else:
+        wall = (gray < WALL_THRESHOLD).astype(np.uint8)
     for other in others:
         cv2.fillPoly(wall, [np.array([(px - wx0, py - wy0) for px, py in other], np.int32)], 1)
     k = 2 * WALL_DILATE_PX + 1
     wall = cv2.dilate(wall, np.ones((k, k), np.uint8))
-
-    block = np.zeros(gray.shape, np.uint8)
-    cv2.fillPoly(block, [np.array([(px - wx0, py - wy0) for px, py in points], np.int32)], 1)
-    # The block may carry residual ink the erase missed; the seed is its
-    # free part, and a block with no free pixel has nothing to grow from.
-    seed = (block == 1) & (wall == 0)
+    wall[block == 1] = 0
+    seed = block == 1
     if not seed.any():
         return None
 

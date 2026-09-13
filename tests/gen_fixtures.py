@@ -1215,6 +1215,114 @@ def gen_pdf():
     }
 
 
+# --------------------------------------------------------------------------
+# erase/page_01.png -- Phase 2c's erase gate: text that is NOT on white.
+# --------------------------------------------------------------------------
+# The inpainter used to fill every detected quad flat white. That passed every
+# page above, because every bubble above is opaque white. This page is the four
+# cases it boxed over, or would have: an outlined SFX laid across hatched art, a
+# bubble drawn 60% opaque over the same hatching, white text in a black bubble,
+# and one plain white bubble as the control the fast path must still take.
+#
+# page_01_text.png is the GROUND TRUTH of where glyph ink was drawn (255), SFX
+# outline included -- the same draw calls on a black canvas -- so the gate can
+# tell art the eraser rebuilt from art it painted over, without trusting any
+# model's idea of where the text is.
+
+ERASE_PANELS = [(60, 60, 1140, 800), (60, 850, 1140, 1560)]
+ERASE_ITEMS = [
+    # kind, box (x0, y0, x1, y1) the item sits in, text, glyph px
+    {"kind": "sfx", "box": [110, 150, 600, 420], "text": "ドドド", "glyph_px": 120},
+    {"kind": "translucent", "box": [640, 150, 1080, 720], "text": "すごいな", "glyph_px": 56},
+    {"kind": "white", "box": [180, 930, 620, 1480], "text": "またあした", "glyph_px": 52},
+    {"kind": "dark", "box": [720, 960, 1060, 1450], "text": "待てよ", "glyph_px": 60},
+    # A column in a bubble barely wider than it: the detector's quad (unclip
+    # 2.0) reaches past the glyphs and over the outline, which an erase of the
+    # whole flat quad cut through until the review caught it.
+    {"kind": "tight", "box": [84, 960, 154, 1440], "text": "うそだろ", "glyph_px": 52},
+]
+ERASE_SFX_STROKE = 8
+ERASE_TRANSLUCENT_ALPHA = 0.6
+
+
+def _hatching(size, spacing=14, width=3):
+    """Diagonal line art on light grey: art whose every pixel a box would lose."""
+    w, h = size
+    art = Image.new("L", size, 215)
+    d = ImageDraw.Draw(art)
+    for off in range(-h, w + h, spacing):
+        d.line((off, 0, off + h, h), fill=30, width=width)
+    for off in range(-h, w + h, spacing * 3):
+        d.line((off, h, off + h, 0), fill=70, width=2)
+    return art.convert("RGB")
+
+
+def gen_erase():
+    page = Image.new("RGB", (W, H), "white")
+    truth = Image.new("L", (W, H), 0)
+    draw, tdraw = ImageDraw.Draw(page), ImageDraw.Draw(truth)
+    for p in ERASE_PANELS:
+        draw.rectangle(p, outline="black", width=7)
+    px0, py0, px1, py1 = ERASE_PANELS[0]
+    page.paste(_hatching((px1 - px0 - 14, py1 - py0 - 14)), (px0 + 7, py0 + 7))
+
+    sfx, translucent, white, dark, tight = ERASE_ITEMS
+
+    # (a) SFX: big katakana, black fill, thick white outline, straight on the art.
+    font = load_font(JA_FONTS, sfx["glyph_px"])
+    at = (sfx["box"][0] + 20, sfx["box"][1] + 60)
+    for d, ink in ((draw, "black"), (tdraw, 255)):
+        d.text(at, sfx["text"], font=font, fill=ink,
+               stroke_width=ERASE_SFX_STROKE, stroke_fill="white" if d is draw else 255)
+
+    # (b) a bubble 60% opaque over the hatching: the art shows through it.
+    box = translucent["box"]
+    veil = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(veil).ellipse(box, fill=round(255 * ERASE_TRANSLUCENT_ALPHA))
+    page = Image.composite(Image.new("RGB", (W, H), "white"), page, veil)
+    draw = ImageDraw.Draw(page)
+    draw.ellipse(box, outline="black", width=4)
+    font = load_font(JA_FONTS, translucent["glyph_px"])
+    draw_vertical(draw, translucent["text"], box, font)
+    draw_vertical(tdraw, translucent["text"], box, font, fill=255)
+
+    # (c) the control: an opaque white bubble on white.
+    box = white["box"]
+    draw.ellipse(box, fill="white", outline="black", width=5)
+    font = load_font(JA_FONTS, white["glyph_px"])
+    draw_vertical(draw, white["text"], box, font)
+    draw_vertical(tdraw, white["text"], box, font, fill=255)
+
+    # (d) white text in a black bubble.
+    box = dark["box"]
+    draw.ellipse(box, fill="black", outline="black", width=5)
+    font = load_font(JA_FONTS, dark["glyph_px"])
+    draw_vertical(draw, dark["text"], box, font, fill="white")
+    draw_vertical(tdraw, dark["text"], box, font, fill=255)
+
+    # (e) a white bubble barely wider than its centred column.
+    box = tight["box"]
+    draw.ellipse(box, fill="white", outline="black", width=4)
+    font = load_font(JA_FONTS, tight["glyph_px"])
+    x = (box[0] + box[2]) / 2 - font.size / 2
+    top = (box[1] + box[3]) / 2 - len(tight["text"]) * font.size * 1.12 / 2
+    for d, ink in ((draw, "black"), (tdraw, 255)):
+        for gi, ch in enumerate(tight["text"]):
+            d.text((x, top + gi * font.size * 1.12), ch, font=font, fill=ink)
+
+    save_png(page, FIXTURES / "erase" / "page_01.png")
+    save_png(truth, FIXTURES / "erase" / "page_01_text.png")
+    return {
+        "page_01.png": {
+            "size": [W, H],
+            "truth": "page_01_text.png",
+            "items": ERASE_ITEMS,
+            "notes": "Ground-truth glyph ink in page_01_text.png (255). Hatching fills "
+                     "panel 0 behind (a) and (b); (b) is a 60% white veil over it.",
+        }
+    }
+
+
 def write_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     # sort_keys + fixed separators + trailing newline: byte-identical across runs.
@@ -1228,7 +1336,7 @@ def write_json(path, obj):
 
 
 def main():
-    for sub in ("smoke", "bubbles", "cbz", "zh", "ko", "pdf"):
+    for sub in ("smoke", "bubbles", "cbz", "zh", "ko", "pdf", "erase"):
         shutil.rmtree(FIXTURES / sub, ignore_errors=True)
     # archives/ is cleared by CONTENT, not wholesale: benign.cbr is committed
     # and cannot be regenerated -- no free tool writes RAR -- so an rmtree here
@@ -1246,7 +1354,9 @@ def main():
     ko = gen_cjk("ko", KO_PHRASES, KO_FONTS)
     archives = gen_archives()
     pdf = gen_pdf()
+    erase = gen_erase()
 
+    write_json(FIXTURES / "erase" / "expected.json", erase)
     write_json(FIXTURES / "smoke" / "expected.json", smoke)
     write_json(FIXTURES / "bubbles" / "expected.json", bubbles)
     write_json(FIXTURES / "cbz" / "expected.json", cbz)
@@ -1256,8 +1366,8 @@ def main():
     write_json(FIXTURES / "pdf" / "expected.json", pdf)
 
     n = (len(smoke) + len(bubbles) + len(cbz) + len(zh) + len(ko)
-         + len([k for k in archives if not k.startswith("_")]) + len(pdf))
-    print(f"generated {n} fixtures + 7 expected.json under {FIXTURES}")
+         + len([k for k in archives if not k.startswith("_")]) + len(pdf) + len(erase))
+    print(f"generated {n} fixtures + 8 expected.json under {FIXTURES}")
     for lang, pages in (("zh", zh), ("ko", ko)):
         for name in sorted(pages):
             print(f"  {lang}/{name}  {len(pages[name]['bubbles'])} bubbles, {pages[name]['font']}")

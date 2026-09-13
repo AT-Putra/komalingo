@@ -124,6 +124,27 @@ FONT_CANDIDATES = ["C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/segoeui.ttf"]
 # what a glyph pixel is.
 INK_THRESHOLD = 128
 
+# Phase 2c: the ink is chosen from what the eraser left under the text. Until
+# then every region sat on a white box, so black was always legible; now an SFX
+# is set over rebuilt art and a line in a black bubble over black. Measured in
+# gray over the region's own erased block -- not the room, which can hold a
+# punctuation region left as drawn ("!!") and read a white bubble as busy:
+#   PLAIN  mean >= PLAIN_MEAN and std <= PLAIN_STD -> black, no stroke (as before)
+#   DARK   mean <  DARK_MEAN                        -> white, black stroke
+#   BUSY   anything else                            -> black, white stroke
+# The stroke is raster-only: the layout, and every metric measured from it,
+# are computed with the plain ink, so a style can never move a fit.
+INK_PLAIN, INK_DARK, INK_BUSY = "plain", "dark", "busy"
+PLAIN_MEAN, PLAIN_STD = 200, 25
+DARK_MEAN = 100
+STROKE_FRAC = 0.12  # of font_px
+STROKE_MIN_PX = 2
+_INKS = {  # style -> (fill, stroke colour)
+    INK_PLAIN: ("black", None),
+    INK_DARK: ("white", "black"),
+    INK_BUSY: ("black", "white"),
+}
+
 # fit_failed reasons. Named, because "fit_failed" alone does not tell the user
 # whether to shorten their text or complain that the provider sent nothing.
 REASON_EMPTY = "empty translation"
@@ -173,6 +194,7 @@ class Fit:
     # region's own polygon was used. Derived on every pass, never loaded.
     room: list | None = None
     font_cap_px: int = 0  # rung 1's ceiling from the source glyph size; 0 = none
+    ink: str = INK_PLAIN  # Phase 2c: how the lines were inked, from the erased block
 
 
 # -- geometry --------------------------------------------------------------
@@ -709,11 +731,35 @@ def typeset_page(regions, page: Image.Image, *, allow_retranslate: bool = True, 
         if placed:
             _commit(fit, points, placed, rendered, page_w, page_h)
 
-    for fit in fits:
+    gray = np.asarray(page.convert("L"))
+    for idx, fit in enumerate(fits):
+        if not fit.lines:
+            continue
+        fit.ink = ink_style(gray, all_points[idx])
+        fill, stroke = _INKS[fit.ink]
+        width = max(STROKE_MIN_PX, round(STROKE_FRAC * fit.font_px)) if stroke else 0
         for x, y, line in fit.lines:
-            _draw_line(draw, x, y, line, fit.font_px, fit.tracking)
+            _draw_line(draw, x, y, line, fit.font_px, fit.tracking, fill, width, stroke)
 
     return out, fits
+
+
+def ink_style(gray: np.ndarray, points) -> str:
+    """INK_PLAIN, INK_DARK or INK_BUSY from the page's gray inside `points`."""
+    h, w = gray.shape
+    x0, y0, x1, y1 = (int(v) for v in _bbox(points))
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1 + 1), min(h, y1 + 1)
+    if x1 <= x0 or y1 <= y0:
+        return INK_PLAIN
+    mask = Image.new("1", (x1 - x0, y1 - y0), 0)
+    ImageDraw.Draw(mask).polygon([(px - x0, py - y0) for px, py in points], fill=1)
+    px = gray[y0:y1, x0:x1][np.asarray(mask, dtype=bool)]
+    if px.size == 0:
+        return INK_PLAIN
+    mean, std = float(px.mean()), float(px.std())
+    if mean >= PLAIN_MEAN and std <= PLAIN_STD:
+        return INK_PLAIN
+    return INK_DARK if mean < DARK_MEAN else INK_BUSY
 
 
 def _commit(fit: Fit, points, placed, text: str, page_w: int, page_h: int) -> None:
@@ -728,19 +774,30 @@ def _commit(fit: Fit, points, placed, text: str, page_w: int, page_h: int) -> No
      fit.clipped_glyphs, fit.offpage_ink_px) = _raster_metrics(points, placed, page_w, page_h)
 
 
-def _draw_line(draw, x: float, y: float, line: str, font_px: int, tracking: float) -> None:
+def _draw_line(draw, x: float, y: float, line: str, font_px: int, tracking: float,
+               fill: str = "black", stroke_width: int = 0, stroke_fill: str | None = None) -> None:
     """Draw one line glyph by glyph, because PIL has no tracking parameter.
 
     `tracking` is the value the LAYOUT used, not a constant. Drawing with
     TIGHT_TRACKING_EM unconditionally -- as this did until check_inpaint's
     composite gate caught it -- squeezed rung-1 lines measured at zero tracking,
     and the raster drifted off the geometry the engine reported for it.
+
+    The stroke is drawn in a pass of its own under every glyph, so a glyph's
+    outline never paints over its left neighbour's fill.
     """
     font = load_font(font_px)
+    advances = []
     cx = x
     for ch in line:
-        draw.text((cx, y), ch, font=font, fill="black")
+        advances.append(cx)
         cx += font.getlength(ch) + tracking * font_px
+    if stroke_width and stroke_fill:
+        for ch, gx in zip(line, advances, strict=True):
+            draw.text((gx, y), ch, font=font, fill=stroke_fill,
+                      stroke_width=stroke_width, stroke_fill=stroke_fill)
+    for ch, gx in zip(line, advances, strict=True):
+        draw.text((gx, y), ch, font=font, fill=fill)
 
 
 def _refuse_running_loop() -> None:

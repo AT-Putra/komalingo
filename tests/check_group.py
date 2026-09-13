@@ -335,8 +335,11 @@ def _pipeline(c, entry, src, by_bubble: dict[int, dict]) -> None:
     # The erase took the PARTS and left the art between them: on the CLEANED
     # page (the same two stages run_page ran, before any English was drawn)
     # the strip of dark block between the two stacked words is still dark
-    # and each word's quad is white. A hull erase -- page 012's box down the
-    # character -- turns the strip white too.
+    # and each word's white glyphs are gone. A hull erase -- page 012's box
+    # down the character -- turns the strip white too. Phase 2c: "gone", not
+    # "white". The words are white ink on the dark block, and the eraser now
+    # continues the block under them; until 2c this assert read "the quad is
+    # white", which is the box-over the eraser exists to stop drawing.
     cleaned_gray = np.asarray(cleaned.convert("L"))
     gx0, gy0, gx1, gy1 = entry["art"]["stack_gap"]
     strip = cleaned_gray[gy0:gy1, gx0:gx1]
@@ -345,10 +348,12 @@ def _pipeline(c, entry, src, by_bubble: dict[int, dict]) -> None:
             f"the erase (mean {strip.mean():.0f} < 100) -- only the parts were filled")
     stack = next(r for r in record["regions"] if len(r.get("parts") or []) == 2)
     for k, part in enumerate(stack["parts"]):
-        bright = cleaned_gray[_mask(src.size, part)]
-        c.check(bright.size and (bright > 200).mean() > 0.95,
-                f"[pipeline parts] word {k} of the stack is erased: {(bright > 200).mean():.2f} "
-                f"of its quad is white on the cleaned page")
+        before = np.asarray(src.convert("L"))[_mask(src.size, part)]
+        after = cleaned_gray[_mask(src.size, part)]
+        c.check(after.size and (before > 200).mean() > 0.05 and (after > 200).mean() < 0.01,
+                f"[pipeline parts] word {k} of the stack is erased: white glyph ink "
+                f"{(before > 200).mean():.2f} -> {(after > 200).mean():.3f} of its quad, "
+                f"and the quad is not a white box")
 
     # New ink is ink on the delivered page that the source did not have, so
     # the panel borders, the art block and the title do not count. Every
@@ -359,7 +364,12 @@ def _pipeline(c, entry, src, by_bubble: dict[int, dict]) -> None:
     every = hulls.copy()
     for r in record["regions"]:
         every |= _mask(src.size, r.get("room") or r["polygon"])
-    new_ink = _ink(out) & ~_ink(src)
+    # Ink the RENDER drew: dark on the delivered page and dark on neither the
+    # source nor the cleaned page. Phase 2c's eraser continues the art under
+    # erased text, so a white title glyph that ran a pixel past its quad on the
+    # dark block comes back dark -- that is the erase, not English outside its
+    # bubble, and this assert is about the English.
+    new_ink = _ink(out) & ~_ink(src) & ~_ink(cleaned)
     outside = int((new_ink & ~every).sum())
     c.check(outside == 0,
             f"[pipeline inside] {outside} pixels of new ink outside every region == 0")

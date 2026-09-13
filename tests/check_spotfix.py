@@ -390,8 +390,8 @@ def section_layout(c: Checks, cache_dir: str, record: dict):
     d = cache.page_dir(h)
     files = sorted(os.listdir(d)) if os.path.isdir(d) else []
     c.check(
-        "regions.json" in files and "inpainted.png" in files and "refs.json" in files,
-        f"[layout] a page directory holds regions.json, inpainted.png and "
+        "regions.json" in files and cache.RASTER in files and "refs.json" in files,
+        f"[layout] a page directory holds regions.json, {cache.RASTER} and "
         f"refs.json: {files or f'no directory at {d}'}",
     )
     c.check(
@@ -957,7 +957,7 @@ def section_cap_wiring(c: Checks, cache_dir: str, out_dir: str, record: dict):
     # just below the tree, and a job run. The JOB must evict it.
     cold = "0" * 64
     os.makedirs(cache.page_dir(cold), exist_ok=True)
-    with open(os.path.join(cache.page_dir(cold), "inpainted.png"), "wb") as fh:
+    with open(os.path.join(cache.page_dir(cold), cache.RASTER), "wb") as fh:
         fh.write(b"\0" * 200_000)
     cache._write_json(os.path.join(cache.page_dir(cold), cache.REFS), [])
     old = time.time() - 10_000
@@ -1292,7 +1292,7 @@ def section_torn(c: Checks, cache_dir: str, out_dir: str, record: dict):
     from sidecar import pipeline
 
     h = record["pages"][0]["page_hash"]
-    os.remove(os.path.join(cache.page_dir(h), "inpainted.png"))
+    os.remove(os.path.join(cache.page_dir(h), cache.RASTER))
     cache.clear_tier()
 
     # has_page is FORCED true for the duration, and that is the whole point of

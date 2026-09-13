@@ -22,9 +22,9 @@ import re
 import threading
 from dataclasses import asdict
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
-from . import atomic, cache, imaging, ocr_cjk, ocr_ja, safety, typeset
+from . import atomic, cache, imaging, inpainter, ocr_cjk, ocr_ja, safety, typeset
 from . import detect as detector
 from .containers import archive, pdf
 
@@ -63,8 +63,8 @@ def _changed_in_polygon(before: Image.Image, after: Image.Image, polygon) -> int
     """Pixels that actually differ inside the polygon's bbox.
 
     The evidence check_package.py reads back. Measured CLEANED -> DRAWN, not
-    ORIGINAL -> DRAWN: inpaint has already repainted the whole polygon white by
-    then, so comparing against the original counts inpaint's work and reports a
+    ORIGINAL -> DRAWN: inpaint has already erased the source glyphs by then, so
+    comparing against the original counts inpaint's work and reports a
     healthy number for a renderer that drew nothing at all. Only the narrower
     comparison can go red when render no-ops.
     """
@@ -202,6 +202,7 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
     asked = [r for r in regions if not r.get("not_text")]
     if client is None:
         # ponytail: offline placeholder so the skeleton runs with no provider.
+        # Ceiling: every region reads HELLO; nothing is translated.
         # Upgrade path: main.py builds an LLMClient from the settings payload.
         for r in asked:
             r["translation"] = "HELLO"
@@ -250,29 +251,19 @@ def dismiss(regions: list[dict]) -> tuple[list[dict], list[dict]]:
 def inpaint(img: Image.Image, regions: list[dict], page: int) -> tuple[Image.Image, int]:
     """Erase the original text. Returns (image, call count).
 
-    Fills each detected polygon with flat white. That is CORRECT, not a
-    placeholder, for the case this pipeline actually meets: a detected region is
-    the text area *inside* a speech bubble, and a manga bubble's interior is
-    white, so filling it white continues the bubble's own interior. Phase 2a's
-    check_inpaint.py is what holds that claim to account -- it compares the
-    filled area against the ring of bubble just outside it, and a flat fill
-    passes only where the surrounding bubble is flat too.
+    Phase 2c: inpainter.py. Only the glyph pixels of the regions' parts are
+    erased, and what was under them is continued -- a flat fill where the
+    surround is flat (the white bubble), manga-finetuned LaMa everywhere else
+    (SFX over art, screentone, translucent bubbles). Until 2c this filled every
+    part polygon flat white, which was right inside an opaque white bubble and
+    a white box over the art everywhere else; MT_INPAINTER=fill still does.
 
-    Ceiling: a bubble whose interior carries screentone or a gradient. There,
-    flat white is a box-over and check_inpaint.py's ring assert says so.
-    Upgrade path: a texture-continuing inpainter behind this same call. It is
-    NOT a Phase 2a deliverable -- the build order lists no inpainter module in
-    2a, and there is no "Phase 1b" despite what this docstring used to claim.
+    Under _MODEL_LOCK like detect and OCR: the text-mask and LaMa sessions are
+    lazy globals, and four workers reaching the first page at once would each
+    build them.
     """
-    out = img.convert("RGB").copy()
-    draw = ImageDraw.Draw(out)
-    for r in regions:
-        # Phase 2b: the PARTS, not the hull. A region is now the hull of the
-        # quads the detector returned for one block, and the hull spans
-        # whatever lies between them -- white inside a bubble, a character's
-        # face under text laid across the art. Only the quads held glyphs.
-        for part in r.get("parts") or [r["polygon"]]:
-            draw.polygon([tuple(p) for p in part], fill="white")
+    with _MODEL_LOCK:
+        out, _ = inpainter.erase(img, regions)
     emit("inpaint", f"{len(regions)} calls", page, 65)
     return out, len(regions)
 
@@ -405,7 +396,8 @@ def write_regions(record: dict, dest_dir) -> str:
 # ordinals -- is the thing being run.
 
 
-# Serialises the detector and OCR across concurrent jobs. See run_item.
+# Serialises the models -- detector, OCR, and since Phase 2c the text-mask and
+# LaMa sessions inpaint() runs -- across concurrent jobs. See run_item.
 _MODEL_LOCK = threading.Lock()
 
 

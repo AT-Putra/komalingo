@@ -126,6 +126,36 @@ MANIFEST = {
             },
         },
     },
+    # The erase stage (inpaint), Phase 2c. Two models, both run by onnxruntime
+    # and both pinned to a HuggingFace COMMIT, the same rule as manga-ocr.
+    # Each digest is the lfs.oid HuggingFace reports at that revision, and
+    # agrees with the sha256 of the downloaded bytes.
+    #
+    # comic-text-detector: YOLOv5 + UNet text-mask head + DBNet line head,
+    # trained on manga. Only its `seg` output is used -- a per-pixel text mask,
+    # which is what lets the eraser take the glyphs and leave the art between
+    # them. Regions still come from detect.py's DB model; grouping and OCR are
+    # tuned to its quads. Weights re-published as ONNX under Apache-2.0; the
+    # upstream training code (dmMaze/comic-text-detector) is GPL-3.0.
+    "comic-text-detector": {
+        "url": (
+            "https://huggingface.co/mayocream/comic-text-detector-onnx/resolve/"
+            "a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a/comic-text-detector.onnx"
+        ),
+        "sha256": "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f",
+        "size": 94669756,
+    },
+    # LaMa (big-lama) fine-tuned on ~300k manga and anime images
+    # (dreMaz/AnimeMangaInpainting), exported to ONNX with the FFT kept as a
+    # DFT op that runs on the CUDA provider. Fixed 512x512 input. Apache-2.0.
+    "lama-manga": {
+        "url": (
+            "https://huggingface.co/mayocream/lama-manga-onnx/resolve/"
+            "b55497aadbfcb9740e1ed16f008268d71b4f3f79/lama-manga.onnx"
+        ),
+        "sha256": "4512adab295ee5a5e02ccd1bdf8d45dccbac88309d9cff1532ffd5de876f02a4",
+        "size": 207482644,
+    },
 }
 
 
@@ -388,3 +418,21 @@ def select_provider(force_cpu: bool | None = None) -> tuple[str, str]:
 
 
 _PRELOADED = False
+
+
+def onnx_session(path: str):
+    """An onnxruntime session on the provider select_provider() names.
+
+    Errors-only logging. On CUDA, onnxruntime places a graph's shape ops on
+    CPU on purpose and warns "Some nodes were not assigned to the preferred
+    execution providers" every time a session opens -- into the Log drawer,
+    once per model, about nothing. That warning is the SESSION's logger; a
+    CUDA provider that fails to load still warns on the default logger, so
+    the one warning worth reading is not silenced with it.
+    """
+    import onnxruntime  # noqa: PLC0415 -- loaded on first use, like manga_ocr
+
+    provider, _ = select_provider()
+    options = onnxruntime.SessionOptions()
+    options.log_severity_level = 3  # errors only
+    return onnxruntime.InferenceSession(path, sess_options=options, providers=[provider])

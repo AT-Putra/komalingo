@@ -62,8 +62,6 @@ class OcrError(RuntimeError):
 
 class _Recogniser:
     def __init__(self, lang: str):
-        import onnxruntime  # noqa: PLC0415 -- loaded on first use, like manga_ocr
-
         directory = models.ensure(LANGS[lang])
         names = os.listdir(directory)
         onnx = [n for n in names if n.endswith(".onnx")]
@@ -73,9 +71,7 @@ class _Recogniser:
                            f"dictionary; found {sorted(names)}")
         with open(os.path.join(directory, dicts[0]), encoding="utf-8") as fh:
             self.chars = [line.rstrip("\r\n") for line in fh if line.rstrip("\r\n")]
-        provider, _ = models.select_provider()
-        self.session = onnxruntime.InferenceSession(os.path.join(directory, onnx[0]),
-                                                    providers=[provider])
+        self.session = models.onnx_session(os.path.join(directory, onnx[0]))
         self.input = self.session.get_inputs()[0].name
 
     def read(self, crop: np.ndarray) -> tuple[str, float]:
