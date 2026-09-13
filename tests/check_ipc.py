@@ -48,6 +48,8 @@ TRIPLE = "x86_64-pc-windows-msvc"
 CONF = os.path.join(ROOT, "src-tauri", "tauri.conf.json")
 LIB_RS = os.path.join(ROOT, "src-tauri", "src", "lib.rs")
 SMOKE = os.path.join(ROOT, "fixtures", "smoke", "tategaki_01.png")
+CBZ = os.path.join(ROOT, "fixtures", "archives", "benign.cbz")
+CBZ_PAGES = 3  # gen_fixtures ARCHIVE_PAGES; the count the bar must be told
 
 # By name and in this order. The three the story names, in the order run_page
 # drives them; the stages between are allowed and ignored, so adding a stage
@@ -85,6 +87,39 @@ def emitted_stages(dest: str) -> tuple[list[str], str]:
         if "stage" in rec and "pct" in rec:
             stages.append(rec["stage"])
     return stages, (r.stderr or "")[-600:]
+
+
+def item_totals(dest: str) -> tuple[set[int], int, str]:
+    """Run a 3-page .cbz as a CHILD PROCESS: the `total` on its lines, and the
+    pages they covered. Its own cache directory, so the run is a real one and
+    not a cache hit from another check's tree."""
+    cache_dir = os.path.join(dest, "cache")
+    os.makedirs(dest, exist_ok=True)
+    script = (
+        "import sys; sys.path.insert(0, r'%s');"
+        "from sidecar import pipeline;"
+        "pipeline.run_item(r'%s', r'%s', 'ipc-total', 'benign.cbz', None)"
+        % (ROOT, CBZ, dest)
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT, capture_output=True, timeout=600,
+        encoding="utf-8", errors="replace",
+        env=dict(os.environ, MT_CACHE_DIR=cache_dir, PYTHONIOENCODING="utf-8"),
+    )
+    totals, pages = set(), set()
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "stage" in rec and "pct" in rec:
+            totals.add(rec.get("total"))
+            pages.add(rec.get("page"))
+    return totals, len(pages), (r.stderr or "")[-600:]
 
 
 def main():
@@ -138,6 +173,18 @@ def main():
         present == REQUIRED_ORDER,
         f"detect -> ocr -> write arrive IN THAT ORDER, by name "
         f"(got {present}; full stream {stages})",
+    )
+
+    # -- [5] an ITEM's lines carry its page count --------------------------
+    # The chapter bar needs an end to run to. Without `total` the UI can only
+    # count pages up from nothing, which is what the single-chapter panel did:
+    # a per-page bar and a counter, and no way to see how much of the chapter
+    # was left. Read off a real child process, like the stages above.
+    totals, pages_seen, err = item_totals(os.path.join(ROOT, "build", "work", "ipc-item"))
+    c.check(
+        pages_seen == CBZ_PAGES and totals == {CBZ_PAGES},
+        f"every progress line of a {CBZ_PAGES}-page .cbz carries total={CBZ_PAGES} "
+        f"(saw totals {sorted(totals)} over {pages_seen} pages; stderr: {err[-200:]})",
     )
 
     # -- [4] a NON-ASCII item survives the pipe, end to end ---------------

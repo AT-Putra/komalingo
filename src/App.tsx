@@ -406,7 +406,11 @@ export default function App() {
                 <strong>{stageWord(progress.stage)}</strong>
                 {" · "}
                 {progress.item}
-                {progress.page > 0 ? ` · page ${progress.page}` : ""}
+                {progress.page > 0
+                  ? progress.total
+                    ? ` · page ${progress.page} of ${progress.total}`
+                    : ` · page ${progress.page}`
+                  : ""}
               </span>
               <span className="mini">
                 <ProgressBar label="Current page" value={progress.pct} size="sm" />

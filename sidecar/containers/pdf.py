@@ -258,6 +258,20 @@ def _displayed(img: Image.Image, rotation: int) -> Image.Image:
     return out
 
 
+def page_count(path) -> int:
+    """How many pages `pages` will yield. The document's own count, no render.
+
+    Advisory: the progress line carries it so the UI can show "page 3 of 24"
+    instead of counting up from nothing. A PDF delivers every page or fails,
+    so unlike an archive's candidate list this is exact.
+    """
+    doc = _open(path)
+    try:
+        return len(doc)
+    finally:
+        doc.close()
+
+
 def pages(path, budget: safety.Budget | None = None):
     """Yield `(ordinal, member, image)` for every page, 1-based.
 

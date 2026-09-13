@@ -713,6 +713,28 @@ def members(path, budget: safety.Budget | None = None) -> list[str]:
     return names
 
 
+def expected_pages(path) -> int | None:
+    """How many members `pages` will TRY, or None when counting is not cheap.
+
+    Advisory, for the progress line's "page 3 of 24": a CANDIDATE count, so an
+    undecodable member is counted here and is not a page -- the bar can
+    therefore finish a page short, which is why nothing but the display
+    depends on it. Its own Budget, never the item's: the caps are per archive
+    and charging this scan to the run's budget would spend it twice.
+
+    None for a COMPRESSED tar, whose member list exists only after a full
+    decompression (_scan's single-pass case): counting would decompress the
+    archive a second time, and a page counter is not worth that.
+    """
+    try:
+        fmt = detect_format(path)
+        if fmt == TAR and _tar_compression(path):
+            return None
+        return len(members(path))
+    except Exception:  # noqa: BLE001 -- advisory; the run reports its own failures
+        return None
+
+
 def pages(path, budget: safety.Budget | None = None):
     """Yield `(ordinal, member, image)` for every decodable page, 1-based.
 

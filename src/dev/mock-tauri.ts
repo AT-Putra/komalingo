@@ -144,7 +144,15 @@ async function runPages(item: string, pages: number, perStage: number) {
   for (let p = 1; p <= pages; p++) {
     for (const [stage, pct] of STAGES) {
       await sleep(perStage);
-      emit("sidecar-progress", { stage, item: `${1 + (p % 3)} regions`, page: p, pct });
+      // `total` as the sidecar sends it, so the chapter bar can be watched
+      // moving here too (sidecar/pipeline.emit).
+      emit("sidecar-progress", {
+        stage,
+        item: `${1 + (p % 3)} regions`,
+        page: p,
+        pct,
+        total: pages,
+      });
     }
     emit("sidecar-log", `INFO ${item} page ${p} written`);
   }

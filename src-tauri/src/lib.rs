@@ -55,6 +55,11 @@ pub struct Progress {
     pub item: String,
     pub page: i64,
     pub pct: i64,
+    /// The item's page count, when the sidecar could read it cheaply. Absent
+    /// on a compressed tar, so it defaults rather than failing the whole line:
+    /// a missing field here would turn every progress event into a log line.
+    #[serde(default)]
+    pub total: Option<i64>,
 }
 
 /// What one sidecar stdout line becomes.

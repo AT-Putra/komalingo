@@ -66,6 +66,10 @@ export interface Progress {
   item: string;
   page: number;
   pct: number;
+  /** Pages in the item being run, when the sidecar could count them cheaply.
+   *  Absent for a compressed tar, where the count costs a second decompression
+   *  (sidecar/containers/archive.expected_pages). */
+  total?: number;
 }
 
 export interface TranslateResult {

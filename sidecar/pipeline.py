@@ -4,7 +4,8 @@ The stage names are a CONTRACT. check_ipc.py asserts against them by name and in
 order, never by counting events, so renaming a stage here breaks the UI's
 progress display and the check catches it. Each stage emits exactly one
 line-flushed {stage, item, page, pct} object on stdout -- one, not one per
-sub-step, because the UI draws one bar segment per stage.
+sub-step, because the UI draws one bar segment per stage -- plus `total`, the
+item's page count, when it is known (see emit and expecting).
 
 This is writer number 1, not a special case: it encodes through imaging.py and
 lands bytes through atomic.py like everything else. A pipeline that wrote its
@@ -14,6 +15,7 @@ half-page on disk.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -38,19 +40,41 @@ def emit(stage: str, item: str, page: int, pct: int) -> None:
     buffering holds every line until the process exits and the UI sits at 0%
     for the whole run, then jumps to 100%.
 
+    `total` rides along when the item running on THIS thread knows its page
+    count (see expecting): `pct` is one page's progress, and without a total
+    the UI can only count pages up from nothing -- a chapter's bar had no end
+    to run to. Optional by construction: a compressed tar cannot be counted
+    cheaply, and the field is then absent rather than a guess.
+
     Under a lock since Phase 8: four workers emit at once, and Tauri parses
     one JSON object per line. CPython happens to write the line and its
     newline without releasing the GIL between them; the lock makes what was
     an implementation accident a guarantee.
     """
+    line = {"stage": stage, "item": item, "page": page, "pct": pct}
+    total = getattr(_EXPECTED, "total", None)
+    if total:
+        line["total"] = total
     with _EMIT_LOCK:
-        print(
-            json.dumps({"stage": stage, "item": item, "page": page, "pct": pct}),
-            flush=True,
-        )
+        print(json.dumps(line), flush=True)
 
 
 _EMIT_LOCK = threading.Lock()
+# Per THREAD, not per process: the job runs four items at once (job.WORKERS)
+# and each is a different length. A worker publishes its own count here and
+# every emit under it carries that one.
+_EXPECTED = threading.local()
+
+
+@contextlib.contextmanager
+def expecting(total: int | None):
+    """Publish the page count of the item this thread is about to run."""
+    previous = getattr(_EXPECTED, "total", None)
+    _EXPECTED.total = total
+    try:
+        yield
+    finally:
+        _EXPECTED.total = previous
 
 
 def _bbox(polygon):
@@ -343,7 +367,10 @@ def run_page(src_path, dest_dir, page: int = 1, client=None, source: str = DEFAU
     show for it, which is the same outcome as not starting.
     """
     _check_cancel(cancel, os.path.basename(os.fspath(src_path)), 0)
-    with Image.open(atomic.long_path(src_path)) as src:
+    # One loose image is one page, and its lines say so: the UI's chapter bar
+    # reads `total` and a page run that omitted it would look like an item
+    # whose length is unknown.
+    with expecting(1), Image.open(atomic.long_path(src_path)) as src:
         src.load()
         original = src.convert("RGB").copy()
 
@@ -683,6 +710,10 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     # (ordinal, member, image) contract the two readers share.
     read_pages = pdf.pages if src_fmt == pdf.PDF else archive.pages
     out_dir = item_dir(dest_dir, item_id)
+    # The page count the progress lines carry, read before the first page so
+    # the bar has an end to run to. Advisory and allowed to be None -- see
+    # archive.expected_pages -- and never a reason for the run to fail.
+    expected = pdf.page_count(src_path) if src_fmt == pdf.PDF else archive.expected_pages(src_path)
     # The budget's root is the ITEM's directory, which is where a member would
     # actually land -- the escape rule has to be evaluated against the path the
     # writer builds, not against the job root one level above it.
@@ -695,15 +726,16 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     # against enforce_cap and its marker file on disk (review, measured).
     cache.mark_running(job_id)
     try:
-        for ordinal, member, img in read_pages(src_path, budget):
-            _check_cancel(cancel, item_id, len(records))
-            h = cache.page_hash(img)
-            cache.put_placement(job_id, item_id, ordinal, h, member)
-            with _page_lock(h):
-                record = _run_cached_page(
-                    h, img, member, ordinal, item_id, out_dir, client, lang,
-                    source, model, src_fmt, cancel, len(records))
-            records.append(record)
+        with expecting(expected):
+            for ordinal, member, img in read_pages(src_path, budget):
+                _check_cancel(cancel, item_id, len(records))
+                h = cache.page_hash(img)
+                cache.put_placement(job_id, item_id, ordinal, h, member)
+                with _page_lock(h):
+                    record = _run_cached_page(
+                        h, img, member, ordinal, item_id, out_dir, client, lang,
+                        source, model, src_fmt, cancel, len(records))
+                records.append(record)
         # Once, at the end, and not per page. The plan says disk is "never
         # evicted mid-job", and per page it could not have reclaimed this job's
         # own pages anyway -- every one is pinned by its running marker -- while

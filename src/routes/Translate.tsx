@@ -59,6 +59,21 @@ export default function Translate({
   const canItem = !locked && form.src.trim() !== "" && form.dest.trim() !== "";
   const canFolder = !locked && form.folder.trim() !== "" && form.dest.trim() !== "";
 
+  // The chapter's own progress. `total` is the item's page count as the
+  // sidecar read it (pipeline.emit); it is absent for a compressed tar, and
+  // the panel then shows what it always showed -- the page in flight and the
+  // pages written -- rather than a bar with no end.
+  const opening = !progress || progress.stage === "item_start";
+  const total = progress?.total ?? 0;
+  // Pages finished, plus how far the page in flight has come. The `write`
+  // line is the one that raises pagesDone AND reports pct 100, so the
+  // fraction is only added while the page in flight is still ahead of the
+  // count -- otherwise that page would be counted twice and the bar would
+  // reach 100% a page early.
+  const live = opening ? null : progress;
+  const running = live && live.page > pagesDone ? Math.min(100, live.pct) / 100 : 0;
+  const chapterPct = total > 0 ? Math.min(100, ((pagesDone + running) / total) * 100) : 0;
+
   return (
     <div className="view stack">
       <div className="view-head">
@@ -86,21 +101,37 @@ export default function Translate({
             <div className="what">
               <div className="name">{basename(form.src)}</div>
               <div className="detail">
-                {progress && progress.stage !== "item_start"
-                  ? `Page ${progress.page} · ${progress.stage} · ${progress.item}`
-                  : "Opening the archive…"}
+                {!live
+                  ? "Opening the archive…"
+                  : total > 0
+                    ? `Page ${live.page} of ${total} · ${live.stage} · ${live.item}`
+                    : `Page ${live.page} · ${live.stage} · ${live.item}`}
               </div>
             </div>
             <span className="counter">
-              <strong>{pagesDone}</strong> {pagesDone === 1 ? "page" : "pages"} written
+              {total > 0 ? (
+                <>
+                  <strong>{pagesDone}</strong> / {total} {total === 1 ? "page" : "pages"}
+                </>
+              ) : (
+                <>
+                  <strong>{pagesDone}</strong> {pagesDone === 1 ? "page" : "pages"} written
+                </>
+              )}
             </span>
           </div>
+          <ProgressBar
+            label="Chapter progress"
+            value={chapterPct}
+            indeterminate={total === 0}
+            showValue
+          />
           <StageTrack stage={progress?.stage} />
           <ProgressBar
             label="Current page"
             value={progress?.pct ?? 0}
-            indeterminate={!progress || progress.stage === "item_start"}
-            showValue
+            indeterminate={opening}
+            size="sm"
           />
         </section>
       )}

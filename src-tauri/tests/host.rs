@@ -27,6 +27,27 @@ fn a_progress_line_becomes_one_progress_event() {
     }
 }
 
+/// The chapter bar's end: `total` rides on the progress line when the sidecar
+/// could count the item's pages, and is absent when it could not (a compressed
+/// tar). Absent must stay PROGRESS -- a missing field that failed the decode
+/// would send every line of such a run to the log pane instead of the bar.
+#[test]
+fn a_progress_line_carries_the_page_count_when_the_sidecar_knows_it() {
+    let counted = br#"{"stage":"ocr","item":"3 calls","page":2,"pct":25,"total":24}"#;
+    match classify(counted) {
+        Some(Line::Progress(p)) => {
+            assert_eq!(p.total, Some(24));
+            assert_eq!(p.page, 2);
+        }
+        other => panic!("expected a progress event, got {:?}", other),
+    }
+    let uncounted = br#"{"stage":"ocr","item":"3 calls","page":2,"pct":25}"#;
+    match classify(uncounted) {
+        Some(Line::Progress(p)) => assert_eq!(p.total, None),
+        other => panic!("expected a progress event, got {:?}", other),
+    }
+}
+
 /// The decode is UTF-8. A cp1252 read turns a Japanese filename into mojibake
 /// in the progress bar, and the bytes below are the shortest proof of which
 /// decoder ran: they are valid UTF-8 and nothing else.
