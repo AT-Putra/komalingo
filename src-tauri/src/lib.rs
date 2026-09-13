@@ -260,6 +260,26 @@ async fn stop_sidecar(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// The WebView profile folder under the identifier before the rename.
+pub const OLD_IDENTIFIER: &str = "com.adita.mangatranslator";
+/// Must match `identifier` in tauri.conf.json.
+pub const IDENTIFIER: &str = "com.adita.komalingo";
+
+/// Move the pre-rename WebView profile into the new identifier's folder.
+///
+/// The app was MangaTranslator until 2026-09-13. Tauri keys the WebView's
+/// profile -- localStorage, where the provider settings and the theme live --
+/// on the identifier's folder under %LOCALAPPDATA%, so without this the first
+/// launch after the rename opens with every setting blank. Moved, never
+/// merged: an existing new folder is left alone, and a failed rename (a file
+/// held open) is retried next launch. main.rs calls it before the builder, so
+/// no WebView has the folder open yet. Returns whether it moved anything.
+pub fn move_old_profile(base: &std::path::Path) -> bool {
+    let new = base.join(IDENTIFIER);
+    let old = base.join(OLD_IDENTIFIER);
+    !new.exists() && old.is_dir() && std::fs::rename(&old, &new).is_ok()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

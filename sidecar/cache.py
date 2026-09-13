@@ -72,7 +72,7 @@ from collections import OrderedDict
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-from . import atomic
+from . import appdir, atomic
 
 # -- layout ----------------------------------------------------------------
 
@@ -117,7 +117,7 @@ def root() -> str:
     if override:
         return os.path.abspath(override)
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "MangaTranslator", "cache")
+    return os.path.join(appdir.under(base), "cache")
 
 
 def _cap_bytes() -> int:

@@ -22,7 +22,7 @@ import shutil
 import urllib.error
 import urllib.request
 
-from . import atomic
+from . import appdir, atomic
 
 CHUNK = 1 << 20
 TIMEOUT = 60
@@ -292,8 +292,8 @@ def model_dir() -> str:
         return override
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "MangaTranslator", "models")
-    return os.path.join(os.path.expanduser("~"), ".cache", "MangaTranslator", "models")
+        return os.path.join(appdir.under(base), "models")
+    return os.path.join(appdir.under(os.path.join(os.path.expanduser("~"), ".cache")), "models")
 
 
 def _shifted(progress, base: int, total: int):

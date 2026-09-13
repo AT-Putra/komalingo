@@ -1,12 +1,12 @@
 [package]
-name = "manga-translator"
+name = "komalingo"
 version = "0.1.0"
-description = "A Tauri App"
+description = "Komalingo: manga, manhua and manhwa, translated on the page"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "manga_translator_lib"
+name = "komalingo_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

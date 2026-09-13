@@ -247,7 +247,60 @@ def main():
             f"ocr_ja forces CPU exactly when select_provider does not say CUDA "
             f"(want force_cpu={want_cpu}, got {captured.get('force_cpu')!r})")
 
+    check_rename(c)
     return c.finish()
+
+
+def check_rename(c):
+    """[rename] MangaTranslator's data directory moves to Komalingo, once, whole.
+
+    The weights under it are hundreds of MB; a rename that only changed the
+    string would download every one of them again and orphan the old tree.
+    """
+    import tempfile
+
+    from sidecar import appdir, cache
+
+    with tempfile.TemporaryDirectory(prefix="mt-rename-") as base:
+        old = os.path.join(base, "MangaTranslator", "models", "manga-ocr")
+        os.makedirs(old)
+        with open(os.path.join(old, "weights.bin"), "wb") as fh:
+            fh.write(b"w" * 1024)
+
+        saved = {k: os.environ.get(k) for k in ("LOCALAPPDATA", "MT_MODEL_DIR", "MT_CACHE_DIR")}
+        os.environ["LOCALAPPDATA"] = base
+        os.environ.pop("MT_MODEL_DIR", None)
+        os.environ.pop("MT_CACHE_DIR", None)
+        try:
+            got = models.model_dir() if os.name == "nt" else None
+            got_cache = cache.root()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        moved = os.path.join(base, "Komalingo", "models", "manga-ocr", "weights.bin")
+        if os.name == "nt":
+            c.check(got == os.path.join(base, "Komalingo", "models"),
+                    f"[rename] model_dir is under Komalingo: {got}")
+        c.check(got_cache == os.path.join(base, "Komalingo", "cache"),
+                f"[rename] the cache root is under Komalingo: {got_cache}")
+        c.check(os.path.getsize(moved) == 1024 and not os.path.exists(os.path.join(base, "MangaTranslator")),
+                "[rename] the old MangaTranslator tree was MOVED into place, weights and all, "
+                "not copied and not left behind")
+
+        # Both present: never merged, the old one left exactly where it is.
+        os.makedirs(os.path.join(base, "MangaTranslator", "stray"))
+        c.check(appdir.under(base) == os.path.join(base, "Komalingo")
+                and os.path.isdir(os.path.join(base, "MangaTranslator", "stray")),
+                "[rename] with both directories present the new one wins and the old one is untouched")
+
+    with tempfile.TemporaryDirectory(prefix="mt-rename-") as base:
+        c.check(appdir.under(base) == os.path.join(base, "Komalingo")
+                and not os.listdir(base),
+                "[rename] on a fresh machine the path is Komalingo and nothing is created by asking")
 
 
 run(main)

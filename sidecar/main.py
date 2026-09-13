@@ -129,7 +129,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="MangaTranslator sidecar", lifespan=lifespan)
+app = FastAPI(title="Komalingo sidecar", lifespan=lifespan)
 
 
 Source = Literal["ja", "zh", "ko"]  # pipeline.SOURCES, as a type pydantic can check

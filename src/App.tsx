@@ -293,7 +293,7 @@ export default function App() {
             <Icon name="book" size={18} />
           </span>
           <div>
-            <div className="brand-name">MangaTranslator</div>
+            <div className="brand-name">Komalingo</div>
             <div className="brand-sub">local pipeline</div>
           </div>
         </div>

@@ -1,5 +1,5 @@
 [project]
-name = "manga-translator-sidecar"
+name = "komalingo-sidecar"
 version = "0.1.0"
 description = "FastAPI sidecar: detect -> OCR -> translate -> inpaint -> render -> encode -> write"
 requires-python = ">=3.11,<3.14"

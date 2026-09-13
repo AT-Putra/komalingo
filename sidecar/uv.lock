@@ -685,7 +685,7 @@ wheels = [
 ]
 
 [[package]]
-name = "manga-translator-sidecar"
+name = "komalingo-sidecar"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -45,7 +45,7 @@ def build_source(path, fmt, size=(64, 48), with_gps=True):
             img.putpixel((x, y), (x * 4 % 256, y * 5 % 256, (x + y) % 256))
 
     exif = Image.Exif()
-    exif[DESCRIPTION] = "manga-translator source"
+    exif[DESCRIPTION] = "komalingo source"
     if with_gps:
         exif[imaging.GPS_IFD] = {GPS_LAT: (35.0, 41.0, 0.0)}
 
@@ -89,7 +89,7 @@ def main():
 
             exif = got.getexif()
             c.check(
-                exif.get(DESCRIPTION) == "manga-translator source",
+                exif.get(DESCRIPTION) == "komalingo source",
                 "non-GPS EXIF survives byte-identical",
             )
             c.check(imaging.GPS_IFD not in exif, "GPS IFD is stripped from the output")

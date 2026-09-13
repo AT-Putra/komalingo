@@ -10,7 +10,7 @@
 //! covers the same events end to end through a live app; this is the fallback
 //! that keeps the criteria verifiable when the driver is not usable.
 
-use manga_translator_lib::testing::{classify, new_nonce, Line};
+use komalingo_lib::testing::{classify, new_nonce, Line};
 
 /// One line, one event -- and the event carries the line's own fields.
 #[test]
@@ -97,4 +97,30 @@ fn the_nonce_differs_every_time_and_is_not_guessable_in_length() {
     let b = new_nonce();
     assert_ne!(a, b, "two spawns produced the same nonce");
     assert!(a.len() >= 32, "nonce is only {} chars", a.len());
+}
+
+/// The rename's profile move: old folder moved whole, an existing new folder
+/// never merged into, and the identifier constant agrees with tauri.conf.json.
+#[test]
+fn old_profile_moves_once_and_never_merges() {
+    let base = std::env::temp_dir().join(format!("komalingo-host-{}", uuid::Uuid::new_v4()));
+    let old = base.join(komalingo_lib::OLD_IDENTIFIER);
+    let new = base.join(komalingo_lib::IDENTIFIER);
+    std::fs::create_dir_all(old.join("EBWebView")).unwrap();
+    std::fs::write(old.join("EBWebView").join("Local State"), b"settings").unwrap();
+
+    assert!(komalingo_lib::move_old_profile(&base), "the old profile is moved");
+    assert_eq!(std::fs::read(new.join("EBWebView").join("Local State")).unwrap(), b"settings");
+    assert!(!old.exists(), "and not left behind");
+
+    std::fs::create_dir_all(old.join("stray")).unwrap();
+    assert!(!komalingo_lib::move_old_profile(&base), "with both present nothing moves");
+    assert!(old.join("stray").is_dir() && !new.join("stray").exists(), "and nothing is merged");
+
+    let conf = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json")).unwrap();
+    assert!(
+        conf.contains(&format!("\"identifier\": \"{}\"", komalingo_lib::IDENTIFIER)),
+        "IDENTIFIER matches tauri.conf.json, or the move lands in a folder Tauri never reads"
+    );
+    std::fs::remove_dir_all(&base).unwrap();
 }

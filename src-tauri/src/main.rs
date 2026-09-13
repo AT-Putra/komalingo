@@ -2,5 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    manga_translator_lib::run()
+    #[cfg(windows)]
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        komalingo_lib::move_old_profile(std::path::Path::new(&base));
+    }
+    komalingo_lib::run()
 }
