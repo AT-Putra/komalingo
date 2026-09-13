@@ -46,8 +46,10 @@ def main():
     c = Checks("check_tategaki")
 
     if not os.path.exists(EXPECTED):
-        return broken_checkout(f"ground truth absent: {EXPECTED} -- committed, "
-                                f"see fixtures/README.md")
+        # Local-only, like the panels: it transcribes the volume's dialogue,
+        # which is not ours to publish. Absent is a skip, not a broken checkout.
+        return skip(f"ground truth absent: {EXPECTED} -- kept locally with the "
+                    f"scans, see fixtures/README.md")
 
     with open(EXPECTED, encoding="utf-8") as fh:
         entries = json.load(fh)

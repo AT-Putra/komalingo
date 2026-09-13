@@ -2,7 +2,9 @@
 name = "komalingo"
 version = "0.1.0"
 description = "Komalingo: manga, manhua and manhwa, translated on the page"
-authors = ["you"]
+authors = ["AT-Putra"]
+license = "MIT"
+repository = "https://github.com/AT-Putra/komalingo"
 edition = "2021"
 
 [lib]

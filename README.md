@@ -117,7 +117,7 @@ Each keeps its own license.
 | PP-OCRv5 recognition (zh, ko) | Chinese and Korean OCR | PaddlePaddle weights, ONNX export by [GreatV/oar-ocr](https://github.com/GreatV/oar-ocr) | Apache-2.0 |
 | PP-OCRv3 DB text detection | Text regions | [opencv/opencv_zoo](https://github.com/opencv/opencv_zoo) | Apache-2.0 |
 | comic-text-detector | Per-pixel text mask | ONNX by [mayocream](https://huggingface.co/mayocream/comic-text-detector-onnx); upstream training code [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) is GPL-3.0 | Apache-2.0 (as published) |
-| LaMa, manga fine-tune | Erasing text | ONNX by [mayocream](https://huggingface.co/mayocream/lama-manga-onnx), from [dreMaz/AnimeMangaInpainting](https://huggingface.co/dreMaz/AnimeMangaInpainting) | Apache-2.0 |
+| LaMa, manga fine-tune | Erasing text | ONNX by [mayocream](https://huggingface.co/mayocream/lama-manga-onnx), from [dreMaz/AnimeMangaInpainting](https://huggingface.co/dreMaz/AnimeMangaInpainting) | Apache-2.0 (ONNX); fine-tune MIT |
 
 ## License
 

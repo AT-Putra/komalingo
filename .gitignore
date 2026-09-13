@@ -24,9 +24,10 @@ src-tauri/target/
 # Generated fixtures are reproducible from tests/gen_fixtures.py, but the
 # real-panel sets are licensed source material and stay out of the repo.
 # Image GLOBS, not wholesale directories: the hand-authored ground truth
-# beside them (tategaki/expected.json, id/reference.json) IS committed, and
-# ignoring the directory would take it with them. Neither JSON contains
-# third-party artwork; fixtures/id/ holds no images at all.
+# beside them (id/reference.json, tategaki/MANIFEST.json) IS committed, and
+# ignoring the directory would take it with them. tategaki/expected.json
+# transcribes the volume's dialogue, so it stays local like the panels.
+fixtures/tategaki/expected.json
 fixtures/tategaki/**/*.png
 fixtures/tategaki/**/*.jpg
 fixtures/tategaki/**/*.jpeg

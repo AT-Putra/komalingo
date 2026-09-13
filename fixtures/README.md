@@ -5,9 +5,9 @@
 Source: _Isekai Tensei de Kenja ni Natte_ vol. 1, user's own scans
 (182 full pages under `fixtures/tategaki/<volume>/`, kept locally only).
 
-The `tategaki/panels/*.png` crops derived from those pages are **not**
-committed: checking copyrighted panels into a public repository is
-not defensible as fair use for redistribution. What **is** committed:
+Neither the `tategaki/panels/*.png` crops derived from those pages nor the
+transcriptions of their dialogue are committed: the artwork and the text
+both belong to the rights holder. Kept locally, beside the scans:
 
 - `fixtures/tategaki/expected.json` — 24 hand-authored transcriptions
   (17 with furigana), `{file, page, box, text, has_furigana}`. Read off the
@@ -16,6 +16,9 @@ not defensible as fair use for redistribution. What **is** committed:
   the first pass transcribed one panel's 森でス as 森デス -- "correcting" a
   character-voice spelling into the one a reader expects. Record what is
   printed, not what it ought to say.
+
+Committed: `fixtures/tategaki/MANIFEST.json` (sha256s of the pages, the
+crops and `expected.json`, no artwork and no text) and
 - `tests/gen_tategaki_panels.py` — reassembles every crop from a local copy
   of the volume, using the `page` + `box` each entry carries.
 
