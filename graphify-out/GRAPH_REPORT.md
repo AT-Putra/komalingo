@@ -1,24 +1,24 @@
-# Graph Report - MangaTranslator  (2026-09-14)
+# Graph Report - MangaTranslator  (2026-09-15)
 
 ## Corpus Check
-- 111 files · ~271,970 words
+- 111 files · ~273,876 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1875 nodes · 3909 edges · 154 communities (105 shown, 45 thin omitted)
-- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 110 edges (avg confidence: 0.88)
+- 1879 nodes · 3926 edges · 138 communities (96 shown, 38 thin omitted)
+- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 129 edges (avg confidence: 0.9)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `04e0d152`
+- Built from commit: `1de86826`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - pdf.py
-- check_package.py
-- run_item
-- check_spotfix.py
+- StubProvider
+- job.py
+- Checks
 - check_archives.py
 - gen_fixtures.py
 - lib.rs
@@ -26,39 +26,39 @@
 - Page Image Manifest
 - package.json
 - archive.py
-- _run_pages
+- run_item
 - Brand and Language Documentation
-- RuntimeError
+- check_id.py
 - Budget
 - check_batch.py
 - check_typeset.py
-- fetch_fixtures.py
-- Checks
+- skip
+- check_cjk.py
 - describeError
 - Job.tsx
 - detect.py
 - Tauri Application Configuration
-- group.py
+- ocr_cjk.py
 - inpainter.py
-- _run_cached_page
+- inpaint
 - LLMClient
-- check_cjk.py
+- OcrError
 - cache.py
 - api.ts
 - EraseError
 - mock-tauri.ts
 - check_group.py
-- repack_extras
+- llm.py
 - Frontend TypeScript Configuration
-- StubProvider
-- long_path
+- Member
+- atomic.py
 - load_font
 - models.py
 - pipeline.py
-- Response
+- sidecar/__init__.py
 - typeset.py
 - Regression Test Runner
-- translate
+- _repack
 - App.tsx
 - Settings.tsx
 - Komalingo Brand Assets
@@ -67,24 +67,19 @@
 - _CountingReader
 - imaging.py
 - main.tsx
-- _apply_translations
-- tier_bytes
+- _run_cached_page
+- _wrap_from
 - ocr_ja.py
 - _Tier
-- lifespan
+- select_provider
 - check_erase.py
 - SpotFix.tsx
 - check_probe.py
-- ocr
-- check_cancel.py
-- Job
-- section_clear
+- chrf_pp
+- section_refs
 - Node TypeScript Configuration
-- check_id.py
 - rerender
-- detect
 - Fixture Determinism Check
-- _rerender_locked
 - redcheck_spotfix.py
 - Tauri Window Permissions
 - Panel Fixture 007
@@ -153,42 +148,31 @@
 - Square Application Logo
 - Square Application Logo
 - Store Application Logo
-- BaseModel
-- read_translation
 - _floor_fits
-- _wrap_from
-- _member_dest
-- _bad_settings_response
-- SettingsError
-- _above_floor
-- ValueError
-- Exception
-- Image
-- Lock
 
 ## God Nodes (most connected - your core abstractions)
-1. `long_path()` - 54 edges
-2. `Checks` - 50 edges
+1. `Checks` - 78 edges
+2. `long_path()` - 54 edges
 3. `LLMClient` - 46 edges
-4. `skip()` - 38 edges
-5. `StubProvider` - 36 edges
+4. `skip()` - 39 edges
+5. `StubProvider` - 37 edges
 6. `page_dir()` - 34 edges
 7. `main()` - 32 edges
 8. `Budget` - 29 edges
-9. `_reset()` - 25 edges
-10. `run()` - 25 edges
+9. `run()` - 26 edges
+10. `panels` - 25 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Komalingo Open Concept A Brand Exploration` --conceptually_related_to--> `Komalingo`  [INFERRED]
   brand/explorations/concept-open-a.png → README.md
 - `Komalingo Split Concept A Brand Exploration` --conceptually_related_to--> `Komalingo`  [INFERRED]
   brand/explorations/concept-split-a.png → README.md
-- `main()` --uses--> `ProviderError`  [INFERRED]
-  tests/check_ipc.py → sidecar/llm.py
-- `section_skipped()` --uses--> `LLMClient`  [INFERRED]
-  tests/check_spotfix.py → sidecar/llm.py
 - `section_not_text()` --calls--> `under()`  [INFERRED]
   tests/check_spotfix.py → sidecar/appdir.py
+- `main()` --indirect_call--> `root()`  [INFERRED]
+  tests/check_imaging.py → sidecar/cache.py
+- `_dismissed()` --indirect_call--> `root()`  [INFERRED]
+  tests/check_inpaint.py → sidecar/cache.py
 
 ## Import Cycles
 - None detected.
@@ -199,31 +183,31 @@
 - **Komalingo Brand Concept Explorations** — brand_explorations_concept_open_a_image, brand_explorations_concept_split_a_image [INFERRED 0.90]
 - **Scanned PDF Fixture and Rendered Pages** — fixtures_pdf_scan_document, fixtures_pdf_scan_p1_image, fixtures_pdf_scan_p2_image [INFERRED 0.95]
 
-## Communities (154 total, 45 thin omitted)
+## Communities (138 total, 38 thin omitted)
 
 ### Community 0 - "pdf.py"
 Cohesion: 0.05
-Nodes (69): PdfDocument, PdfPage, PdfReader, PdfWriter, _axis_aligned(), _copy_info(), copy_outline(), _decode_xobject() (+61 more)
+Nodes (73): PdfDocument, PdfPage, PdfReader, PdfWriter, The file is not an archive this build reads. Carries a reason string., UnsupportedArchive, _axis_aligned(), _copy_info() (+65 more)
 
-### Community 1 - "check_package.py"
-Cohesion: 0.06
-Nodes (55): health(), Liveness, plus which execution provider this process will run on. The provider…, Where the archive rebuild an edit scheduled has got to. The same dict…, GET can never shut anything down. A link or an <img> is a GET., repack_status(), shutdown_get(), Return (execution_provider, reason). The reason is empty ONLY when CUDA was…, select_provider() (+47 more)
+### Community 1 - "StubProvider"
+Cohesion: 0.05
+Nodes (56): cache_stats(), Where the archive rebuild an edit scheduled has got to. The same dict…, Size, page count and corrections in the page cache, for the Settings card., GET can never shut anything down. A link or an <img> is a GET., repack_status(), shutdown_get(), The repack status for one item: idle, pending, running, done or failed., repack_status() (+48 more)
 
-### Community 2 - "run_item"
-Cohesion: 0.11
-Nodes (16): Event, output_path(), Where the repacked archive lands. Same extension, except RAR -> .cbz. The…, disambiguate(), Item, Lock, Process one item. Never raises. `cancel` (Phase 9) is the job's token, handed…, Give every item in a job a DISTINCT item_id. Mutates and returns them.… (+8 more)
+### Community 2 - "job.py"
+Cohesion: 0.09
+Nodes (26): Event, _is_page(), members(), _natural_key(), pages(), r"""Read-only CBZ page enumeration. No repack, no safety budget, no other…, Yield `(ordinal, member, image)` for every decodable page, 1-based. Streamed…, Sort key for a full archive member path, digit-aware and segment-wise. Segments… (+18 more)
 
-### Community 3 - "check_spotfix.py"
-Cohesion: 0.10
-Nodes (54): Checks, clear_tier(), _archive_edits(), _call(), _guarded(), main(), _no_detect_or_ocr(), _quiet() (+46 more)
+### Community 3 - "Checks"
+Cohesion: 0.08
+Nodes (61): clear_tier(), _above_floor(), _archive_edits(), _calibrate(), _call(), _guarded(), main(), _no_detect_or_ocr() (+53 more)
 
 ### Community 4 - "check_archives.py"
 Cohesion: 0.10
-Nodes (50): comicinfo(), detect_format(), pages(), The container family of `path`, from its bytes. The tar test is last and is…, Yield `(ordinal, member, image)` for every decodable page, 1-based. Same…, `(member name, raw bytes)` of the archive's ComicInfo.xml, or None. RAW bytes,…, Repack `entries` -- an iterable of `(member name, bytes)` -- at `dest`. Through…, write_archive() (+42 more)
+Nodes (48): comicinfo(), detect_format(), pages(), The container family of `path`, from its bytes. The tar test is last and is…, Yield `(ordinal, member, image)` for every decodable page, 1-based. Same…, `(member name, raw bytes)` of the archive's ComicInfo.xml, or None. RAW bytes,…, Repack `entries` -- an iterable of `(member name, bytes)` -- at `dest`. Through…, write_archive() (+40 more)
 
 ### Community 5 - "gen_fixtures.py"
-Cohesion: 0.09
-Nodes (46): ellipse_points(), The shared Region type: detect.py's output, typeset.py's input. Defined here…, The n-gon inscribed in an (x0,y0,x1,y1) ellipse, as a region polygon.…, _archive_page(), _cbz_page(), draw_columns(), draw_lines(), draw_vertical() (+38 more)
+Cohesion: 0.10
+Nodes (43): _archive_page(), _cbz_page(), draw_columns(), draw_lines(), draw_vertical(), gen_archives(), gen_bubbles(), gen_cbz() (+35 more)
 
 ### Community 6 - "lib.rs"
 Cohesion: 0.09
@@ -242,36 +226,40 @@ Cohesion: 0.06
 Nodes (33): dependencies, react, react-dom, @tauri-apps/api, @tauri-apps/plugin-dialog, @tauri-apps/plugin-opener, devDependencies, @tauri-apps/cli (+25 more)
 
 ### Community 10 - "archive.py"
-Cohesion: 0.06
-Nodes (35): BytesIO, _decode(), _drain(), expected_pages(), _head(), is_archive(), _libarchive(), libarchive_path() (+27 more)
+Cohesion: 0.07
+Nodes (36): BytesIO, _admit(), _decode(), _drain(), expected_pages(), _head(), is_archive(), _is_page_name() (+28 more)
 
-### Community 11 - "_run_pages"
-Cohesion: 0.40
-Nodes (5): BoundedSemaphore, _page_slots(), The process's page semaphore, sized by PAGE_WINDOW as it is NOW (a check can…, Run an item's pages concurrently. Returns records in page order. The reader…, _run_pages()
+### Community 11 - "run_item"
+Cohesion: 0.25
+Nodes (8): page_hash(), SHA-256 of the DECODED pixels, plus mode and size. Mode and size are in the…, _model_id(), Run an item's pages concurrently. Returns records in page order. The reader…, What the translation file is keyed on. 'offline' is a real key, not a hole. The…, Every page of one archive or PDF, through the cache. Returns the record.…, run_item(), _run_pages()
 
 ### Community 12 - "Brand and Language Documentation"
 Cohesion: 0.06
 Nodes (31): Komalingo Open Concept A Brand Exploration, Komalingo Split Concept A Brand Exploration, Honorifics and register in the Indonesian output (AC-4), Register, The rule, The table, What stays as it is, What the gate holds (+23 more)
 
+### Community 13 - "check_id.py"
+Cohesion: 0.10
+Nodes (30): Region, _glossary_doc(), _live(), main(), _payload_text(), _prompt(), Phase 5 -- Indonesian output and the glossary (AC-4). Offline half always; live…, Which of the line's marked honorifics appear in `out`, and which forbidden… (+22 more)
+
 ### Community 14 - "Budget"
-Cohesion: 0.08
-Nodes (25): PathLike, (name, safety.Member) for every zip entry, in archive order., Plain tar only. A compressed one goes through `_tar_single_pass`. `"r:"`, never…, _tar_entries(), _zip_entries(), Budget, is_comicinfo(), Member (+17 more)
+Cohesion: 0.09
+Nodes (19): PathLike, Budget, is_comicinfo(), _normalized(), Exception, r"""AC-11: the ingest budget. Every untrusted archive is read through this.…, One rejected archive, carrying which rule refused it and where. `reason` is…, Member name with separators unified, for rule evaluation only. Backslash is a… (+11 more)
 
 ### Community 15 - "check_batch.py"
-Cohesion: 0.11
-Nodes (30): The files in `directory`, top level only, in natural order. Top level only: a…, scan(), build_folder(), _chats_with_image(), check_cancel(), check_cap(), check_image_item_id(), check_page_slots() (+22 more)
+Cohesion: 0.05
+Nodes (50): BoundedSemaphore, Job, The files in `directory`, top level only, in natural order. Top level only: a…, Every item, through the boundary, on `workers` threads. Never raises.…, Block until every item has a terminal status. False on timeout., AC-9, the half the product had never wired: probe once per job. Before this,…, Every path through the boundary, and the record when all are done. The blocking…, run_job() (+42 more)
 
 ### Community 16 - "check_typeset.py"
-Cohesion: 0.14
-Nodes (24): The job summary AC-1 requires: which regions were compromised, which failed.…, summary(), _batching_and_spotfix(), _check_page(), _compare_metrics(), _edge_cases(), _ink(), _ink_in_polygon() (+16 more)
-
-### Community 17 - "fetch_fixtures.py"
 Cohesion: 0.12
-Nodes (28): main(), Phase 1 -- OCR truth on real vertical Japanese (AC-2). OFFLINE. Runs manga-ocr…, build_manifest(), _compare(), image_size(), load_manifest(), main(), print_report() (+20 more)
+Nodes (29): ellipse_points(), The shared Region type: detect.py's output, typeset.py's input. Defined here…, One detected text region, as it travels through the pipeline. `text` defaults…, The n-gon inscribed in an (x0,y0,x1,y1) ellipse, as a region polygon.…, Region, The job summary AC-1 requires: which regions were compromised, which failed.…, summary(), _batching_and_spotfix() (+21 more)
 
-### Community 18 - "Checks"
-Cohesion: 0.10
-Nodes (25): main(), Phase 0 -- the write protocol. Offline, no fixtures, no network. Asserts, from…, build_source(), main(), Phase 0 -- encode policy. Offline, no network. Asserts, from the build order:…, A source image carrying an ICC profile and EXIF with and without GPS., main(), pe_imports() (+17 more)
+### Community 17 - "skip"
+Cohesion: 0.06
+Nodes (53): Phase 0 -- the write protocol. Offline, no fixtures, no network. Asserts, from…, emitted_stages(), item_totals(), main(), Phase 0 -- the host/sidecar IPC contract (US-011). OFFLINE (US-003 stub). **Why…, Run one page as a CHILD PROCESS and read the stages off its stdout. In-process…, Run a 3-page .cbz as a CHILD PROCESS: the `total` on its lines, and the pages…, main() (+45 more)
+
+### Community 18 - "check_cjk.py"
+Cohesion: 0.13
+Nodes (25): detect(), Text regions from detect.py's DB model. Regions become plain dicts here rather…, _blank_and_ja(), _cache(), _centroid(), _fit(), _load(), main() (+17 more)
 
 ### Community 19 - "describeError"
 Cohesion: 0.27
@@ -282,36 +270,36 @@ Cohesion: 0.17
 Nodes (13): Alert(), ICON, Tone, Icon(), IconName, PATHS, LABEL, ProgressBar() (+5 more)
 
 ### Community 21 - "detect.py"
-Cohesion: 0.11
-Nodes (27): _as_bgr(), _dedupe(), DetectError, _input_size(), _inverse(), _model(), ndarray, RuntimeError (+19 more)
+Cohesion: 0.09
+Nodes (34): Region, _as_bgr(), _dedupe(), detect(), DetectError, _glyph_px(), _input_size(), _inverse() (+26 more)
 
 ### Community 22 - "Tauri Application Configuration"
 Cohesion: 0.08
 Nodes (24): app, security, windows, enable, scope, build, beforeBuildCommand, beforeDevCommand (+16 more)
 
-### Community 23 - "group.py"
-Cohesion: 0.13
-Nodes (21): separated(i, j): does ink run across the gap between two adjacent quads? The…, _separator(), bbox(), convex_hull(), glyph_unit(), group(), _inside(), merge() (+13 more)
+### Community 23 - "ocr_cjk.py"
+Cohesion: 0.10
+Nodes (28): separated(i, j): does ink run across the gap between two adjacent quads? The…, _separator(), bbox(), convex_hull(), glyph_unit(), group(), _inside(), merge() (+20 more)
 
 ### Community 24 - "inpainter.py"
 Cohesion: 0.13
 Nodes (23): _crops(), erase(), _fill(), fill_white(), _flat(), _flat_surround(), _inpaint(), _lama() (+15 more)
 
-### Community 25 - "_run_cached_page"
-Cohesion: 0.16
-Nodes (22): Image, _deliver(), detect(), emit(), encode_and_write(), expecting(), inpaint(), page_context_image() (+14 more)
+### Community 25 - "inpaint"
+Cohesion: 0.13
+Nodes (23): _bbox(), _changed_in_polygon(), emit(), encode_and_write(), expecting(), inpaint(), ocr(), page_context_image() (+15 more)
 
 ### Community 26 - "LLMClient"
-Cohesion: 0.07
-Nodes (32): RuntimeError, _decode_reply(), _from_event_stream(), glossary_text(), image_data_url(), LLMClient, probe_token(), ProviderError (+24 more)
+Cohesion: 0.11
+Nodes (16): glossary_text(), image_data_url(), LLMClient, probe_token(), ValueError, The glossary block for `lang`, or "" when the target has none., The configured settings cannot be used. Not the provider's fault. A ValueError…, A data URL whose media type is what the bytes ARE, by signature. The page… (+8 more)
 
-### Community 27 - "check_cjk.py"
-Cohesion: 0.17
-Nodes (18): _blank_and_ja(), _cache(), _centroid(), _fit(), _load(), main(), _ocr(), Phase 4 -- Chinese and Korean through PP-OCRv5 (AC-3). OFFLINE after first… (+10 more)
+### Community 27 - "OcrError"
+Cohesion: 0.29
+Nodes (6): OcrError, ndarray, RuntimeError, A recogniser that cannot run. Named, like every sidecar failure path., One text line -> (text, mean character confidence)., _Recogniser
 
 ### Community 28 - "cache.py"
-Cohesion: 0.08
-Nodes (54): open_retry(), `open` with the same bounded retry as `_replace`, for READERS. The other half…, _cap_bytes(), clear(), delete_job(), _dir_size(), disk_bytes(), drop_ref() (+46 more)
+Cohesion: 0.11
+Nodes (41): long_path(), r"""Absolute, normalized, and \\?\-prefixed on Windows. The prefix turns off…, _cap_bytes(), clear(), _dir_size(), disk_bytes(), enforce_cap(), has_edit_for_other_model() (+33 more)
 
 ### Community 29 - "api.ts"
 Cohesion: 0.14
@@ -326,24 +314,24 @@ Cohesion: 0.14
 Nodes (18): api(), Callback, callbacks, emit(), fakePage(), invoke(), jobs, listeners (+10 more)
 
 ### Community 32 - "check_group.py"
-Cohesion: 0.13
-Nodes (26): _box(), The region's bounding box in thousandths of the page, for the vision model.…, _bubble_of(), _ellipse_mask(), _fixture(), _geometry(), _ink(), _largest() (+18 more)
+Cohesion: 0.15
+Nodes (24): _box(), The region's bounding box in thousandths of the page, for the vision model.…, _bubble_of(), _ellipse_mask(), _fixture(), _geometry(), _ink(), _largest() (+16 more)
 
-### Community 33 - "repack_extras"
-Cohesion: 0.20
-Nodes (14): _admit(), _is_page_name(), _lazy(), Whether a member name is a page CANDIDATE. Identical rule to read_cbz., gz" | "bz2" | "xz" for a whole-file-compressed tar, "" for a plain one. This…, Run every member past the budget; return the page candidates to stream. Every…, Compressed tar: admit and read in ONE forward pass over the stream. Two…, `(page names in natural order, name -> Member, payload source)`. The one place… (+6 more)
+### Community 33 - "llm.py"
+Cohesion: 0.16
+Nodes (13): _decode_reply(), _from_event_stream(), is_null_word(), ProviderError, RuntimeError, OpenAI-compatible client. Owns the concurrency cap and the error contract.…, The instruction's null, written as the STRING "null". Measured on a real…, Carries the provider's own words to the UI. See AC-8. (+5 more)
 
 ### Community 34 - "Frontend TypeScript Configuration"
 Cohesion: 0.11
 Nodes (18): compilerOptions, allowImportingTsExtensions, isolatedModules, jsx, lib, module, moduleResolution, noEmit (+10 more)
 
-### Community 35 - "StubProvider"
-Cohesion: 0.18
-Nodes (9): emitted_stages(), item_totals(), main(), Phase 0 -- the host/sidecar IPC contract (US-011). OFFLINE (US-003 stub). **Why…, Run one page as a CHILD PROCESS and read the stages off its stdout. In-process…, Run a 3-page .cbz as a CHILD PROCESS: the `total` on its lines, and the pages…, _load_fixtures(), Usable as a context manager; `.url` is the OpenAI-compatible base URL. (+1 more)
+### Community 35 - "Member"
+Cohesion: 0.14
+Nodes (14): _libarchive(), libarchive_path(), _rar_entries(), _rar_payloads(), r"""Where the bundled libarchive lives, or None to let the loader search.…, Import the binding with the resolved library, or raise LibarchiveMissing. The…, (name, safety.Member) for every zip entry, in archive order., Plain tar only. A compressed one goes through `_tar_single_pass`. `"r:"`, never… (+6 more)
 
-### Community 36 - "long_path"
-Cohesion: 0.07
-Nodes (39): atomic_write(), long_path(), r"""The single write protocol. Every file this app produces goes through here.…, Yield a handle whose bytes land at `dest` only if the block completes. On any…, r"""Absolute, normalized, and \\?\-prefixed on Windows. The prefix turns off…, os.replace with a short, bounded retry on Windows sharing violations. Two…, _replace(), _is_page() (+31 more)
+### Community 36 - "atomic.py"
+Cohesion: 0.11
+Nodes (18): atomic_write(), open_retry(), r"""The single write protocol. Every file this app produces goes through here.…, Yield a handle whose bytes land at `dest` only if the block completes. On any…, os.replace with a short, bounded retry on Windows sharing violations. Two…, `open` with the same bounded retry as `_replace`, for READERS. The other half…, _replace(), The cache root. MT_CACHE_DIR wins, so tests never touch the real one. (+10 more)
 
 ### Community 37 - "load_font"
 Cohesion: 0.18
@@ -354,12 +342,12 @@ Cohesion: 0.16
 Nodes (18): ensure(), _ensure_directory(), fetch(), FetchError, _free_space(), model_dir(), on_disk(), RuntimeError (+10 more)
 
 ### Community 39 - "pipeline.py"
-Cohesion: 0.21
-Nodes (11): Container readers. One module per format, and each one reads only. Phase 3…, _container(), flush_repacks(), The seven-stage pipeline: detect, ocr, translate, inpaint, render, encode,…, The item's archive, rebuilt from the loose pages already on disk. What…, Rebuild the item's archive soon, on a worker thread. Returns the status.…, Every pending repack, now, on this thread. For the exit paths. The app does not…, The container family of `src_path`, by signature: an archive family or… (+3 more)
+Cohesion: 0.07
+Nodes (34): Container readers. One module per format, and each one reads only. Phase 3…, _ask_with_retry(), CacheMiss, Cancelled, _check_cancel(), _check_lang(), _content_region(), flush_repacks() (+26 more)
 
-### Community 40 - "Response"
-Cohesion: 0.22
-Nodes (10): exception_handler, Request, Response, _cache_miss_response(), Exception, The last envelope. Every other error path in this file is deliberate; this one…, 404 with a named kind. A missing cache entry is not a server fault. `kind` is…, POST + correct nonce + loopback client, or the process stays up. Every… (+2 more)
+### Community 40 - "sidecar/__init__.py"
+Cohesion: 0.18
+Nodes (8): _bsdtar(), bundled(), NativeMissing, Exception, r"""The native libraries the sidecar needs and pip cannot deliver (AC-6, .cbr).…, A native dependency could not be installed, with a named reason., Whether build/libarchive already holds the whole closure., r"""Windows' own tar.exe, which is bsdtar and therefore reads .tar.zst. A…
 
 ### Community 41 - "typeset.py"
 Cohesion: 0.20
@@ -369,9 +357,9 @@ Nodes (16): _bbox(), _edge_adjacent(), floor_px(), _has_orphan(), _inset_points(
 Cohesion: 0.20
 Nodes (16): append_record(), assert_interpreter(), discover(), env_class(), harvest_metrics(), last_status(), load_records(), main() (+8 more)
 
-### Community 43 - "translate"
-Cohesion: 0.21
-Nodes (12): _client(), _missing_source_response(), _probed(), _provider_response(), AC-8's envelope, built by json.dumps and never by an f-string. The body is the…, Run the vision probe for a route-built client; return its warning or "". The…, Build an LLMClient, or None for the offline placeholder path. Called INSIDE…, 404 naming the path when src_path is not a file; None when it is. Checked… (+4 more)
+### Community 43 - "_repack"
+Cohesion: 0.50
+Nodes (4): output_path(), Where the repacked archive lands. Same extension, except RAR -> .cbz. The…, AC-6's round trip: the delivered pages, back into the input's format. **The…, _repack()
 
 ### Community 44 - "App.tsx"
 Cohesion: 0.19
@@ -386,36 +374,44 @@ Cohesion: 0.13
 Nodes (15): Komalingo Light-Tile App Icon PNG, Komalingo Dark-Tile App Icon PNG, Komalingo Dark-Tile App Icon, Komalingo Light-Tile App Icon, Komalingo Lockup PNG, Komalingo Lockup for Light Backgrounds, Komalingo Lockup for Dark Backgrounds, Komalingo Lockup on Dark PNG (+7 more)
 
 ### Community 47 - "check_models.py"
-Cohesion: 0.13
-Nodes (13): The app's per-user data directory, and the one-time move from its old name. The…, `base`/Komalingo, moving an old-named sibling there if it is the only one.…, under(), onnx_session(), An onnxruntime session on the provider select_provider() names. Errors-only…, check_rename(), check_warmup(), main() (+5 more)
+Cohesion: 0.15
+Nodes (11): The app's per-user data directory, and the one-time move from its old name. The…, `base`/Komalingo, moving an old-named sibling there if it is the only one.…, under(), check_rename(), check_warmup(), main(), Phase 0 -- resumable fetch and EP selection (AC-14). OFFLINE. Serves bytes from…, [warmup] models load ahead of the first page, and never in the way of one.… (+3 more)
 
 ### Community 48 - "typeset_page"
+Cohesion: 0.15
+Nodes (14): as_points(), Accept both shapes a region can carry: a point list or an (x0,y0,x1,y1) box.…, _commit(), Fit, ink_style(), Image, ndarray, One region's typeset result. Every field is output-only. `rung` is the RUNG… (+6 more)
+
+### Community 49 - "_CountingReader"
 Cohesion: 0.18
-Nodes (12): as_points(), Accept both shapes a region can carry: a point list or an (x0,y0,x1,y1) box.…, _commit(), Fit, ink_style(), Image, ndarray, One region's typeset result. Every field is output-only. `rung` is the RUNG… (+4 more)
+Nodes (5): _CountingReader, LibarchiveMissing, Exception, No usable libarchive, so the RAR read path cannot run. A named exception rather…, A read-only stream that charges every byte it produces to a Budget. This is the…
 
 ### Community 50 - "imaging.py"
-Cohesion: 0.31
-Nodes (9): encode(), Image, Encode policy. The only place in the app that calls Image.save. Pillow silently…, Drop the GPS IFD, keep every other tag byte-identical., Encode to bytes in `fmt`, carrying metadata from `src` (default: img)., Encode `img` in the source image's format and write it atomically. Format comes…, save(), _save_kwargs() (+1 more)
+Cohesion: 0.18
+Nodes (15): encode(), output_path(), Image, Encode policy. The only place in the app that calls Image.save. Pillow silently…, Drop the GPS IFD, keep every other tag byte-identical., Encode to bytes in `fmt`, carrying metadata from `src` (default: img)., Destination path whose extension matches the SOURCE format. Named off the…, Encode `img` in the source image's format and write it atomically. Format comes… (+7 more)
 
 ### Community 51 - "main.tsx"
 Cohesion: 0.21
 Nodes (10): react, ErrorBoundary, Props, State, installGlobalReporting(), reportError(), boot(), dismissSplash() (+2 more)
 
-### Community 52 - "_apply_translations"
+### Community 52 - "_run_cached_page"
+Cohesion: 0.10
+Nodes (27): has_page(), has_raster(), model_slug(), A filesystem-safe name for a model id that two ids cannot share. The readable…, The cached record, or None. Touches the directory -- see ``touch``., Whether the page has any raster on disk, without decoding one., ``{region_id: {"text": str, "edited": bool}}`` for one (lang, model)., Merge a fresh translation in, and never overwrite an ``edited`` entry.… (+19 more)
+
+### Community 53 - "_wrap_from"
 Cohesion: 0.25
-Nodes (8): is_null_word(), The instruction's null, written as the STRING "null". Measured on a real…, _apply_translations(), _load_translations(), _pair_decisions(), The page's regions with this (lang, model)'s translations and nulls on them. A…, Fill translations from the cache. True only if EVERY region was covered., Fill translations from the cache. Returns the ids still to translate. A stored…
+Nodes (8): _chord(), _narrowest(), The WIDEST contiguous span of the polygon at scanline y, or None. Contiguous,…, The tightest chord the line's own box spans, clipped to the page raster. A line…, Advance width including tracking, which PIL does not model. Tracking is applied…, Greedy wrap of `words` in slots starting at `top`. None if words remain. A slot…, text_width(), _wrap_from()
 
 ### Community 54 - "ocr_ja.py"
-Cohesion: 0.10
-Nodes (24): lines(), ocr(), OcrError, ndarray, RuntimeError, Chinese and Korean OCR: PP-OCRv5 text-line recognition through onnxruntime.…, The parts that are text LINES, each read once. The detector answers per line…, Rows top to bottom (columns right to left), and WITHIN a row, left to right… (+16 more)
+Cohesion: 0.26
+Nodes (11): _as_image(), canonical(), _get_model(), _is_blank(), ocr(), Image, Japanese OCR with confidence and blank-crop gates. Model output is…, Fold the two encodings manga-ocr picks that the page does not print. (+3 more)
 
 ### Community 55 - "_Tier"
-Cohesion: 0.20
-Nodes (4): LRU over decoded rasters, bounded by COUNT or BYTES, whichever binds. It counts…, Drop `key` if resident., Drop every raster of the page -- enforce_cap's path, one per erased set., _Tier
+Cohesion: 0.18
+Nodes (5): Image, LRU over decoded rasters, bounded by COUNT or BYTES, whichever binds. It counts…, Drop `key` if resident., Drop every raster of the page -- enforce_cap's path, one per erased set., _Tier
 
-### Community 56 - "lifespan"
-Cohesion: 0.29
-Nodes (8): FastAPI, lifespan(), r"""Repair leaked cache references before anything can be evicted against them.…, pipeline.warm_models on a daemon thread; the lifespan never waits on it.…, Exit the moment stdin closes -- which, under Tauri, means the parent died.…, start_warmup(), watch_parent(), Thread
+### Community 56 - "select_provider"
+Cohesion: 0.33
+Nodes (6): health(), Liveness, plus which execution provider this process will run on. The provider…, onnx_session(), Return (execution_provider, reason). The reason is empty ONLY when CUDA was…, An onnxruntime session on the provider select_provider() names. Errors-only…, select_provider()
 
 ### Community 57 - "check_erase.py"
 Cohesion: 0.27
@@ -429,45 +425,25 @@ Nodes (9): RepackStatus, inPolygon(), laidInto(), pageSrc(), severity(), SpotFix
 Cohesion: 0.36
 Nodes (9): probe_png(), A PNG with `token` painted large and black on white. No prompt text. Built…, attempt(), main(), post(), Phase 0 -- the probe that touches a LIVE endpoint (US-012). Only this file…, Return (status, body) -- never raise on HTTP error., Never echo the live key, whatever the gateway reflected back. (+1 more)
 
-### Community 60 - "ocr"
-Cohesion: 0.20
-Nodes (10): _bbox(), _changed_in_polygon(), _check_lang(), ocr(), punctuation_only(), Is there anything here a translator could change? A region that reads as…, Source text per region. Returns the number of OCR calls made. One call per…, Reject a target language that is not a language tag. `lang` is substituted into… (+2 more)
+### Community 60 - "chrf_pp"
+Cohesion: 0.40
+Nodes (5): chrf_pp(), _ngrams(), chrF++'s word tokens: whitespace split, one leading or trailing ASCII…, Corpus chrF++ (Popovic 2017) over the stdlib, sacrebleu's arithmetic: character…, _words()
 
-### Community 61 - "check_cancel.py"
-Cohesion: 0.27
-Nodes (11): build_inputs(), check_cancel(), check_no_partial(), check_resume(), _eight_page_archive(), events_of(), main(), ARCHIVE_PAGES pages from benign.cbz's three, each with one pixel of its own.… (+3 more)
-
-### Community 62 - "Job"
-Cohesion: 0.18
-Nodes (4): Job, Every item, through the boundary, on `workers` threads. Never raises.…, Block until every item has a terminal status. False on timeout., AC-9, the half the product had never wired: probe once per job. Before this,…
-
-### Community 63 - "section_clear"
+### Community 63 - "section_refs"
 Cohesion: 0.11
-Nodes (30): add_ref(), clear_running(), get_placement(), item_placements(), job_dir(), _job_key(), jobs_root(), mark_running() (+22 more)
+Nodes (36): add_ref(), clear_running(), delete_job(), drop_ref(), get_placement(), item_placements(), job_dir(), _job_key() (+28 more)
 
 ### Community 64 - "Node TypeScript Configuration"
 Cohesion: 0.25
 Nodes (7): compilerOptions, allowSyntheticDefaultImports, composite, module, moduleResolution, skipLibCheck, include
 
-### Community 65 - "check_id.py"
-Cohesion: 0.11
-Nodes (26): _glossary_doc(), _live(), main(), _payload_text(), _prompt(), Phase 5 -- Indonesian output and the glossary (AC-4). Offline half always; live…, Which of the line's marked honorifics appear in `out`, and which forbidden…, _renderings() (+18 more)
-
 ### Community 66 - "rerender"
-Cohesion: 0.15
-Nodes (13): Exception, Lock, AC-10: click a bubble, edit the translation, re-render that page alone. Neither…, rerender(), CacheMiss, Cancelled, _check_cancel(), _page_lock() (+5 more)
-
-### Community 67 - "detect"
-Cohesion: 0.22
-Nodes (9): Region, detect(), _glyph_px(), Sort key: top band first, then right to left inside the band. The band exists…, Text regions on one page, as Regions carrying polygon and confidence. ids are…, The source glyph size: the median short side of a block's quads. A tategaki…, _reading_order(), One detected text region, as it travels through the pipeline. `text` defaults… (+1 more)
+Cohesion: 0.13
+Nodes (19): exception_handler, Request, Response, _bad_settings_response(), _cache_miss_response(), models(), _provider_response(), Exception (+11 more)
 
 ### Community 68 - "Fixture Determinism Check"
 Cohesion: 0.43
 Nodes (6): generate(), main(), Phase 0a gate: two regenerations from an empty tree are byte-identical. uv run…, Relative-path -> sha256 for everything under the generated subdirs., sha256(), snapshot()
-
-### Community 69 - "_rerender_locked"
-Cohesion: 0.22
-Nodes (9): _content_region(), dismiss(), _model_id(), _persist(), (kept, dismissed): the regions the vision model said hold no text. Called after…, Write the page's content record: EVERY detected region, not the kept ones.…, The region as the page holds it: a vision model's null is not content., What the translation file is keyed on. 'offline' is a real key, not a hole. The… (+1 more)
 
 ### Community 70 - "redcheck_spotfix.py"
 Cohesion: 0.43
@@ -582,64 +558,36 @@ Cohesion: 0.25
 Nodes (8): no_download(), On this thread, fetch() raises FetchError('absent') instead of downloading. For…, Load the models every page needs, before the first page asks. Returns what…, warm_models(), load(), main(), Phase 0a spike: can we import the CV components in-process on the pinned stack?…, Import under a RUNNING event loop -- the condition the sidecar imposes.
 
 ### Community 98 - "main.py"
-Cohesion: 0.17
-Nodes (14): post, cache_clear(), cache_stats(), cancel_job(), _job_response(), job_status(), JobRequest, The FastAPI sidecar. Loopback only, nonce-gated shutdown. Three security… (+6 more)
+Cohesion: 0.08
+Nodes (38): BaseModel, FastAPI, post, cache_clear(), cancel_job(), _client(), ItemRequest, _job_response() (+30 more)
 
 ### Community 99 - "Scanned PDF Fixture"
 Cohesion: 0.67
 Nodes (3): Scanned PDF Fixture, Unreadable Scanned PDF Page 1 Image, Unreadable Scanned PDF Page 2 Image
 
-### Community 142 - "BaseModel"
-Cohesion: 0.25
-Nodes (8): BaseModel, ItemRequest, What the Settings UI sends. No defaults -- absent means absent., One archive or PDF, start to finish. Phase 8 owns the QUEUE, not this route.…, AC-10's payload: one region of one page of one job. The page is addressed by…, RerenderRequest, Settings, TranslateRequest
-
-### Community 143 - "read_translation"
-Cohesion: 0.18
-Nodes (12): model_slug(), page_hash(), Image, SHA-256 of the DECODED pixels, plus mode and size. Mode and size are in the…, A filesystem-safe name for a model id that two ids cannot share. The readable…, ``{region_id: {"text": str, "edited": bool}}`` for one (lang, model)., Merge a fresh translation in, and never overwrite an ``edited`` entry.…, read_translation() (+4 more)
-
 ### Community 144 - "_floor_fits"
 Cohesion: 0.29
 Nodes (8): _capacity(), _floor_fits(), _longest(), The largest n in [0, n_max] for which fits(n) holds, given fits is monotone.…, The rung-3 state -- floor, tightened, no inset, no bleed -- as a predicate., The largest character count of `text` that fits at the floor, tightened.…, Rung 5's terminal branch. Returns (placed or None, rendered, reason). Cannot…, _truncate()
 
-### Community 145 - "_wrap_from"
-Cohesion: 0.25
-Nodes (8): _chord(), _narrowest(), The WIDEST contiguous span of the polygon at scanline y, or None. Contiguous,…, The tightest chord the line's own box spans, clipped to the page raster. A line…, Advance width including tracking, which PIL does not model. Tracking is applied…, Greedy wrap of `words` in slots starting at `top`. None if words remain. A slot…, text_width(), _wrap_from()
-
-### Community 146 - "_member_dest"
-Cohesion: 0.33
-Nodes (6): output_path(), Destination path whose extension matches the SOURCE format. Named off the…, _member_dest(), r"""One path segment, made safe to CREATE on Windows. The colon is the one that…, r"""Where one archive member's translated page lands, under `dest_dir`.…, _safe_segment()
-
-### Community 147 - "_bad_settings_response"
-Cohesion: 0.40
-Nodes (5): _bad_settings_response(), models(), ValueError, A 400 for settings this process cannot use. json.dumps, never f-string. Typed…, Populate the Settings model dropdown from the user's own endpoint.
-
-### Community 148 - "SettingsError"
-Cohesion: 0.50
-Nodes (4): The configured settings cannot be used. Not the provider's fault. A ValueError…, SettingsError, One request for every rung-5 region on the page, through llm.py's semaphore.…, _retranslate()
-
-### Community 149 - "_above_floor"
-Cohesion: 0.50
-Nodes (4): _above_floor(), _calibrate(), Seconds for one reference page's worth of raster work. Best of N.…, (ok, description) for §E's hardware floor. Measured, not read off a label.…
-
 ## Knowledge Gaps
-- **294 isolated node(s):** `Callback`, `callbacks`, `listeners`, `STAGES`, `jobs` (+289 more)
+- **294 isolated node(s):** `expected_json_sha256`, `sha256`, `size`, `sha256`, `size` (+289 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 920 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **45 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **38 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `skip()` connect `Checks` to `check_group.py`, `check_id.py`, `check_package.py`, `StubProvider`, `check_archives.py`, `pdf.py`, `check_spotfix.py`, `check_inpaint.py`, `check_probe.py`, `check_batch.py`, `check_typeset.py`, `fetch_fixtures.py`, `check_erase.py`, `LLMClient`, `check_cjk.py`, `check_cancel.py`?**
-  _High betweenness centrality (0.032) - this node is a cross-community bridge._
-- **Why does `Checks` connect `Checks` to `check_group.py`, `check_package.py`, `check_id.py`, `StubProvider`, `check_archives.py`, `pdf.py`, `check_inpaint.py`, `check_probe.py`, `check_batch.py`, `check_models.py`, `fetch_fixtures.py`, `check_typeset.py`, `check_erase.py`, `LLMClient`, `check_cjk.py`, `check_cancel.py`?**
-  _High betweenness centrality (0.030) - this node is a cross-community bridge._
-- **Why does `LLMClient` connect `LLMClient` to `check_group.py`, `check_id.py`, `main.py`, `StubProvider`, `check_spotfix.py`, `check_inpaint.py`, `check_probe.py`, `translate`, `check_batch.py`, `check_typeset.py`, `_bad_settings_response`, `check_cjk.py`, `check_cancel.py`?**
-  _High betweenness centrality (0.021) - this node is a cross-community bridge._
+- **Why does `Checks` connect `Checks` to `check_group.py`, `StubProvider`, `pdf.py`, `check_archives.py`, `atomic.py`, `check_inpaint.py`, `check_id.py`, `check_batch.py`, `check_models.py`, `skip`, `check_cjk.py`, `imaging.py`, `check_typeset.py`, `check_erase.py`, `check_probe.py`, `section_refs`?**
+  _High betweenness centrality (0.062) - this node is a cross-community bridge._
+- **Why does `LLMClient` connect `LLMClient` to `check_group.py`, `llm.py`, `main.py`, `rerender`, `Checks`, `check_inpaint.py`, `check_id.py`, `check_batch.py`, `check_typeset.py`, `skip`, `check_cjk.py`, `check_probe.py`?**
+  _High betweenness centrality (0.023) - this node is a cross-community bridge._
+- **Why does `skip()` connect `skip` to `check_group.py`, `StubProvider`, `pdf.py`, `Checks`, `check_archives.py`, `check_inpaint.py`, `check_id.py`, `check_batch.py`, `check_typeset.py`, `check_cjk.py`, `check_erase.py`, `check_probe.py`?**
+  _High betweenness centrality (0.022) - this node is a cross-community bridge._
+- **Are the 26 inferred relationships involving `Checks` (e.g. with `_call()` and `_guarded()`) actually correct?**
+  _`Checks` has 26 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 2 inferred relationships involving `LLMClient` (e.g. with `models()` and `section_skipped()`) actually correct?**
   _`LLMClient` has 2 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 3 inferred relationships involving `StubProvider` (e.g. with `section_ingest_llm()` and `section_not_text()`) actually correct?**
-  _`StubProvider` has 3 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `Callback`, `callbacks`, `listeners` to the rest of the system?**
+- **What connects `expected_json_sha256`, `sha256`, `size` to the rest of the system?**
   _294 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `pdf.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.05352112676056338 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.05009009009009009 - nodes in this community are weakly interconnected._

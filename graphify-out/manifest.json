@@ -1,7 +1,7 @@
 {
   "fixtures/bubbles/expected.json": {
-    "mtime": 1789328296.841992,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8135982,
+    "seen": 1789428862.5935926,
     "ast_hash": "25751db49e9e7d3afedf6c20da9a0d6e",
     "semantic_hash": "25751db49e9e7d3afedf6c20da9a0d6e"
   },
@@ -18,8 +18,8 @@
     "semantic_hash": "18ddc8efe05189be33c613dd12f7d94d"
   },
   "fixtures/smoke/expected.json": {
-    "mtime": 1789328296.840986,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8125944,
+    "seen": 1789428862.5935926,
     "ast_hash": "ea243c720c1fc81d6a268ebba6df6553",
     "semantic_hash": "ea243c720c1fc81d6a268ebba6df6553"
   },
@@ -54,9 +54,9 @@
     "semantic_hash": "3cdc2bc87fd2005fea0c1ed900935158"
   },
   "sidecar/llm.py": {
-    "mtime": 1789341298.4412744,
-    "seen": 1789341634.8137705,
-    "ast_hash": "5368246ed1ea01a8c830cd9c883144b6",
+    "mtime": 1789429301.4278653,
+    "seen": 1789429434.8245964,
+    "ast_hash": "c1a66f6f4cfdc194b87dd6798f60076b",
     "semantic_hash": ""
   },
   "sidecar/main.py": {
@@ -78,9 +78,9 @@
     "semantic_hash": "368d614e069be415e8f88881bd974ba1"
   },
   "sidecar/pipeline.py": {
-    "mtime": 1789341335.7617807,
-    "seen": 1789341634.8137705,
-    "ast_hash": "a0ce73be2589a81c0d4c0f9df5f48d60",
+    "mtime": 1789429341.0789514,
+    "seen": 1789429434.8245964,
+    "ast_hash": "36ffaa860d9974d274a2cd5fec734d63",
     "semantic_hash": ""
   },
   "sidecar/pyproject.toml": {
@@ -240,9 +240,9 @@
     "semantic_hash": "9f5f915b3185c20551c61e0f01401b1c"
   },
   "tests/check_provider.py": {
-    "mtime": 1789326762.2109802,
-    "seen": 1789328878.67913,
-    "ast_hash": "a02e23b2a1dc8e7882e4eb9e4618af6c",
+    "mtime": 1789429401.8757122,
+    "seen": 1789429434.8245964,
+    "ast_hash": "c026d53df393273a00d5189558ee9ba8",
     "semantic_hash": ""
   },
   "tests/check_settings.py": {
@@ -294,9 +294,9 @@
     "semantic_hash": "7b51563e20b72541de1d3c7a799e7b0b"
   },
   "tests/lib/stub_provider.py": {
-    "mtime": 1789315291.8761272,
-    "seen": 1789315430.7142453,
-    "ast_hash": "1f8f9c9cad6ceefb90051e4643edee31",
+    "mtime": 1789429368.085543,
+    "seen": 1789429434.8245964,
+    "ast_hash": "5d2af573eae8057e63f1cb75d4f6639b",
     "semantic_hash": ""
   },
   "tests/run_all.py": {
@@ -348,44 +348,44 @@
     "semantic_hash": "b241a399b4850e8a4222ea5f1b7cb99e"
   },
   "fixtures/bubbles/rung4.png": {
-    "mtime": 1789328295.0397265,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.0517244,
+    "seen": 1789428862.5935926,
     "ast_hash": "a003d9e3220e7544f6dda5c9ff7d781d",
     "semantic_hash": "a003d9e3220e7544f6dda5c9ff7d781d"
   },
   "fixtures/bubbles/rung5-geometry.png": {
-    "mtime": 1789328295.0420506,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.0530977,
+    "seen": 1789428862.5935926,
     "ast_hash": "7a4ec6e2f25bf69609a7513fdacab706",
     "semantic_hash": "7a4ec6e2f25bf69609a7513fdacab706"
   },
   "fixtures/bubbles/rung5-length.png": {
-    "mtime": 1789328295.0407252,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.0530977,
+    "seen": 1789428862.5935926,
     "ast_hash": "c627176491cf79fe64388023f3585c4d",
     "semantic_hash": "c627176491cf79fe64388023f3585c4d"
   },
   "fixtures/bubbles/rung5-midtoken.png": {
-    "mtime": 1789328295.0435631,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.0551038,
+    "seen": 1789428862.5935926,
     "ast_hash": "78f41c687f3222ac44ab24cb055a4e78",
     "semantic_hash": "78f41c687f3222ac44ab24cb055a4e78"
   },
   "fixtures/bubbles/rung5-nowordfits.png": {
-    "mtime": 1789328295.0435631,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.0551038,
+    "seen": 1789428862.5935926,
     "ast_hash": "7b62fd0a270128c0ef5d66e155a99d90",
     "semantic_hash": "7b62fd0a270128c0ef5d66e155a99d90"
   },
   "fixtures/bubbles/rung5-success.png": {
-    "mtime": 1789328295.0420506,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.054103,
+    "seen": 1789428862.5935926,
     "ast_hash": "461dfbf62596d23028bd6c0e498094ea",
     "semantic_hash": "461dfbf62596d23028bd6c0e498094ea"
   },
   "fixtures/smoke/tategaki_01.png": {
-    "mtime": 1789328295.0126982,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.0233088,
+    "seen": 1789428862.5935926,
     "ast_hash": "1420a4ee6681b8074bc4c07b02fd86b4",
     "semantic_hash": "1420a4ee6681b8074bc4c07b02fd86b4"
   },
@@ -522,8 +522,8 @@
     "semantic_hash": "b43ca33f59ccb7c92898c142cab2da23"
   },
   "fixtures/cbz/expected.json": {
-    "mtime": 1789328296.841992,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8135982,
+    "seen": 1789428862.5935926,
     "ast_hash": "d63b778f433618ee6c0b61a85b65a06b",
     "semantic_hash": "d63b778f433618ee6c0b61a85b65a06b"
   },
@@ -582,20 +582,20 @@
     "semantic_hash": "093c75bb5d43d2c762e7244ba7430dbc"
   },
   "fixtures/smoke/tategaki_02.png": {
-    "mtime": 1789328295.0387208,
-    "seen": 1789328878.67913,
+    "mtime": 1789428856.0493627,
+    "seen": 1789428862.5935926,
     "ast_hash": "09e24e104b239515acf66befa8fb3fcd",
     "semantic_hash": "09e24e104b239515acf66befa8fb3fcd"
   },
   "fixtures/ko/expected.json": {
-    "mtime": 1789328296.8424964,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8145988,
+    "seen": 1789428862.5935926,
     "ast_hash": "013ed2b33764c28227c7b5e3dd6aa4b5",
     "semantic_hash": "013ed2b33764c28227c7b5e3dd6aa4b5"
   },
   "fixtures/zh/expected.json": {
-    "mtime": 1789328296.8424964,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8145988,
+    "seen": 1789428862.5935926,
     "ast_hash": "74cd3e59eb0d2c3ef8515cb691bea3e4",
     "semantic_hash": "74cd3e59eb0d2c3ef8515cb691bea3e4"
   },
@@ -636,8 +636,8 @@
     "semantic_hash": "d82f42c9da4c6d1974d9997ac79b266a"
   },
   "fixtures/archives/expected.json": {
-    "mtime": 1789328296.8424964,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8155987,
+    "seen": 1789428862.5935926,
     "ast_hash": "2714a56bd8685ffe75553d1fe8c66309",
     "semantic_hash": "2714a56bd8685ffe75553d1fe8c66309"
   },
@@ -666,8 +666,8 @@
     "semantic_hash": "ff620eb580805dddc7b76049af3e6881"
   },
   "fixtures/pdf/expected.json": {
-    "mtime": 1789328296.844,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.816102,
+    "seen": 1789428862.5935926,
     "ast_hash": "1931478c6713f041f2632ef0d986efde",
     "semantic_hash": "1931478c6713f041f2632ef0d986efde"
   },
@@ -684,38 +684,38 @@
     "semantic_hash": ""
   },
   "fixtures/pdf/scan.pdf": {
-    "mtime": 1789328296.7810557,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.7491412,
+    "seen": 1789428862.5935926,
     "ast_hash": "0003fcd42448e487cb83e180bf79c914",
     "semantic_hash": "0003fcd42448e487cb83e180bf79c914"
   },
   "fixtures/pdf/text.pdf": {
-    "mtime": 1789328296.781567,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.7491412,
+    "seen": 1789428862.5935926,
     "ast_hash": "942096f33bc58278ebdd0b2a9aedfde7",
     "semantic_hash": "942096f33bc58278ebdd0b2a9aedfde7"
   },
   "fixtures/pdf/scan_p1.jpg": {
-    "mtime": 1789328296.7770402,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.7461357,
+    "seen": 1789428862.5935926,
     "ast_hash": "cd9c2b5d6e4e09f6b7e9e43c51fb94c8",
     "semantic_hash": "cd9c2b5d6e4e09f6b7e9e43c51fb94c8"
   },
   "fixtures/pdf/scan_p2.png": {
-    "mtime": 1789328296.7770402,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.7461357,
+    "seen": 1789428862.5935926,
     "ast_hash": "bbd91d76f55c3d5b6100ba8cfbd41017",
     "semantic_hash": "bbd91d76f55c3d5b6100ba8cfbd41017"
   },
   "fixtures/pdf/partial.pdf": {
-    "mtime": 1789328296.7825718,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.7503371,
+    "seen": 1789428862.5935926,
     "ast_hash": "1fa0cc94e57e820d6b2df85178434764",
     "semantic_hash": "1fa0cc94e57e820d6b2df85178434764"
   },
   "fixtures/pdf/text_rot.pdf": {
-    "mtime": 1789328296.781567,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.7503371,
+    "seen": 1789428862.5935926,
     "ast_hash": "96fc6eb6995348b141b725cb8d1ca93e",
     "semantic_hash": "96fc6eb6995348b141b725cb8d1ca93e"
   },
@@ -822,8 +822,8 @@
     "semantic_hash": "1f3ff53524baa638c35dc7158acaa213"
   },
   "fixtures/erase/expected.json": {
-    "mtime": 1789328296.840986,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8125944,
+    "seen": 1789428862.5935926,
     "ast_hash": "e5b7661780ab9438cd19193ebd65ae13",
     "semantic_hash": "e5b7661780ab9438cd19193ebd65ae13"
   },
@@ -846,14 +846,14 @@
     "semantic_hash": "157025eb7148dae95348c0310f1d5e1e"
   },
   "fixtures/erase/page_01.png": {
-    "mtime": 1789328296.8344693,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8081188,
+    "seen": 1789428862.5935926,
     "ast_hash": "1042b9a2c8a0a648d09143640eda0144",
     "semantic_hash": "1042b9a2c8a0a648d09143640eda0144"
   },
   "fixtures/erase/page_01_text.png": {
-    "mtime": 1789328296.8394785,
-    "seen": 1789328878.67913,
+    "mtime": 1789428857.8120859,
+    "seen": 1789428862.5935926,
     "ast_hash": "9cc6ac52db37e4d4789ec7ed63d04287",
     "semantic_hash": "9cc6ac52db37e4d4789ec7ed63d04287"
   },
