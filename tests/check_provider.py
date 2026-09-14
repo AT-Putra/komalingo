@@ -23,6 +23,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
@@ -291,6 +292,112 @@ def main():
         except Exception as e:  # noqa: BLE001
             c.check(False, f"[not-json] a non-JSON 200 raised {type(e).__name__}, "
                            f"not ProviderError: {e}")
+
+    # --- a reply the provider cut off is a ProviderError that says so -------
+    # Measured 2026-09-15: a gateway answered 200 with the content ending at
+    # `{"translations":[{"id":1,"text":"`. With two regions the fragment
+    # keeps region 1's closing brace, so the brace slice parses as far as
+    # json.loads, which raised JSONDecodeError -- a bare 500 -- until the
+    # client caught it. finish_reason=length is the provider's own
+    # explanation and travels in the body.
+    with StubProvider(delay=0, chat_format="truncated") as stub:
+        try:
+            asyncio.run(LLMClient(stub.url, None, MODEL).translate_page(regions(2)))
+            c.check(False, "[cut-off] a reply cut mid-JSON raises ProviderError")
+        except ProviderError as e:
+            c.check(e.status == 200 and "finish_reason=length" in e.body
+                    and '"translations"' in e.body,
+                    f"[cut-off] a reply cut mid-JSON is a ProviderError naming the token cap "
+                    f"and carrying the fragment: {e.status} {e.body[:120]!r}")
+        except Exception as e:  # noqa: BLE001
+            c.check(False, f"[cut-off] a reply cut mid-JSON raised {type(e).__name__}, "
+                           f"not ProviderError: {e}")
+
+    # --- a body that stalls after the headers is a ProviderError too --------
+    # urlopen wraps a connect timeout in URLError; a timeout inside r.read()
+    # is the bare socket.timeout, and it walked out of _request as
+    # "TimeoutError: timed out" through 40 frames to a 500 (measured
+    # 2026-09-15, a gateway that sent status 200 and then nothing).
+    from sidecar import llm as _llm
+    saved_timeout = _llm.TIMEOUT
+    _llm.TIMEOUT = 1
+    try:
+        with StubProvider(delay=0, chat_format="stall") as stub:
+            try:
+                asyncio.run(LLMClient(stub.url, None, MODEL).translate_page(regions(1)))
+                c.check(False, "[stall] a body that never completes raises ProviderError")
+            except ProviderError as e:
+                c.check(e.status == 0 and "TimeoutError" in e.body and "1s" in e.body,
+                        f"[stall] a body that never completes is a ProviderError naming the "
+                        f"timeout, not a traceback: {e.status} {e.body!r}")
+            except Exception as e:  # noqa: BLE001
+                c.check(False, f"[stall] a stalled body raised {type(e).__name__}, "
+                               f"not ProviderError: {e}")
+    finally:
+        _llm.TIMEOUT = saved_timeout
+
+    # --- one retry per page, and the log says which page and how it went ---
+    # The pipeline's translate stage asks once more when the failure was
+    # transient (a stalled or cut-off reply, a 5xx) and gives up on the
+    # second failure; a 401 is not asked twice. Every retry is logged on
+    # stderr with the file and page, so the log pane names the page that
+    # stalled and says whether the second request rescued it.
+    def fresh_regions():
+        return [{"id": 1, "text": "a", "polygon": [[100, 200], [300, 200], [300, 1000], [100, 1000]]},
+                {"id": 2, "text": "b", "polygon": [[500, 1200], [900, 1200], [900, 1900], [500, 1900]]}]
+
+    def translate_with(stub, where="vol1.cbz, page 3 (003.png)", cancel=None):
+        regions_, err = fresh_regions(), None
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as log:
+            try:
+                _pl.translate(regions_, 3, LLMClient(stub.url, None, MODEL), "en", "ja",
+                              img=page, where=where, cancel=cancel)
+            except ProviderError as e:
+                err = e
+        return regions_, err, log.getvalue()
+
+    saved_delay, _pl.RETRY_DELAY = _pl.RETRY_DELAY, 0
+    try:
+        with StubProvider(delay=0, chat_format="truncated", fail_first=1) as stub:
+            regions_, err, log = translate_with(stub)
+        c.check(err is None and stub.chat_requests == 2
+                and [r.get("translation") for r in regions_] == ["STUB 1", "STUB 2"],
+                f"[retry] a page whose first reply was cut off is asked once more and the "
+                f"second reply is rendered: {stub.chat_requests} requests, "
+                f"{[r.get('translation') for r in regions_]}, err={err}")
+        c.check("vol1.cbz, page 3 (003.png)" in log and "attempt 1 failed" in log
+                and "finish_reason=length" in log and "retry 1 succeeded" in log,
+                f"[retry] and the log names the file and page, the reason, and that the retry "
+                f"succeeded: {log.strip()!r}")
+
+        _llm.TIMEOUT = 1
+        try:
+            with StubProvider(delay=0, chat_format="stall") as stub:
+                regions_, err, log = translate_with(stub)
+        finally:
+            _llm.TIMEOUT = saved_timeout
+        c.check(err is not None and err.status == 0 and stub.chat_requests == 2,
+                f"[retry] a page that stalls twice fails after exactly 2 requests with the "
+                f"timeout as the reason: {stub.chat_requests} requests, err={err}")
+        c.check("vol1.cbz, page 3 (003.png)" in log and "retry 1 of 1 failed too" in log
+                and "the item fails" in log,
+                f"[retry] and the log says the retry failed too and the item fails: {log.strip()!r}")
+
+        with StubProvider(status=401, delay=0) as stub:
+            regions_, err, log = translate_with(stub)
+        c.check(err is not None and err.status == 401 and stub.chat_requests == 1 and "retry" not in log,
+                f"[retry] a 401 is not asked twice -- the request is wrong, not the moment: "
+                f"{stub.chat_requests} request(s), log={log.strip()!r}")
+
+        cancelled = threading.Event()
+        cancelled.set()
+        with StubProvider(delay=0, chat_format="truncated", fail_first=1) as stub:
+            regions_, err, log = translate_with(stub, cancel=cancelled)
+        c.check(err is not None and stub.chat_requests == 1,
+                f"[retry] a cancel set before the retry is honoured -- no second request: "
+                f"{stub.chat_requests} request(s), err={err}")
+    finally:
+        _pl.RETRY_DELAY = saved_delay
 
     # --- an unreachable host is still a ProviderError, not a traceback -----
     client = LLMClient("http://127.0.0.1:1/v1", None, MODEL)

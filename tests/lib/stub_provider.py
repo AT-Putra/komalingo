@@ -31,15 +31,26 @@ class StubProvider:
     """Usable as a context manager; `.url` is the OpenAI-compatible base URL."""
 
     def __init__(self, status=200, delay=REQUEST_DELAY, models_status=200, replies=None,
-                 chat_format="json"):
+                 chat_format="json", fail_first=None):
         self.status = status  # 200, 401 or 500 -- selects the canned body
         # How a 200 chat reply is framed. "json" is the OpenAI shape. "sse" is
         # what some gateways send for a request that never asked to stream:
         # text/event-stream, one `data:` chunk per piece, then [DONE].
         # "sse-error" is a stream whose one event is an error object, and
         # "garbage" is a 200 whose body is not JSON at all (a captive portal,
-        # a proxy's login page).
+        # a proxy's login page). "truncated" is a well-formed 200 envelope
+        # whose CONTENT stops mid-JSON with finish_reason=length, as a
+        # provider's token cap leaves it. "stall" sends the status line and
+        # headers, part of the body, and then nothing until the stub is
+        # closed -- the shape of a gateway whose upstream hung.
         self.chat_format = chat_format
+        # A provider that recovers: only the first `fail_first` chat requests
+        # answer with `status`/`chat_format`, every later one is an ordinary
+        # JSON 200. None keeps the failure permanent. This is what the
+        # pipeline's one retry is measured against -- and, with fail_first
+        # set to one more than the retries, what its giving up is.
+        self.fail_first = fail_first
+        self._release = threading.Event()
         # GET /models answers separately from the chat path, because the
         # Settings dropdown fails on its own: a wrong key is rejected when the
         # user first lists models, long before any page is translated.
@@ -106,19 +117,38 @@ class StubProvider:
                 try:
                     if stub.delay:
                         threading.Event().wait(stub.delay)
-                    if stub.status == 401:
+                    recovered = (stub.fail_first is not None
+                                 and stub.chat_requests > stub.fail_first)
+                    status = 200 if recovered else stub.status
+                    fmt = "json" if recovered else stub.chat_format
+                    if status == 401:
                         self._respond(401, fixtures["401"], "application/json")
-                    elif stub.status == 500:
+                    elif status == 500:
                         self._respond(500, fixtures["500"], "text/html")
-                    elif stub.chat_format == "sse":
+                    elif fmt == "sse":
                         self._respond(200, _as_event_stream(_chat_reply(stub.last_payload, stub.replies)),
                                       "text/event-stream")
-                    elif stub.chat_format == "sse-error":
+                    elif fmt == "sse-error":
                         self._respond(200, b'data: {"error":{"message":"model is overloaded",'
                                            b'"code":529}}\n\ndata: [DONE]\n\n', "text/event-stream")
-                    elif stub.chat_format == "garbage":
+                    elif fmt == "garbage":
                         self._respond(200, b"<html><body>Sign in to the proxy</body></html>",
                                       "text/html")
+                    elif fmt == "truncated":
+                        self._respond(200, _cut_off(_chat_reply(stub.last_payload, stub.replies)),
+                                      "application/json")
+                    elif fmt == "stall":
+                        # Promise a body and deliver a third of it. The client
+                        # is past urlopen and inside r.read() when the wait
+                        # starts, which is the seam urllib does not wrap.
+                        body = _chat_reply(stub.last_payload, stub.replies)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body[: len(body) // 3])
+                        self.wfile.flush()
+                        stub._release.wait(timeout=30)
                     else:
                         self._respond(200, _chat_reply(stub.last_payload, stub.replies),
                                       "application/json")
@@ -139,6 +169,7 @@ class StubProvider:
         return self
 
     def __exit__(self, *_):
+        self._release.set()  # lets a stalled handler finish before shutdown
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
@@ -222,6 +253,22 @@ def _chat_reply(payload, replies=None) -> bytes:
             ],
         }
     ).encode()
+
+
+def _cut_off(reply: bytes) -> bytes:
+    """A chat.completion whose content a token cap cut mid-JSON.
+
+    Cut at the midpoint so that with two or more regions the fragment still
+    holds region 1's closing brace: that is the case the client's
+    find("{")/rfind("}") slice accepts and json.loads then rejects, which is
+    the one that escaped as a bare JSONDecodeError. A fence in front, as
+    the measured gateway sent it.
+    """
+    full = json.loads(reply)
+    text = full["choices"][0]["message"]["content"]
+    full["choices"][0]["message"]["content"] = "```json\n" + text[: len(text) // 2]
+    full["choices"][0]["finish_reason"] = "length"
+    return json.dumps(full, ensure_ascii=False).encode("utf-8")
 
 
 def _as_event_stream(reply: bytes) -> bytes:

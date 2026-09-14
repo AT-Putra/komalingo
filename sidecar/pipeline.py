@@ -75,6 +75,22 @@ _EMIT_LOCK = threading.Lock()
 _EXPECTED = threading.local()
 
 
+def _log(msg: str) -> None:
+    """One line to stderr, which Tauri reads into the log pane. Not stdout:
+    that pipe carries emit()'s progress JSON, one object per line."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+# A page whose provider request failed for a reason that can pass -- a
+# stalled reply, a cut-off one, a 5xx -- is asked ONCE more before the item
+# fails. One, not a loop: the second request already costs up to llm.TIMEOUT,
+# and a provider that fails twice in a row is the user's to look at, in the
+# log pane, where both attempts are named. Module-level so a check can zero
+# the pause.
+TRANSLATE_RETRIES = 1
+RETRY_DELAY = 2.0
+
+
 @contextlib.contextmanager
 def expecting(total: int | None, item_id: str | None = None):
     """Publish the page count and id of the item this thread is about to run."""
@@ -228,8 +244,47 @@ def page_context_image(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def _ask_with_retry(ask, where: str, cancel=None) -> dict:
+    """`ask()` once, and once more if the provider's failure was transient.
+
+    `where` names the file and the page, and every outcome that involves a
+    retry is logged with it: the first failure and the reason, then whether
+    the second request succeeded or failed too. A user reading the log pane
+    after a failed job must be able to see WHICH page stalled, and a user
+    whose job finished must be able to see that a page needed two tries --
+    that is the difference between "the gateway is fine" and "it is about
+    to fail for good".
+
+    A cancel set between the attempts is honoured: the retry is a whole new
+    provider request, up to llm.TIMEOUT long, and a cancelled job does not
+    get to spend it.
+    """
+    from .llm import ProviderError
+
+    for attempt in range(1, TRANSLATE_RETRIES + 2):
+        try:
+            out = ask()
+        except ProviderError as e:
+            why = str(e)[:300]
+            if attempt > TRANSLATE_RETRIES:
+                _log(f"translate: {where}: retry {attempt - 1} of {TRANSLATE_RETRIES} "
+                     f"failed too ({why}); the item fails")
+                raise
+            if not e.transient or (cancel is not None and cancel.is_set()):
+                raise
+            _log(f"translate: {where}: attempt {attempt} failed ({why}); "
+                 f"retrying in {RETRY_DELAY:g}s")
+            time.sleep(RETRY_DELAY)
+            continue
+        if attempt > 1:
+            _log(f"translate: {where}: retry {attempt - 1} succeeded")
+        return out
+    raise AssertionError("unreachable: the loop returns or raises")
+
+
 def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_LANG,
-              source: str = DEFAULT_SOURCE, img: Image.Image | None = None) -> None:
+              source: str = DEFAULT_SOURCE, img: Image.Image | None = None,
+              where: str = "", cancel=None) -> None:
     """Target-language text per region. One LLM request for the whole page.
 
     `img` is the page the regions came from, and it TRAVELS with the request
@@ -246,6 +301,10 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
     credentials come from the Settings UI at runtime, never from this file.
     Phase 5: `lang` and `source` reach the prompt. Until then the job's lang
     was a cache key and nothing else, and the prompt said English regardless.
+
+    `where` is the file and page for the log, "vol1.cbz, page 3 (003.png)";
+    it defaults to the page number alone, which is all this function knows.
+    See _ask_with_retry for the one retry a transient provider failure gets.
     """
     # Regions ocr() already set aside are not sent: nothing to translate,
     # and no tokens spent finding that out.
@@ -261,12 +320,16 @@ def translate(regions: list[dict], page: int, client=None, lang: str = DEFAULT_L
 
         from .llm import Region
 
-        out = asyncio.run(
-            client.translate_page([Region(id=r["id"], text=r["text"], box=_box(r, img))
-                                   for r in asked],
-                                  page_image=page_context_image(img) if img is not None else None,
-                                  lang=lang, source=source)
-        ) if asked else {}
+        # Built once, sent up to twice: the region list and the page context
+        # are the same request both times, so a retry is the SAME question.
+        sent = [Region(id=r["id"], text=r["text"], box=_box(r, img)) for r in asked]
+        context = page_context_image(img) if img is not None else None
+
+        def ask():
+            return asyncio.run(client.translate_page(sent, page_image=context,
+                                                     lang=lang, source=source))
+
+        out = _ask_with_retry(ask, where or f"page {page}", cancel) if asked else {}
         for r in asked:
             text = out.get(r["id"], "")
             # None is the vision model's "nothing is written there" -- see
@@ -450,7 +513,8 @@ def _run_page_in_slot(src_path, dest_dir, page, client, source, lang, item_id) -
         with _MODEL_LOCK:
             regions = detect(src, page)
             ocr_calls = ocr(regions, src, page, source)
-        translate(regions, page, client, lang, source, img=original)
+        translate(regions, page, client, lang, source, img=original,
+                  where=item_id or os.path.basename(os.fspath(src_path)))
         regions, dismissed = dismiss(regions)
         cleaned, inpaint_calls = inpaint(original, regions, page)
         drawn, fit_summary = render(cleaned, regions, page, client)
@@ -1187,7 +1251,9 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         # ocr are not yet persisted here (_persist is at the end), so the
         # cost is one page's re-detect on the next run.
         _check_cancel(cancel, item_id, pages_done)
-        translate(regions, ordinal, client, lang, source, img=img)
+        translate(regions, ordinal, client, lang, source, img=img,
+                  where=f"{item_id}, page {ordinal}" + (f" ({member})" if member else ""),
+                  cancel=cancel)
         # The whole page was asked, for context; only what was missing is
         # written. A stored translation the model now words differently is
         # not replaced, and the read-back below puts it back on the region.

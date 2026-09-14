@@ -187,6 +187,24 @@ class ProviderError(RuntimeError):
         self.url = url
         super().__init__(f"HTTP {status}: {body}")
 
+    @property
+    def transient(self) -> bool:
+        """Whether the same request, sent again, has a real chance.
+
+        0 is the transport: a timeout, a reset, a refused connection. 200 is
+        a reply that arrived and was unusable -- cut off mid-JSON, an error
+        event inside a stream, a proxy's login page. 408 and 429 and every
+        5xx are the provider saying "not now". A 401 or a 400 is the REQUEST
+        that is wrong, and a second copy of it is wrong the same way.
+        """
+        return self.status in (0, 200, 408, 429) or self.status >= 500
+
+
+def _timed_out() -> str:
+    """The body of a timeout ProviderError. socket's own text is "timed out",
+    which tells the user nothing they can act on; the number of seconds does."""
+    return f"TimeoutError: the provider sent no complete reply within {TIMEOUT}s"
+
 
 def _decode_reply(raw: bytes, content_type: str, status: int, url: str):
     """A 2xx body as the dict the OpenAI shape describes, or a ProviderError.
@@ -324,7 +342,24 @@ class LLMClient:
                     body = e.read().decode("utf-8", "replace")
                     raise ProviderError(e.code, body, url) from None
         except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError):
+                raise ProviderError(0, _timed_out(), url) from None
             raise ProviderError(0, f"{type(e.reason).__name__}: {e.reason}", url) from None
+        except TimeoutError:
+            # urlopen wraps a timeout it hits while CONNECTING in URLError,
+            # caught above. A timeout during r.read() -- headers arrived, then
+            # the body stalled -- is the bare socket.timeout, which is neither
+            # a URLError nor an HTTPException, so it walked out of this
+            # function as "TimeoutError: timed out" and /api/translate
+            # answered 500 "internal error" with a 40-frame traceback.
+            # Measured 2026-09-15 on a gateway that sent status 200 and then
+            # stopped. The user's provider stalled; that is a 502 in the
+            # provider's words, not a bug in the sidecar.
+            raise ProviderError(0, _timed_out(), url) from None
+        except ConnectionError as e:
+            # Same seam: a reset or a dropped connection mid-body is an
+            # OSError that urllib does not wrap once urlopen has returned.
+            raise ProviderError(0, f"{type(e).__name__}: {e}", url) from None
         except http.client.InvalidURL as e:
             # The two errors this module raises say different things, and a
             # malformed base URL belongs on the ValueError side: nothing is
@@ -422,13 +457,34 @@ class LLMClient:
         number for one region does not get to fail the page. The string
         "null" is the null -- see is_null_word.
         """
-        raw = reply["choices"][0]["message"]["content"]
+        choice = reply["choices"][0]
+        raw = choice["message"]["content"]
         if isinstance(raw, list):  # some providers return content parts
             raw = "".join(p.get("text", "") for p in raw)
+        if not isinstance(raw, str):
+            raw = "" if raw is None else str(raw)
+        # A reply the provider cut off is the common way to get here, and
+        # finish_reason says so: "length" is the provider's token cap, and
+        # measured 2026-09-15 a gateway returned status 200 with the content
+        # ending at `{"translations":[{"id":1,"text":"`. Which brace survived
+        # the cut decides whether the slice below is missing (no "}" at all)
+        # or present but unparseable ({"id":1,"text":"hi"},{"id":2,"text":"
+        # keeps region 1's brace) -- and the second used to escape as a
+        # JSONDecodeError, a bare 500. Both are the same fact about the
+        # provider, so both are one ProviderError carrying the fragment.
         start, end = raw.find("{"), raw.rfind("}")
-        if start < 0 or end < 0:
-            raise ProviderError(200, f"reply was not JSON: {raw[:400]}")
-        parsed = json.loads(raw[start : end + 1])
+        try:
+            if start < 0 or end < start:
+                raise ValueError("no JSON object in the reply")
+            parsed = json.loads(raw[start : end + 1])
+        except ValueError:
+            reason = choice.get("finish_reason")
+            cut = (" (cut off: finish_reason=length, the provider's token limit)"
+                   if reason == "length" else
+                   f" (finish_reason={reason})" if reason and reason != "stop" else "")
+            raise ProviderError(200, f"reply was not JSON{cut}: {raw[:400]}") from None
+        if not isinstance(parsed, dict):
+            raise ProviderError(200, f"reply was JSON but not an object: {raw[:400]}")
         out = {}
         for t in parsed.get("translations", []):
             text = t.get("text", "")
