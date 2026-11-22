@@ -330,6 +330,65 @@ def skip_pages(c: Checks, tmp: str, stub) -> None:
     c.check(stages == list(pipeline.STAGES),
             f"[skip] the skipped page emits every stage exactly once ({stages})")
 
+    from PIL import Image as _Image
+
+    def _jpeg(path: str) -> tuple[int, int] | None:
+        """The size of a JPEG under the page cache root, else None."""
+        root = os.path.normcase(os.path.abspath(cache.root()))
+        plain = path[4:] if path.startswith("\\\\?\\") else path
+        if not os.path.normcase(os.path.abspath(plain)).startswith(root + os.sep):
+            return None
+        try:
+            with _Image.open(path) as im:
+                return im.size if im.format == "JPEG" else None
+        except OSError:
+            return None
+
+    originals = [p.get("original") or "" for p in record["pages"]]
+    thumbs = [p.get("thumb") or "" for p in record["pages"]]
+    sizes_o = [_jpeg(o) for o in originals]
+    sizes_t = [_jpeg(t) for t in thumbs]
+    c.check(all(sizes_o) and all(sizes_t)
+            and all(max(s) <= pipeline.THUMB_LONG_EDGE
+                    and s[1] <= s[0] * pipeline.THUMB_ASPECT + 1 for s in sizes_t),
+            f"[skip] every page record, skipped or not, carries its original and a strip "
+            f"thumbnail, both JPEGs under the page cache root ({sizes_o}, {sizes_t})")
+
+    # An edit's record is the one the Editor swaps in: without these the
+    # Original button and the strip chip lose the page after any edit.
+    page1 = next(p for p in record["pages"] if p["page"] != 2 and p["regions"])
+    edited = pipeline.rerender("skip-rec", page1["item_id"], page1["page"],
+                               page1["regions"][0]["id"], "Edited.",
+                               os.path.join(tmp, "out-rec"), client, "en")
+    c.check(edited.get("original") == page1["original"] and edited.get("thumb") == page1["thumb"],
+            f"[skip] a spot-fix re-render's record keeps the page's original and thumbnail "
+            f"({edited.get('original')!r}, {edited.get('thumb')!r})")
+
+    # A grayscale page is not widened to RGB first (a 4000 x 6000 L page is
+    # 72 MB more as RGB, four pages in flight); a spread's thumb is its
+    # right-hand page, the first one read, not the gutter.
+    gray_h, spread_h = "a" * 64, "b" * 64
+    gray = _Image.new("L", (900, 1300), 200)
+    spread = _Image.new("RGB", (3000, 2000), (255, 255, 255))
+    spread.paste((0, 0, 0), (1500, 0, 3000, 2000))  # the right half is black
+    for h in (gray_h, spread_h):
+        os.makedirs(cache.page_dir(h), exist_ok=True)
+    g_orig, _ = pipeline._write_previews(gray_h, gray)
+    _, s_thumb = pipeline._write_previews(spread_h, spread)
+    with _Image.open(g_orig) as im:
+        g_mode = im.mode
+    with _Image.open(s_thumb) as im:
+        s_size, s_px = im.size, im.convert("L").getpixel((im.size[0] // 2, im.size[1] // 2))
+    c.check(g_mode == "L", f"[skip] a grayscale page's preview stays grayscale ({g_mode})")
+    c.check(s_size[1] >= s_size[0] and s_px < 40,
+            f"[skip] a spread's thumbnail is its right-hand page ({s_size}, centre {s_px})")
+    # A long strip keeps its width, so the toggle shows it readable; a big
+    # scan shrinks by its short edge; the area bound catches a wide strip.
+    shapes = {(720, 20000): 1, (4000, 6000): 4, (1600, 20000): 2, (1200, 1700): 1, (64, 64): 1}
+    got = {s: pipeline._preview_factor(*s) for s in shapes}
+    c.check(got == shapes,
+            f"[skip] the original preview is reduced by its short edge, bounded by area ({got})")
+
     h2 = page2["page_hash"]
     key_img = pipeline.refusal_key(client, True)
     c.check(cache.read_refusal(h2, "en", key_img) is not None,
@@ -434,8 +493,22 @@ def pauses(c: Checks, tmp: str, stub) -> None:
 
 def resumes(c: Checks, tmp: str, stub) -> None:
     """[resume] a paused job goes on under the same id, and does not loop."""
-    from sidecar import job
+    from sidecar import cache, job
     from sidecar import main as sidecar_main
+
+    # Not a resume check, but this section has main imported: the Editor
+    # allows the page cache's folder from health, a cheap call, instead of
+    # the cache stats, which walk every page.
+    saved_provider = sidecar_main._PROVIDER
+    if saved_provider is None:
+        sidecar_main._PROVIDER = ("cpu", "check_skip")
+    try:
+        named = sidecar_main.health().get("cache_root")
+    finally:
+        sidecar_main._PROVIDER = saved_provider
+    want = os.path.abspath(os.environ["MT_CACHE_DIR"])
+    c.check(named == want and cache.root() == want,
+            f"[review] health names the page cache's folder, the one this run uses ({named!r})")
 
     client = LLMClient(stub.url, None, MODEL)
     account = ProviderError(401, '{"error":{"message":"Incorrect API key"}}', kind="account")

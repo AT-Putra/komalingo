@@ -36,7 +36,9 @@ export function Alert({
       <Icon name={ICON[tone]} />
       <div className="body">
         {title && <div className="title">{title}</div>}
-        {tone === "error" ? <pre>{children}</pre> : children}
+        {/* A raw error string keeps its line breaks; a composed message
+            (ErrorAlert) lays itself out. */}
+        {tone === "error" && typeof children === "string" ? <pre>{children}</pre> : children}
       </div>
     </div>
   );

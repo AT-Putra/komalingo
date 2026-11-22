@@ -122,6 +122,8 @@ export default function App() {
     lang: "en",
   });
   const [busy, setBusy] = useState(false);
+  // Bumped when the first-run setup saves a provider, so Translate re-reads it.
+  const [, setSettingsSeen] = useState(0);
   const [runningItems, setRunningItems] = useState<Set<string>>(new Set());
 
   // The queue's latest status (the Queue view polls and reports it here, so
@@ -280,13 +282,17 @@ export default function App() {
         settings,
       });
       const n = form.paths.length;
+      const now = Date.now();
       setBatch(status);
       setBatchMeta({
+        job_id: status.job_id,
         title: n === 1 ? basename(form.paths[0]) : `${basename(form.paths[0])} and ${n - 1} more`,
-        started: Date.now(),
+        started: now,
         source: form.source,
         lang: form.lang,
         dest: form.dest,
+        // Nothing to translate: the start answers already done.
+        finished: status.done && !status.paused && !status.cancelled ? now : undefined,
       });
       setView("job");
     } catch (e) {
@@ -299,12 +305,31 @@ export default function App() {
   // The latest openItem call: an earlier reply arriving after a later one
   // (arrow keys on the chapter switcher) must not open the earlier choice.
   const openSeq = useRef(0);
+  // The page cache's folder, allowed once for the asset protocol: the
+  // Editor's original/translated toggle loads each page's original.jpg there.
+  const cacheAllowed = useRef(false);
+
+  /** Allow the page cache's folder for the asset protocol. The root comes
+   *  from health, which is cheap; a sidecar built before health carried it
+   *  is asked for the cache stats, which walk the cache. */
+  async function allowCache() {
+    try {
+      const root = (await api.health()).cache_root ?? (await api.cache.stats()).root;
+      await api.allowOutputDir(root);
+      cacheAllowed.current = true;
+    } catch {
+      // Without it the strip falls back to the delivered pages and the
+      // toggle is off; editing still works.
+    }
+  }
 
   /** Open one item of the queue in the Editor. Throws for the caller to show. */
   async function openItem(itemId: string, ordinal?: number, manual = false) {
     if (!batch) return;
     const seq = ++openSeq.current;
+    const allowing = cacheAllowed.current ? null : allowCache();
     const item = await api.job.item(batch.job_id, itemId);
+    await allowing;
     if (seq !== openSeq.current) return;
     if (item.pages.length === 0) {
       throw new Error(`${itemId} has no pages to open yet.`);
@@ -315,12 +340,36 @@ export default function App() {
     setView("spotfix");
   }
 
+  /** Turning the page in the Editor. Stable, so the Editor's key listeners
+   *  are not re-subscribed on every progress event of a run. */
+  const selectPage = useCallback((p: PageRecord) => {
+    setPage(p);
+    setManualPage(null);
+  }, []);
+
+  /** Every status snapshot, from either poller. A late one of an earlier job
+   *  is dropped. The meta keeps the time spent paused, and the first snapshot
+   *  that shows the run finished stamps it, for the Queue's "finished in". */
+  const noteBatch = useCallback((s: JobStatus) => {
+    setBatch((prev) => (prev && prev.job_id !== s.job_id ? prev : s));
+    setBatchMeta((m) => {
+      if (!m || m.job_id !== s.job_id) return m;
+      const now = Date.now();
+      if (s.paused) return m.pausedSince == null ? { ...m, pausedSince: now } : m;
+      const resumed =
+        m.pausedSince == null
+          ? m
+          : { ...m, pausedSince: undefined, pausedMs: (m.pausedMs ?? 0) + now - m.pausedSince };
+      return s.done && !s.cancelled && resumed.finished == null ? { ...resumed, finished: now } : resumed;
+    });
+  }, []);
+
   /** The queue's counts after a fix in the Editor: the Queue view and the
    *  chapter switcher read them, and the Queue only polls while it runs. */
   async function refreshBatch() {
     if (!batch) return;
     try {
-      setBatch(await api.job.status(batch.job_id));
+      noteBatch(await api.job.status(batch.job_id));
     } catch {
       // The Queue view reports a sidecar that stopped answering.
     }
@@ -460,7 +509,7 @@ export default function App() {
               initial={batch}
               meta={batchMeta}
               runningItems={runningItems}
-              onStatus={setBatch}
+              onStatus={noteBatch}
               onOpenItem={openItem}
               onOpenSettings={() => setView("settings")}
             />
@@ -471,10 +520,7 @@ export default function App() {
               items={batch?.items ?? []}
               onSwitchItem={(id) => openItem(id)}
               page={page}
-              onSelectPage={(p) => {
-                setPage(p);
-                setManualPage(null);
-              }}
+              onSelectPage={selectPage}
               onPage={updatePage}
               onRetried={retriedPages}
               manualPage={manualPage}
@@ -495,6 +541,11 @@ export default function App() {
               busy={busy}
               sidecarReady={sidecar === "ready"}
               configured={providerConfigured()}
+              onConfigured={() => {
+                setSettingsSeen((n) => n + 1);
+                // "No model is set up yet" no longer holds.
+                setError("");
+              }}
               onOpenSettings={() => setView("settings")}
               onRun={runJob}
               error={error}

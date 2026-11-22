@@ -18,6 +18,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Alert } from "../components/Alert";
+import { ErrorAlert } from "../components/ErrorAlert";
 import { Icon, type IconName } from "../components/Icon";
 import { mergeRetried, NeedsAttention } from "../components/NeedsAttention";
 import { ProgressBar } from "../components/Progress";
@@ -46,6 +47,17 @@ export interface BatchMeta {
   source: Source;
   lang: Target;
   dest: string;
+  /** When a snapshot first showed the run finished, stamped by App: the
+   *  Queue view unmounts while the Editor is open, and "finished in" has to
+   *  survive that. Absent until then, and for a cancelled run. */
+  finished?: number;
+  /** The job this meta belongs to: a late snapshot of an earlier job must
+   *  not stamp this one. */
+  job_id: string;
+  /** Time spent paused, and since when it is paused now: "finished in"
+   *  counts the work, not a night waiting on a Resume. */
+  pausedMs?: number;
+  pausedSince?: number;
 }
 
 const PILL: Record<JobItem["status"], { icon: IconName; text: string }> = {
@@ -83,6 +95,14 @@ function StatusPill({ status, running }: { status: JobItem["status"]; running: b
   );
 }
 
+/** "45 s", "3 min 12 s", "1 h 4 min". */
+function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
+  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
+}
+
 function label<T extends string>(list: { value: T; label: string }[], v: T): string {
   return list.find((x) => x.value === v)?.label ?? v;
 }
@@ -110,6 +130,16 @@ export default function Job({
   const [status, setStatus] = useState<JobStatus>(initial);
   const [error, setError] = useState("");
   const [resuming, setResuming] = useState(false);
+  /** The output folder in the file manager (plan 4.3). */
+  async function reveal() {
+    setError("");
+    try {
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(meta.dest);
+    } catch (e) {
+      setError(describeError(e));
+    }
+  }
   // The skipped page RECORDS of each finished item that has some, for the
   // review panels: thumbnails, the provider's words, the retry results.
   const [skippedPages, setSkippedPages] = useState<Record<string, PageRecord[]>>({});
@@ -227,6 +257,16 @@ export default function Job({
     (n, i) => n + Math.max(0, (i.status === "ok" ? i.pages : i.pages_done) - i.pages_skipped.length),
     0,
   );
+  const summaryTitle = status.cancelled
+    ? "Stopped"
+    : `Finished${meta.finished ? ` in ${duration(meta.finished - meta.started - (meta.pausedMs ?? 0))}` : ""}`;
+  const summaryLine = [
+    `${translated} ${translated === 1 ? "page" : "pages"} translated${status.cancelled ? " before you cancelled" : ""}`,
+    status.pages_skipped > 0 && `${status.pages_skipped} not translated, listed below`,
+    status.failed > 0 && `${status.failed} failed`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const state = status.paused
     ? status.done
       ? "paused"
@@ -285,7 +325,28 @@ export default function Job({
         </div>
       </div>
 
-      {error && <Alert tone="error">{error}</Alert>}
+      <ErrorAlert error={error} />
+      {/* Mounted from the start, so the finish is announced: a live region
+          that arrives already filled is often not read out. */}
+      <p className="sr-only" role="status">
+        {state === "done" ? `${summaryTitle}. ${summaryLine}` : ""}
+      </p>
+      {state === "done" && (
+        <section className="card summary">
+          <span className={`icon-tile ${status.cancelled ? "warn" : "ok"}`}>
+            <Icon name={status.cancelled ? "alert-circle" : "check-circle"} />
+          </span>
+          <div>
+            <h2>{summaryTitle}</h2>
+            <p className="sub">{summaryLine}</p>
+          </div>
+          <span className="spacer" />
+          <button type="button" className="btn" onClick={reveal}>
+            <Icon name="folder-open" />
+            Show in folder
+          </button>
+        </section>
+      )}
       {status.paused && (
         <Alert tone="warn" title={state === "paused" ? "The run is paused" : "Pausing…"}>
           {status.pause_reason}

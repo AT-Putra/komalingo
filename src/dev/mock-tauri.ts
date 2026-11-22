@@ -129,6 +129,8 @@ function fakePage(item_id: string, n: number): PageRecord {
     item_id,
     member: `${String(n).padStart(3, "0")}.png`,
     output: pageImage(n, regions),
+    original: pageImage(n, []),
+    thumb: pageImage(n, []),
     cached: false,
     detections: regions.length,
     regions,
@@ -279,7 +281,7 @@ const resumed = new Set<string>();
 let mockCache = { bytes: 851_968_000, pages: 214, edited_pages: 3 };
 
 async function api(path: string, method: string, body: Record<string, unknown> | null) {
-  if (path === "/api/health") return { status: "ok", pid: 4242 };
+  if (path === "/api/health") return { status: "ok", pid: 4242, cache_root: "C:/mock/cache" };
   if (path.startsWith("/api/models")) {
     await sleep(500);
     // Enough rows to scroll and to filter: what an aggregator answers.
@@ -550,6 +552,7 @@ async function api(path: string, method: string, body: Record<string, unknown> |
         return 8765;
       case "stop_sidecar":
       case "allow_output_dir":
+      case "plugin:opener|reveal_item_in_dir":
         return undefined;
       case "frontend_log":
         // No terminal in a browser; the console is the nearest thing.

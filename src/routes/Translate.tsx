@@ -17,7 +17,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Alert } from "../components/Alert";
+import { ErrorAlert } from "../components/ErrorAlert";
+import { SetupCard } from "../components/SetupCard";
 import { Icon } from "../components/Icon";
 import { PathField } from "../components/PathField";
 import { SOURCES, TARGETS, displayPath, type Source, type Target } from "../lib/api";
@@ -63,6 +64,7 @@ export default function Translate({
   busy,
   sidecarReady,
   configured,
+  onConfigured,
   onOpenSettings,
   onRun,
   error,
@@ -76,6 +78,8 @@ export default function Translate({
   /** A base URL and a model are set. Without them nothing may run: the
    *  sidecar's offline path would type "HELLO" into every bubble. */
   configured: boolean;
+  /** The setup card saved a provider: re-read it. */
+  onConfigured: () => void;
   onOpenSettings: () => void;
   onRun: () => void;
   error: string;
@@ -147,16 +151,8 @@ export default function Translate({
         </div>
       </div>
 
-      {!configured && (
-        <Alert tone="warn" title="Set up a model first">
-          Translating needs an endpoint and a model.{" "}
-          <button type="button" className="btn sm" onClick={onOpenSettings}>
-            <Icon name="sliders" size={14} />
-            Open Settings
-          </button>
-        </Alert>
-      )}
-      {error && <Alert tone="error">{error}</Alert>}
+      {!configured && <SetupCard onConfigured={onConfigured} onOpenSettings={onOpenSettings} />}
+      <ErrorAlert error={error} />
 
       <section className="card stack" aria-busy={busy}>
         <div className="card-head" style={{ marginBottom: 0 }}>

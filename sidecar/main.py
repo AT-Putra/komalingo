@@ -430,7 +430,11 @@ def health():
 
         _PROVIDER = models.select_provider()
     provider, reason = _PROVIDER
-    return {"status": "ok", "pid": os.getpid(), "provider": provider, "provider_reason": reason}
+    # cache_root: the Editor allows this folder for the asset protocol (the
+    # original toggle, the page strip). /api/cache also has it, but walks
+    # every page to count them.
+    return {"status": "ok", "pid": os.getpid(), "provider": provider, "provider_reason": reason,
+            "cache_root": cache.root()}
 
 
 @app.get("/api/models")
