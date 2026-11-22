@@ -30,7 +30,7 @@ from PIL import Image
 
 from . import atomic, cache, imaging, inpainter, models, ocr_cjk, ocr_ja, safety, typeset
 from . import detect as detector
-from .containers import archive, pdf
+from .containers import archive, folder, pdf
 from .llm import MAX_CONCURRENT, is_null_word
 
 STAGES = ("detect", "ocr", "translate", "inpaint", "render", "encode", "write")
@@ -268,7 +268,7 @@ def _ask_with_retry(ask, where: str, cancel=None) -> dict:
             why = str(e)[:300]
             if attempt > TRANSLATE_RETRIES:
                 _log(f"translate: {where}: retry {attempt - 1} of {TRANSLATE_RETRIES} "
-                     f"failed too ({why}); the item fails")
+                     f"failed too ({why}); giving up on this page")
                 raise
             if not e.transient or (cancel is not None and cancel.is_set()):
                 raise
@@ -630,12 +630,125 @@ class Cancelled(Exception):
         self.item_id, self.pages_done = item_id, pages_done
 
 
+class Paused(Cancelled):
+    """The job paused: an account-level failure, or STREAK pages in a row
+    that failed. Every page past this point stops at its boundary exactly as
+    for a cancel -- nothing partial, the delivered pages kept -- and the
+    job's resume picks the item up again. A Cancelled subclass so every
+    boundary that already stops for a cancel stops for this too; the Item
+    boundary in job.py catches it FIRST, because the status differs.
+    """
+
+    def __init__(self, item_id: str, pages_done: int, reason: str = ""):
+        super().__init__(item_id, pages_done)
+        self.reason = reason
+
+
+class Control:
+    """A job's stop signals, handed to every page in place of a bare Event.
+
+    `is_set()` is True once the user cancelled OR the job paused, so the
+    boundaries that already stop for a cancel (`_check_cancel`, the page
+    reader in `_run_pages`, the retry gap) stop for a pause with no second
+    check to forget. `paused` says which -- a cancel always wins.
+
+    It also keeps the job-wide count of pages that failed in a row, in the
+    order they FINISHED: pages of four items run in one process-wide window,
+    so a per-item count would never reach the threshold on a job where one
+    refused scene is spread across items. `carried` holds the
+    (item_id, ordinal) pages skipped before a pause; on resume they are
+    asked again but do not count, or a scene the model refuses would pause
+    the resumed job straight away, every time.
+    """
+
+    STREAK = 3
+
+    def __init__(self, cancel: threading.Event | None = None, streak: bool = True):
+        # `streak=False` pauses on account failures only: /api/item has no
+        # resume, so a streak pause there could never be got past (review M2).
+        self.streak = streak
+        self._cancel = cancel or threading.Event()
+        self._pause = threading.Event()
+        self._lock = threading.Lock()
+        self._streak = 0
+        self.pause_reason = ""
+        self.carried: set[tuple[str, int]] = set()
+
+    def is_set(self) -> bool:
+        return self._cancel.is_set() or self._pause.is_set()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    @property
+    def paused(self) -> bool:
+        return self._pause.is_set() and not self._cancel.is_set()
+
+    def pause(self, reason: str) -> None:
+        with self._lock:
+            if not self._pause.is_set():
+                self.pause_reason = reason
+                self._pause.set()
+
+    def page_result(self, item_id: str, ordinal: int, failed: bool) -> None:
+        """Count a finished page: a success resets the streak, a failure adds
+        to it unless the page was already skipped before a resume."""
+        with self._lock:
+            if not failed:
+                self._streak = 0
+                return
+            if not self.streak or (item_id, ordinal) in self.carried:
+                return
+            self._streak += 1
+            if self._streak >= self.STREAK and not self._pause.is_set():
+                self.pause_reason = (
+                    f"{self.STREAK} pages in a row could not be translated. The provider "
+                    f"may be down, or refusing this series; check the skipped pages, "
+                    f"then resume or change the model.")
+                self._pause.set()
+
+
 def _check_cancel(cancel, item_id: str, pages_done: int) -> None:
-    """Raise Cancelled if the token is set. `cancel` is anything with
-    is_set() -- a threading.Event from job.Job -- or None for the routes
-    that have no job to be cancelled from."""
+    """Raise Cancelled (or Paused) if the token is set. `cancel` is anything
+    with is_set() -- a Control from job.Job, a bare Event from a check -- or
+    None for the routes that have no job to be cancelled from."""
     if cancel is not None and cancel.is_set():
+        if getattr(cancel, "paused", False):
+            raise Paused(item_id, pages_done, cancel.pause_reason)
         raise Cancelled(item_id, pages_done)
+
+
+def _pause_job(cancel, item_id: str, pages_done: int, reason: str) -> bool:
+    """Pause the job behind `cancel` and raise Paused; False when there is
+    no job that can pause (a bare Event, None) -- the caller then raises the
+    original error, as before pausing existed."""
+    if cancel is None or not hasattr(cancel, "pause"):
+        return False
+    cancel.pause(reason)
+    _check_cancel(cancel, item_id, pages_done)
+    return True  # unreachable when a cancel raced it to Cancelled; kept for the type
+
+
+def refusal_key(client, with_image: bool) -> str:
+    """What a refusal is remembered under: endpoint, model, image or not."""
+    raw = f"{getattr(client, 'base_url', '')}\n{_model_id(client)}\n{int(bool(with_image))}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _describe_skip(e) -> str:
+    """The one line the Queue and the review panel show for a skipped page."""
+    from .llm import BAD_REPLY, OUTAGE, REFUSED, REJECTED  # noqa: PLC0415
+
+    return {
+        REFUSED: "The model refused to translate this page.",
+        BAD_REPLY: "The model did not answer with a translation (often a refusal in words).",
+        OUTAGE: "The provider did not answer in time, or was busy.",
+        REJECTED: "The provider rejected the request for this page.",
+    }.get(getattr(e, "kind", ""), "The page could not be translated.")
 
 
 class CacheMiss(Exception):
@@ -914,7 +1027,7 @@ def _container(src_path) -> str:
 
 
 def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT_LANG,
-             source=DEFAULT_SOURCE, cancel=None):
+             source=DEFAULT_SOURCE, cancel=None, on_page=None, on_total=None, members=None):
     """Every page of one archive or PDF, through the cache. Returns the record.
 
     `cancel` (Phase 9, AC-13) is the job's token. It is checked when each page
@@ -951,16 +1064,36 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
     # land -- the escape rule is only meaningful relative to the root the
     # repack would write under, and taking the real one means the rule is
     # evaluated against the path the writer builds rather than a placeholder.
-    src_fmt = _container(src_path)
-    # Phase 7: a PDF is read by its own module and through the same Budget.
-    # The rest of this loop is identical for both, which is the point of the
-    # (ordinal, member, image) contract the two readers share.
-    read_pages = pdf.pages if src_fmt == pdf.PDF else archive.pages
+    # `members` makes this an `images` item (plan 1.1): a chapter of loose
+    # page images, `src_path` their folder. Decided by the CALLER, never by
+    # the path -- a group can be a subset of its folder, and _container
+    # would read a directory as a broken archive.
+    if members is not None:
+        src_fmt = folder.IMAGES
+        files = list(members)
+
+        def read_pages(_src, _budget):
+            return folder.pages(files)
+
+        expected = len(files)
+    else:
+        src_fmt = _container(src_path)
+        # Phase 7: a PDF is read by its own module and through the same
+        # Budget. The rest of this loop is identical for both, which is the
+        # point of the (ordinal, member, image) contract the readers share.
+        read_pages = pdf.pages if src_fmt == pdf.PDF else archive.pages
+        # The page count the progress lines carry, read before the first
+        # page so the bar has an end to run to. Advisory and allowed to be
+        # None -- see archive.expected_pages -- and never a reason for the
+        # run to fail.
+        expected = (pdf.page_count(src_path) if src_fmt == pdf.PDF
+                    else archive.expected_pages(src_path))
     out_dir = item_dir(dest_dir, item_id)
-    # The page count the progress lines carry, read before the first page so
-    # the bar has an end to run to. Advisory and allowed to be None -- see
-    # archive.expected_pages -- and never a reason for the run to fail.
-    expected = pdf.page_count(src_path) if src_fmt == pdf.PDF else archive.expected_pages(src_path)
+    # `on_page(record)` after each delivered page and `on_total(n)` once,
+    # here: the job's per-item progress (job.Item.note_page), so the Queue
+    # can draw a page bar per row instead of counting whole files.
+    if on_total is not None:
+        on_total(expected)
     # The budget's root is the ITEM's directory, which is where a member would
     # actually land -- the escape rule has to be evaluated against the path the
     # writer builds, not against the job root one level above it.
@@ -976,7 +1109,7 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
         with expecting(expected, item_id):
             records = _run_pages(
                 read_pages(src_path, budget), job_id, item_id, src_path, out_dir,
-                client, lang, source, model, src_fmt, cancel, expected)
+                client, lang, source, model, src_fmt, cancel, expected, on_page)
         # Once, at the end, and not per page. The plan says disk is "never
         # evicted mid-job", and per page it could not have reclaimed this job's
         # own pages anyway -- every one is pinned by its running marker -- while
@@ -989,7 +1122,9 @@ def run_item(src_path, dest_dir, job_id, item_id=None, client=None, lang=DEFAULT
         # resume repacks them without running a page.
         _check_cancel(cancel, item_id, len(records))
         warning = cache.enforce_cap(job_id)
-        out_archive = _repack(src_path, out_dir, src_fmt, records, lang, budget)
+        # Loose pages in, loose pages out: an `images` item has no archive.
+        out_archive = ("" if src_fmt == folder.IMAGES
+                       else _repack(src_path, out_dir, src_fmt, records, lang, budget))
     finally:
         cache.clear_running(job_id)
 
@@ -1028,7 +1163,7 @@ def _page_slots() -> threading.BoundedSemaphore:
 
 
 def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
-               model, src_fmt, cancel, expected) -> list[dict]:
+               model, src_fmt, cancel, expected, on_page=None) -> list[dict]:
     """Run an item's pages concurrently. Returns records in page order.
 
     The reader stays on THIS thread -- pypdfium2 and the archive budget are
@@ -1061,8 +1196,24 @@ def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
         # _EXPECTED is per thread: the worker publishes the item's page count
         # and id again, or its emits lose the `total` and `item_id` the UI uses.
         with expecting(expected, item_id), _page_lock(h):
-            return _run_cached_page(h, img, member, ordinal, item_id, out_dir, client,
-                                    lang, source, model, src_fmt, cancel, 0)
+            record = _run_cached_page(h, img, member, ordinal, item_id, out_dir, client,
+                                      lang, source, model, src_fmt, cancel, 0)
+        # The job-wide "in a row" count (Control.page_result). A refusal
+        # remembered from an earlier run cost no request and says nothing new
+        # about the provider, so it neither counts nor resets the streak.
+        # Only pages that ASKED the provider move it: a cache hit or a
+        # stored fallback says nothing about whether the provider works, and
+        # counting them as successes kept a dead provider from ever pausing a
+        # mostly cached re-run (review minor).
+        skipped = record.get("skipped")
+        if hasattr(cancel, "page_result"):
+            if skipped and not skipped.get("remembered"):
+                cancel.page_result(item_id, ordinal, failed=True)
+            elif not skipped and record.get("asked_provider"):
+                cancel.page_result(item_id, ordinal, failed=False)
+        if on_page is not None:
+            on_page(record)
+        return record
 
     def page_failed():
         return any(f.done() and not isinstance(f.exception(), (type(None), Cancelled))
@@ -1088,7 +1239,8 @@ def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
                     break
                 h = cache.page_hash(img)
                 cache.put_placement(job_id, item_id, ordinal, h, member,
-                                    src_path=os.fspath(src_path))
+                                    src_path=os.fspath(src_path),
+                                    kind=src_fmt if src_fmt == folder.IMAGES else None)
                 future = pool.submit(one, h, img, member, ordinal)
                 submitted = True
                 future.add_done_callback(lambda _f: slots.release())
@@ -1135,6 +1287,8 @@ def _run_pages(pages, job_id, item_id, src_path, out_dir, client, lang, source,
         finally:
             del error
     if cancelled:
+        if getattr(cancel, "paused", False):
+            raise Paused(item_id, len(records), getattr(cancel, "pause_reason", ""))
         raise Cancelled(item_id, len(records))
     return records
 
@@ -1238,7 +1392,21 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
                 _persist(h, cached, regions, complete=True)
     complete = cached is None or legacy or bool(cached.get("all_regions"))
 
+    # The user's own choice for this page wins while it covers the page: a
+    # retry with another model, without the image, or typed by hand. Read
+    # from that pair, nothing is asked, and the Settings model cannot put the
+    # refused original back over the fix (plan 1.6).
+    choice = _covering_choice(regions, h, lang)
+    if choice is not None:
+        model, recheck = choice["model"], False
     missing = _apply_translations(regions, h, lang, model, recheck=recheck)
+    if choice is not None:
+        # _covering_choice verified the pair covers every region but the
+        # punctuation OCR set aside; those need no translation. Asking the
+        # Settings model here sent a hand-translated page back to the model
+        # that refused it, on every run (review C1).
+        missing = set()
+    skipped, asked = None, False
     if not missing:
         emit("translate", f"{len(regions)} regions (cached)", ordinal, 50)
     else:
@@ -1251,28 +1419,14 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
         # ocr are not yet persisted here (_persist is at the end), so the
         # cost is one page's re-detect on the next run.
         _check_cancel(cancel, item_id, pages_done)
-        translate(regions, ordinal, client, lang, source, img=img,
-                  where=f"{item_id}, page {ordinal}" + (f" ({member})" if member else ""),
-                  cancel=cancel)
-        # The whole page was asked, for context; only what was missing is
-        # written. A stored translation the model now words differently is
-        # not replaced, and the read-back below puts it back on the region.
-        cache.write_translation(
-            h, lang, model,
-            {r["id"]: None if r.get("not_text") else r.get("translation", "")
-             for r in regions if r["id"] in missing},
-            boxed=recheck,
-        )
-        # Read back, deliberately. write_translation refuses to
-        # overwrite an `edited` entry, so the file it just wrote and
-        # the regions in memory can disagree about exactly the regions
-        # the user corrected -- and the regions in memory are what gets
-        # RENDERED. Without this the page would show the fresh
-        # translation while the cache said the edit was kept, which is
-        # the worst of both: the correction is not discarded, it is
-        # just not on the page. Reachable when coverage was partial (a
-        # half-written translation file) and an edit exists.
-        _load_translations(regions, h, lang, model)
+        where = f"{item_id}, page {ordinal}" + (f" ({member})" if member else "")
+        outcome = _translate_or_skip(regions, ordinal, client, lang, source, img, h, model,
+                                     missing, recheck, where, cancel, item_id, pages_done)
+        asked = outcome is None
+        skipped = outcome if isinstance(outcome, dict) else None
+    if skipped is not None:
+        return _skip_page(h, img, regions, fmt, source, ordinal, item_id, member, out_dir,
+                          cached, complete, redetect_failed, ocr_calls, src_fmt, skipped)
     # And once more after it, since pages run PAGE_WINDOW at a time: a page
     # whose reply arrives after the cancel stops here, before the erase and
     # the render, instead of finishing because it happened to be in flight.
@@ -1281,7 +1435,210 @@ def _run_cached_page(h, img, member, ordinal, item_id, out_dir, client, lang,
     _check_cancel(cancel, item_id, pages_done)
     detected = regions
     regions, dismissed = dismiss(detected)
+    record = _finish_page(h, img, regions, detected, dismissed, fmt, source, ordinal, item_id,
+                          member, out_dir, client, cached, complete, redetect_failed, ocr_calls,
+                          src_fmt)
+    if choice is not None:
+        record["choice"] = choice
+    record["asked_provider"] = asked
+    return record
 
+
+def _covering_choice(regions, h, lang) -> dict | None:
+    """The user's choice for the page, when its pair covers every region.
+
+    "Covers" is the stored file applied WITHOUT the legacy-null recheck, with
+    the regions OCR set aside as punctuation counted as covered -- nobody
+    translates those. A choice that does not cover the page (a region the
+    record gained since) is not used, and the page is asked as usual.
+    """
+    choice = cache.read_choice(h, lang)
+    if choice is None:
+        return None
+    probe = [dict(r) for r in regions]
+    still = _apply_translations(probe, h, lang, choice["model"], recheck=False)
+    set_aside = {r["id"] for r in regions
+                 if r.get("not_text") and r.get("dismiss_reason") != VISION_REASON}
+    return choice if not (still - set_aside) else None
+
+
+STORED = "stored"  # _translate_or_skip: the stored translation was kept
+
+
+def _translate_or_skip(regions, ordinal, client, lang, source, img, h, model, missing,
+                       recheck, where, cancel, item_id, pages_done):
+    """Translate the page's missing regions.
+
+    Returns None when the provider answered, STORED when the re-ask failed
+    and the stored translation is rendered instead, or the skip info dict.
+
+    A refused or failed page no longer fails its item (plan 1.3): it comes
+    back as a skip -- the original page goes in its slot -- and the run goes
+    on. Four exits, in order:
+
+      * a refusal REMEMBERED for this endpoint, model and image setting:
+        skipped without a request (plan 1.4). Only refusals are remembered.
+      * an account failure: the job pauses (Paused), because every page
+        would fail the same way. A caller with no job to pause gets the
+        ProviderError, as before.
+      * the page already had a stored translation and only gaps or legacy
+        nulls were re-asked: the stored translation is rendered, and the
+        regions it does not cover stay as drawn (plan 1.3.1).
+      * otherwise: skipped, with the provider's words for the review panel.
+
+    A cancel or pause that landed in the retry gap wins over all of these:
+    the page stops at its boundary, it is not reported skipped.
+    """
+    from .llm import ACCOUNT, REFUSED, ProviderError, SettingsError  # noqa: PLC0415
+
+    with_image = client is not None and img is not None and not getattr(client, "text_only", False)
+    key = refusal_key(client, with_image)
+    stored_any = bool(cache.read_translation(h, lang, model))
+    remembered = (cache.read_refusal(h, lang, key)
+                  if client is not None and not stored_any else None)
+    if remembered is not None:
+        emit("translate", "skipped (refused before)", ordinal, 50)
+        _log(f"translate: {where}: refused before by this model; skipped without asking")
+        return dict(remembered, remembered=True)
+    try:
+        translate(regions, ordinal, client, lang, source, img=img, where=where, cancel=cancel)
+    except SettingsError as e:
+        _check_cancel(cancel, item_id, pages_done)
+        _pause_job(cancel, item_id, pages_done, f"The model settings cannot be used: {e}")
+        raise
+    except ProviderError as e:
+        _check_cancel(cancel, item_id, pages_done)
+        if e.kind == ACCOUNT:
+            _pause_job(cancel, item_id, pages_done,
+                       f"The provider refused the account (HTTP {e.status}): {e.body[:300]}")
+            raise
+        if stored_any:
+            _log(f"translate: {where}: re-asking failed ({e.kind}); the stored translation is kept")
+            _keep_stored(regions, h, lang, model, refused=e.kind == REFUSED)
+            emit("translate", f"{len(regions)} regions (stored)", ordinal, 50)
+            return STORED
+        info = {"kind": e.kind, "message": _describe_skip(e), "status": e.status,
+                "detail": e.body[:4000], "model": model, "with_image": with_image}
+        if e.kind == REFUSED:
+            cache.write_refusal(h, lang, key, info)
+        _log(f"translate: {where}: skipped ({e.kind}); the original page is kept in its slot")
+        emit("translate", f"skipped ({e.kind})", ordinal, 50)
+        return info
+    # The whole page was asked, for context; only what was missing is
+    # written. A stored translation the model now words differently is
+    # not replaced, and the read-back below puts it back on the region.
+    cache.write_translation(
+        h, lang, model,
+        {r["id"]: None if r.get("not_text") else r.get("translation", "")
+         for r in regions if r["id"] in missing},
+        boxed=recheck,
+    )
+    cache.clear_refusals(h, lang)
+    # Read back, deliberately. write_translation refuses to overwrite an
+    # `edited` entry, so the file it just wrote and the regions in memory can
+    # disagree about exactly the regions the user corrected -- and the
+    # regions in memory are what gets RENDERED. Without this the page would
+    # show the fresh translation while the cache said the edit was kept,
+    # which is the worst of both: the correction is not discarded, it is
+    # just not on the page. Reachable when coverage was partial (a
+    # half-written translation file) and an edit exists.
+    _load_translations(regions, h, lang, model)
+    return None
+
+
+def _keep_stored(regions, h, lang, model, refused: bool) -> None:
+    """Render the page from its stored translation; what it lacks stays as drawn.
+
+    Reached when re-asking a gap or a legacy null failed (plan 1.3.1). The
+    page already had a translation and losing it to a skip would put the
+    original back over work the user had. But the regions as they stand are
+    unsafe to render: a legacy null being re-asked left _apply_translations
+    before `not_text` was set, and a gap never got a `translation` -- both
+    would be erased and typeset as "". So the stored file is applied again
+    WITHOUT the recheck, and every region it still does not cover is marked
+    the way _pair_decisions marks one: off the page, art untouched,
+    editable in the Editor.
+
+    When the model REFUSED the re-ask, the legacy nulls it was asked about
+    are marked boxed, so the page is not re-sent on every run to be refused
+    again. An outage leaves them unmarked: next time may work.
+    """
+    still = _apply_translations(regions, h, lang, model, recheck=False)
+    for r in regions:
+        # A region already off the page keeps its own reason: overwriting
+        # OCR's "punctuation only" with the vision reason made _persist strip
+        # it from the record, and the page lost the region's set-aside for
+        # good (review C1).
+        if r["id"] in still and not r.get("not_text"):
+            r["not_text"], r["dismiss_reason"] = True, VISION_REASON
+        r.setdefault("translation", "")
+    if refused:
+        stored = cache.read_translation(h, lang, model)
+        nulls = {rid: None for rid, v in stored.items()
+                 if isinstance(v, dict) and v.get("text") is None
+                 and not v.get("boxed") and not v.get("edited")}
+        if nulls:
+            cache.write_translation(h, lang, model, nulls, boxed=True)
+
+
+EMPTY_FIT = {"fit_compromised": [], "fit_failed": [], "retranslated": []}
+SKIPPED_REASON = "the page was skipped"
+
+
+def _skip_page(h, img, regions, fmt, source, ordinal, item_id, member, out_dir, cached,
+               complete, redetect_failed, ocr_calls, src_fmt, skipped) -> dict:
+    """Deliver the ORIGINAL page into its slot and report it skipped (plan 1.3).
+
+    Everything a retry needs is cached first, so it costs one provider
+    request and nothing else: the detected regions (no re-detect, no OCR)
+    and the page itself as the raster of the EMPTY erased set -- erasing no
+    regions leaves the page as it was (inpainter.erase with no regions), so
+    this raster IS the original, and a retry erases its regions from it the
+    way _rerender_locked erases a skipped region.
+
+    Every stage still emits exactly once (STAGES): translate already did,
+    inpaint and render say "skipped", and _deliver emits encode and write.
+    The record has the full page shape the UI reads -- empty fit summary,
+    no kept regions -- and the regions under `dismissed`, NOT editable: a
+    single-region rerender on a page with no translation would only raise
+    CacheMiss; the Editor's manual mode is where these get typed.
+    """
+    detected = regions
+    content = {"page_hash": h, "src_format": fmt, "source": source,
+               "detections": len(detected), "fit_summary": EMPTY_FIT}
+    _persist(h, content, detected, complete, redetect_failed)
+    if cache.read_raster(h, set()) is None:
+        cache.write_raster(h, img, src=img, kept=set())
+    emit("inpaint", "0 calls (skipped)", ordinal, 65)
+    emit("render", "skipped", ordinal, 80)
+    out_path = _deliver(img, out_dir, member, fmt, img, ordinal)
+    record = {
+        "page": ordinal,
+        "page_hash": h,
+        "item_id": item_id,
+        "member": member,
+        "src_format": fmt,
+        "source": source,
+        "output": out_path,
+        "cached": cached is not None and not ocr_calls,
+        "detections": 0,
+        "ocr_calls": ocr_calls,
+        "inpaint_calls": 0,
+        "fit_summary": {k: list(v) for k, v in EMPTY_FIT.items()},
+        "regions": [],
+        "dismissed": [{"id": r["id"], "polygon": r["polygon"], "text": r.get("text"),
+                       "reason": SKIPPED_REASON, "editable": False} for r in detected],
+        "skipped": skipped,
+    }
+    if src_fmt == pdf.PDF:
+        record["pdf_extract"] = img.info.get("pdf_extract")
+    return record
+
+
+def _finish_page(h, img, regions, detected, dismissed, fmt, source, ordinal, item_id, member,
+                 out_dir, client, cached, complete, redetect_failed, ocr_calls,
+                 src_fmt) -> dict:
+    """Erase, render, deliver and record a translated page."""
     # The cached raster erased one set of regions. This run's model may keep
     # another -- a region another model dismissed, or dismiss one it kept --
     # and then the raster is wrong for this page either way: text left under
@@ -1398,6 +1755,19 @@ def _repack(src_path, dest_dir, src_fmt: str, records: list[dict], lang: str,
     )
 
 
+def _is_images(placed) -> bool:
+    """Whether a placement (or a source path) is a chapter of loose pages.
+
+    The placement's `kind` decides; a source path that is a folder is the
+    fallback for placements written before `kind` existed.
+    """
+    if isinstance(placed, dict):
+        if placed.get("kind") == folder.IMAGES:
+            return True
+        placed = placed.get("src_path")
+    return bool(placed) and os.path.isdir(atomic.long_path(os.fspath(placed)))
+
+
 def repack_item(job_id, item_id, dest_dir, lang=DEFAULT_LANG) -> str:
     """The item's archive, rebuilt from the loose pages already on disk.
 
@@ -1421,6 +1791,10 @@ def repack_item(job_id, item_id, dest_dir, lang=DEFAULT_LANG) -> str:
         raise CacheMiss(
             f"job {job_id} did not record where item {item_id!r} came from; "
             f"run the item again to rebuild its archive", "placement")
+    if _is_images(placed[0][1]):
+        # A chapter of loose pages has no archive: the edited page on disk
+        # IS the output. Nothing to rebuild.
+        return ""
     out_dir = item_dir(dest_dir, item_id)
     records = []
     for ordinal, entry in placed:
@@ -1595,6 +1969,174 @@ def rerender(job_id, item_id, ordinal: int, region_id: int, text: str, dest_dir,
                                 client, lang)
 
 
+# -- Phase 2: the workarounds for a skipped page ---------------------------------
+
+RETRY_MODES = ("same", "text_only", "model")
+MANUAL_MODEL = "#manual"   # a model key no real model id can be (plan 1.6)
+
+
+def text_only_model(model: str) -> str:
+    """The key a translation made WITHOUT the page image is stored under, so
+    a later run that does send the image never reuses it (llm.py's warning
+    about a cache key that does not record the image)."""
+    return f"{model}#text"
+
+
+def _skipped_page_inputs(job_id, item_id, ordinal):
+    """(placement, content record, original page) for a page of a job, or
+    CacheMiss saying to run the item again. The original is the empty-set
+    raster a skip cached; it is pinned while the job exists, so a miss here
+    means the job is gone or the cache was cleared."""
+    placed = cache.get_placement(job_id, item_id, ordinal)
+    if placed is None:
+        raise CacheMiss(f"job {job_id} has no page {ordinal} of item {item_id!r}", "placement")
+    h = placed["page_hash"]
+    record = cache.read_regions(h)
+    if record is None:
+        raise CacheMiss(f"page {ordinal} of item {item_id!r} is no longer cached; "
+                        f"run the item again", "cache")
+    original = cache.read_raster(h, set())
+    if original is None:
+        raise CacheMiss(f"page {ordinal} of item {item_id!r} has no cached original; "
+                        f"run the item again", "raster")
+    return placed, record, original
+
+
+def _render_fixed(placed, record, original, regions, item_id, ordinal, dest_dir, client,
+                  *, allow_retranslate: bool, choice: dict | None) -> dict:
+    """Erase, render and deliver a page the user fixed, and persist it."""
+    h = placed["page_hash"]
+    detected = regions
+    kept, dismissed = dismiss(detected)
+    page = _finish_page(
+        h, original, kept, detected, dismissed, record.get("src_format", "PNG"),
+        record.get("source", DEFAULT_SOURCE), ordinal, item_id,
+        placed.get("member") or f"{item_id}_{ordinal:04d}.png",
+        item_dir(dest_dir, item_id), client if allow_retranslate else None, record,
+        bool(record.get("all_regions")), bool(record.get("redetect_failed")), 0, "")
+    page["cached"] = True
+    if choice is not None:
+        page["choice"] = choice
+    return page
+
+
+def retry_page(job_id, item_id, ordinal: int, dest_dir, client, lang=DEFAULT_LANG,
+               mode: str = "same") -> dict:
+    """One skipped page, asked again (plan 2.1). Returns its fresh record.
+
+    `mode` is the user's pick in the review panel:
+      * "same"      the Settings model, as the run asked it (for an outage);
+      * "model"     `client` is another model on the same endpoint;
+      * "text_only" the OCR text alone, without the page image -- what
+        most often gets past a refusal the ARTWORK triggered.
+    Detection and OCR come from the cache; the only cost is the request.
+
+    On success the page is erased, rendered and delivered, the refusal
+    markers go, and for "model" and "text_only" the pair is recorded as the
+    user's choice (cache.write_choice) so no later run undoes it. A refusal
+    rewrites the marker under this request's key; an outage or a bad reply
+    leaves the markers alone. Both come back as the page's skipped record.
+    An ACCOUNT failure raises the ProviderError: the caller stops the whole
+    retry there and writes nothing more -- an expired key must not stamp
+    markers on every page it touches.
+    """
+    from .llm import ACCOUNT, REFUSED, ProviderError  # noqa: PLC0415
+
+    if mode not in RETRY_MODES:
+        raise ValueError(f"mode {mode!r} is not one of {RETRY_MODES}")
+    placed = cache.get_placement(job_id, item_id, ordinal)
+    if placed is None:
+        raise CacheMiss(f"job {job_id} has no page {ordinal} of item {item_id!r}", "placement")
+    with _page_lock(placed["page_hash"]):
+        placed, record, original = _skipped_page_inputs(job_id, item_id, ordinal)
+        h = placed["page_hash"]
+        with_image = mode != "text_only" and not getattr(client, "text_only", False)
+        model = _model_id(client)
+        key_model = text_only_model(model) if mode == "text_only" else model
+        regions = [dict(r) for r in record["regions"]]
+        missing = _apply_translations(regions, h, lang, key_model, recheck=with_image)
+        if missing:
+            where = f"{item_id}, page {ordinal} (retry, {mode})"
+            try:
+                translate(regions, ordinal, client, lang, record.get("source", DEFAULT_SOURCE),
+                          img=original if with_image else None, where=where)
+            except ProviderError as e:
+                if e.kind == ACCOUNT:
+                    raise
+                info = {"kind": e.kind, "message": _describe_skip(e), "status": e.status,
+                        "detail": e.body[:4000], "model": model, "with_image": with_image}
+                if e.kind == REFUSED:
+                    cache.write_refusal(h, lang, refusal_key(client, with_image), info)
+                _log(f"translate: {where}: still failing ({e.kind})")
+                return {"page": ordinal, "page_hash": h, "item_id": item_id,
+                        "member": placed.get("member"), "skipped": info}
+            cache.write_translation(
+                h, lang, key_model,
+                {r["id"]: None if r.get("not_text") else r.get("translation", "")
+                 for r in regions if r["id"] in missing},
+                boxed=with_image)
+            _load_translations(regions, h, lang, key_model)
+        cache.clear_refusals(h, lang)
+        # Every successful retry records its pair (plan 2.1.2.4), "same"
+        # included: an older choice must not outrank the page just fixed.
+        choice = {"model": key_model,
+                  "mode": {"text_only": "text_only", "model": "model"}.get(mode, "vision")}
+        cache.write_choice(h, lang, choice["model"], choice["mode"])
+        return _render_fixed(placed, record, original, regions, item_id, ordinal, dest_dir,
+                             client, allow_retranslate=True, choice=choice)
+
+
+def manual_page(job_id, item_id, ordinal: int, texts: dict, dest_dir,
+                lang=DEFAULT_LANG) -> dict:
+    """A skipped page translated by the user, every bubble at once (plan 2.2).
+
+    `texts` is {region_id: text}. Each text is stored under the `#manual`
+    key as an edit. Every region NOT in `texts`, and every blank one, is
+    stored as a null marked `boxed` -- "no text here", decided -- so it stays
+    as drawn and is never sent to a model on a later run. Regions OCR set
+    aside as punctuation are left as they are. No provider is asked, and
+    rung 5 does not shorten the user's words.
+    """
+    placed = cache.get_placement(job_id, item_id, ordinal)
+    if placed is None:
+        raise CacheMiss(f"job {job_id} has no page {ordinal} of item {item_id!r}", "placement")
+    with _page_lock(placed["page_hash"]):
+        placed, record, original = _skipped_page_inputs(job_id, item_id, ordinal)
+        h = placed["page_hash"]
+        given = {}
+        for k, v in (texts or {}).items():
+            try:
+                given[int(k)] = v
+            except (TypeError, ValueError):
+                continue
+        nulls, words = {}, {}
+        for r in record["regions"]:
+            if r.get("not_text") and r.get("dismiss_reason") != VISION_REASON:
+                # Punctuation OCR set aside: stored as a decided null too, so
+                # the #manual pair covers EVERY region (review C1).
+                nulls[r["id"]] = None
+                continue
+            text = given.get(r["id"])
+            if isinstance(text, str) and text.strip():
+                words[r["id"]] = text
+            else:
+                nulls[r["id"]] = None
+        if nulls:
+            # overwrite_edits: a bubble typed in an earlier hand translation
+            # and left blank now is cleared, as the user asked.
+            cache.write_translation(h, lang, MANUAL_MODEL, nulls, boxed=True,
+                                    overwrite_edits=True)
+        for rid, text in words.items():
+            cache.write_edit(h, lang, MANUAL_MODEL, rid, text)
+        cache.write_choice(h, lang, MANUAL_MODEL, "manual")
+        cache.clear_refusals(h, lang)
+        regions = [dict(r) for r in record["regions"]]
+        _apply_translations(regions, h, lang, MANUAL_MODEL, recheck=False)
+        return _render_fixed(placed, record, original, regions, item_id, ordinal, dest_dir,
+                             None, allow_retranslate=False,
+                             choice={"model": MANUAL_MODEL, "mode": "manual"})
+
+
 def _pair_decisions(regions: list[dict], h: str, lang: str, model: str) -> list[dict]:
     """The page's regions with this (lang, model)'s translations and nulls on them.
 
@@ -1620,7 +2162,12 @@ def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir
     if not any(r["id"] == region_id for r in regions):
         raise CacheMiss(f"region {region_id} is not on page {ordinal}", "region")
 
-    model = _model_id(client)
+    # The pair the page was RENDERED from: the user's choice when there is
+    # one (a page fixed with another model, without the image, or by hand),
+    # else the Settings model. Editing a fixed page while Settings names
+    # another model would otherwise miss its translation file (plan 1.6).
+    choice = cache.read_choice(h, lang)
+    model = choice["model"] if choice else _model_id(client)
     # Coverage BEFORE the edit is written. A (lang, model) pair this page was
     # never translated under has no text for the other regions, and this path
     # never translates -- so rendering would put the user's edit in one bubble
@@ -1714,6 +2261,8 @@ def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir
         # from run_item's record before one.
         dismissed=dismissed,
         edited_region=region_id,
+        # The fixed page's pair, so the Editor keeps naming it after an edit.
+        choice=choice,
         edit_on_other_model=cache.has_edit_for_other_model(h, lang, model),
         # The repacked volume on disk no longer contains this page. Re-packing
         # on this thread is not an option -- a large volume takes longer than
@@ -1722,7 +2271,7 @@ def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir
         # rather than leave the user holding a file that silently disagrees
         # with the editor. `repack` is the worker's status; /api/repack
         # serves the same dict until it reads done.
-        archive_stale=True,
+        archive_stale=not _is_images(placed),
         repack=None,
     )
     _persist(h, record, detected, complete, bool(record.get("redetect_failed")))
@@ -1731,6 +2280,6 @@ def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir
     # from here: the flag stays, the status stays None, and the UI says the
     # item must be run again. Placements are rewritten by every run, so this
     # is a one-run condition, not a permanent one.
-    if placed.get("src_path"):
+    if placed.get("src_path") and not _is_images(placed):
         record["repack"] = schedule_repack(job_id, item_id, dest_dir, lang)
     return record

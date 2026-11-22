@@ -513,7 +513,8 @@ def read_placement(job_id: str) -> dict:
 
 
 def put_placement(job_id: str, item_id, ordinal: int, page_hash_: str,
-                  member: str | None = None, src_path: str | None = None) -> None:
+                  member: str | None = None, src_path: str | None = None,
+                  kind: str | None = None) -> None:
     """Record that this job's (item, ordinal) renders this page, under this name.
 
     Separately per ordinal, so two byte-identical pages in one archive share a
@@ -539,11 +540,16 @@ def put_placement(job_id: str, item_id, ordinal: int, page_hash_: str,
     """
     with _LOCK:
         placement = read_placement(job_id)
-        placement[_placement_key(item_id, ordinal)] = {
+        entry = {
             "page_hash": page_hash_,
             "member": member,
             "src_path": src_path,
         }
+        # "images" for a chapter of loose pages: it has no archive to rebuild,
+        # and its folder may have moved since (review minor).
+        if kind:
+            entry["kind"] = kind
+        placement[_placement_key(item_id, ordinal)] = entry
         _write_json(os.path.join(job_dir(job_id), PLACEMENT), placement)
         add_ref(page_hash_, job_id)
 
@@ -749,7 +755,7 @@ def read_translation(page_hash_: str, lang: str, model: str) -> dict:
 
 
 def write_translation(page_hash_: str, lang: str, model: str, texts: dict,
-                      boxed: bool = False) -> dict:
+                      boxed: bool = False, overwrite_edits: bool = False) -> dict:
     """Merge a fresh translation in, and never overwrite an ``edited`` entry.
 
     ``boxed`` marks the nulls in ``texts`` as decided by a model that saw the
@@ -769,7 +775,9 @@ def write_translation(page_hash_: str, lang: str, model: str, texts: dict,
     merged = dict(existing)
     for rid, text in texts.items():
         rid = str(rid)
-        if existing.get(rid, {}).get("edited"):
+        # `overwrite_edits` is the hand-translation route's own key only: a
+        # bubble the user typed and now blanks is cleared by the user.
+        if existing.get(rid, {}).get("edited") and not overwrite_edits:
             continue
         merged[rid] = {"text": text, "edited": False}
         if text is None and boxed:
@@ -822,6 +830,83 @@ def has_edits(page_hash_: str) -> bool:
         if any(isinstance(v, dict) and v.get("edited") for v in data.values()):
             return True
     return False
+
+
+# -- refusals ----------------------------------------------------------------
+#
+# A model that REFUSED a page will refuse it again: the marker remembers it, so
+# a resumed or re-run job does not spend a request -- and a "3 in a row"
+# pause -- re-learning that. Only a refusal is remembered; a page skipped
+# for an outage or a garbled reply is simply asked again next time.
+# Keyed on (lang, key), where key covers the endpoint, the model and whether
+# the page image went with the request (pipeline.refusal_key): the same model
+# id behind another endpoint, or asked without the image, is a new question.
+
+
+def refusal_name(lang: str, key: str) -> str:
+    return f"refused_{_UNSAFE.sub('-', lang or 'none')}_{_UNSAFE.sub('-', key)}.json"
+
+
+def write_refusal(page_hash_: str, lang: str, key: str, info: dict) -> None:
+    _write_json(os.path.join(page_dir(page_hash_), refusal_name(lang, key)), info)
+
+
+def read_refusal(page_hash_: str, lang: str, key: str) -> dict | None:
+    data = _read_json(os.path.join(page_dir(page_hash_), refusal_name(lang, key)), None)
+    return data if isinstance(data, dict) else None
+
+
+def _refusal_files(page_hash_: str, lang: str | None = None) -> list[str]:
+    d = atomic.long_path(page_dir(page_hash_))
+    prefix = "refused_" if lang is None else f"refused_{_UNSAFE.sub('-', lang or 'none')}_"
+    try:
+        return [n for n in os.listdir(d) if n.startswith(prefix) and n.endswith(".json")]
+    except OSError:
+        return []
+
+
+def clear_refusals(page_hash_: str, lang: str) -> None:
+    """A successful translation of the page, under ANY key, ends its refusals."""
+    for name in _refusal_files(page_hash_, lang):
+        with contextlib.suppress(OSError):
+            os.remove(atomic.long_path(os.path.join(page_dir(page_hash_), name)))
+
+
+def has_refusals(page_hash_: str) -> bool:
+    return bool(_refusal_files(page_hash_))
+
+
+# -- the user's choice for a page ----------------------------------------------
+#
+# Which (model, mode) the USER picked for a page in a language: a retry with
+# another model, without the image, or typed by hand. Every later run of the
+# page, in any job, renders from that pair while it covers the page -- so a
+# re-run under the Settings model never puts the refused original back over
+# a fix the user paid for (plan 1.6). Content-keyed, like the translations.
+
+
+def choice_name(lang: str) -> str:
+    return f"choice_{_UNSAFE.sub('-', lang or 'none')}.json"
+
+
+def write_choice(page_hash_: str, lang: str, model: str, mode: str) -> None:
+    _write_json(os.path.join(page_dir(page_hash_), choice_name(lang)),
+                {"model": model, "mode": mode})
+
+
+def read_choice(page_hash_: str, lang: str) -> dict | None:
+    data = _read_json(os.path.join(page_dir(page_hash_), choice_name(lang)), None)
+    if isinstance(data, dict) and isinstance(data.get("model"), str) and data["model"]:
+        return data
+    return None
+
+
+def has_choices(page_hash_: str) -> bool:
+    d = atomic.long_path(page_dir(page_hash_))
+    try:
+        return any(n.startswith("choice_") and n.endswith(".json") for n in os.listdir(d))
+    except OSError:
+        return False
 
 
 def has_edit_for_other_model(page_hash_: str, lang: str, model: str) -> bool:
@@ -877,6 +962,16 @@ def _pinned(page_hash_: str) -> str:
     # with it.
     if refs and has_edits(page_hash_):
         return "a user correction"
+    # A page a model refused is waiting for the user to pick a workaround,
+    # and the retry erases from the original raster cached with it. Evicted,
+    # the retry could only answer "run the item again".
+    if refs and has_refusals(page_hash_):
+        return "a refused page awaiting a retry"
+    # A page the user fixed with another model or without the image holds no
+    # edit, so the clause above would not keep it -- and evicting it throws
+    # away a translation the user chose, and maybe paid for, by hand.
+    if refs and has_choices(page_hash_):
+        return "a page you fixed"
     if any(r in _running for r in refs):
         return "a running job"
     return ""

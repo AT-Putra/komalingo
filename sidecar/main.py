@@ -215,6 +215,43 @@ class JobRequest(BaseModel):
     settings: Settings | None = None
 
 
+class ResumeRequest(BaseModel):
+    """Resume a paused job, with the settings as they are NOW: the pause was
+    most often a wrong key or an empty account, fixed in Settings since."""
+
+    settings: Settings | None = None
+
+
+class RetryRequest(BaseModel):
+    """Plan 2.1: skipped pages of one item, asked again one way.
+
+    `mode` is the review panel's choice: "same" (the Settings model, for an
+    outage), "model" (`model`, another model on the same endpoint) or
+    "text_only" (the OCR text without the page image). The settings are the
+    endpoint and key; for "model" their model is replaced by `model`.
+    """
+
+    job_id: str
+    item_id: str
+    ordinals: list[int]
+    dest_dir: str
+    lang: Target = pipeline.DEFAULT_LANG
+    mode: Literal["same", "text_only", "model"] = "same"
+    model: str | None = None
+    settings: Settings | None = None
+
+
+class ManualRequest(BaseModel):
+    """Plan 2.2: one skipped page, every bubble typed by the user."""
+
+    job_id: str
+    item_id: str
+    ordinal: int
+    dest_dir: str
+    lang: Target = pipeline.DEFAULT_LANG
+    texts: dict[str, str] = {}
+
+
 class RerenderRequest(BaseModel):
     """AC-10's payload: one region of one page of one job.
 
@@ -462,6 +499,13 @@ def translate(req: TranslateRequest):
     return record
 
 
+def _paused_item(req, reason: str) -> dict:
+    """/api/item's answer when the run paused: 200, no pages, and why. The
+    pages it did deliver are cached; running the item again resumes it."""
+    return {"job_id": req.job_id, "item_id": req.item_id or os.path.basename(req.src_path),
+            "pages": [], "cache_warning": None, "paused": True, "pause_reason": reason}
+
+
 @app.post("/api/item")
 def translate_item(req: ItemRequest):
     """Every page of one archive or PDF, through the page cache.
@@ -477,11 +521,18 @@ def translate_item(req: ItemRequest):
     try:
         client = _client(req.settings)
         vision_warning = _probed(client)
+        if client is not None and getattr(client, "probe_error_kind", "") == "account":
+            return _paused_item(req, f"The provider refused the account: {vision_warning}")
+        # A Control, not None: an account failure on a page pauses this
+        # route's one-item "job" instead of escaping as a 502 mid-chapter,
+        # and a refused page is skipped like in the queue.
         record = pipeline.run_item(
             req.src_path, req.dest_dir, req.job_id, req.item_id,
-            client, req.lang, req.source,
+            client, req.lang, req.source, cancel=pipeline.Control(streak=False),
         )
         record["vision_warning"] = vision_warning
+    except pipeline.Paused as e:
+        return _paused_item(req, e.reason)
     except ProviderError as e:
         return _provider_response(e)
     except SettingsError as e:
@@ -508,6 +559,16 @@ _jobs_lock = threading.Lock()
 KEEP_FINISHED_JOBS = 20
 
 
+# Page retries in flight (POST /api/pages/retry), as (job_id, item_id) keys.
+# Registered and checked under _jobs_lock: a resume refuses while one of the
+# job's items is held, and a retry refuses while its item is running.
+_retries: set[tuple[str, str]] = set()
+
+
+def _retry_holds(job_id: str) -> bool:
+    return any(j == job_id for j, _item in _retries)
+
+
 def _job_response(status: int, error: str) -> Response:
     return Response(content=json.dumps({"error": error}), status_code=status,
                     media_type="application/json")
@@ -522,15 +583,25 @@ def start_job(req: JobRequest):
         client = _client(req.settings)
     except SettingsError as e:
         return _bad_settings_response(e)
-    try:
-        paths = job.scan(req.dir) if req.dir is not None else list(req.paths or [])
-    except NotADirectoryError as e:
-        return _job_response(404, str(e))
+    # The folder itself, not its listing: job.expand applies the folder rule
+    # (archives one item each, loose images one chapter, subfolders of
+    # images one chapter each), and so do folders dropped into `paths`.
+    if req.dir is not None and not os.path.isdir(atomic.long_path(req.dir)):
+        return _job_response(404, f"not a directory: {req.dir}")
+    paths = [req.dir] if req.dir is not None else list(req.paths or [])
     with _jobs_lock:
         existing = _jobs.get(req.job_id)
         if existing is not None and not existing.done:
             return _job_response(409, f"job {req.job_id!r} is still running")
-        finished = [jid for jid, j in _jobs.items() if j.done and jid != req.job_id]
+        if _retry_holds(req.job_id):
+            return _job_response(409, f"a page retry is running in job {req.job_id!r}")
+        if existing is not None and existing.paused:
+            # A paused job is the user's to resume or cancel; a new POST
+            # under its id would throw away the skipped pages it lists.
+            return _job_response(409, f"job {req.job_id!r} is paused: resume or cancel it")
+        # Paused jobs are never pruned: they are waiting for the user.
+        finished = [jid for jid, j in _jobs.items()
+                    if j.done and not j.paused and jid != req.job_id]
         for jid in finished[:max(0, len(finished) - KEEP_FINISHED_JOBS)]:
             del _jobs[jid]
         started = job.Job(req.job_id, paths, req.dest_dir, client, req.lang, req.source)
@@ -548,6 +619,37 @@ def job_status(job_id: str):
     return found.status()
 
 
+@app.post("/api/job/{job_id}/resume")
+def resume_job(job_id: str, req: ResumeRequest):
+    """Plan 1.5.5: a paused job goes on under the same id, with the settings
+    as they are now. 409 while it is still stopping (pages in flight finish
+    first) or while a page retry holds one of its items; the check and the
+    swap are one step under _jobs_lock, so neither can slip between them.
+
+    Settings are required: without them the client would be the offline
+    placeholder and every remaining bubble would read "HELLO" (review M3)."""
+    if req.settings is None:
+        return _job_response(400, "resuming needs the model settings")
+    try:
+        client = _client(req.settings)
+    except SettingsError as e:
+        return _bad_settings_response(e)
+    with _jobs_lock:
+        found = _jobs.get(job_id)
+        if found is None:
+            return _job_response(404, f"no job {job_id!r} in this sidecar")
+        if not found.done:
+            return _job_response(409, f"job {job_id!r} is still stopping; try again in a moment")
+        if not found.paused or getattr(found, "cancelled", False):
+            return _job_response(409, f"job {job_id!r} is not paused")
+        if _retry_holds(job_id):
+            return _job_response(409, f"a page retry is running in job {job_id!r}")
+        successor = found.resume(client)
+        _jobs[job_id] = successor
+    successor.start()
+    return successor.status()
+
+
 @app.post("/api/job/{job_id}/cancel")
 def cancel_job(job_id: str):
     """AC-13: items not yet started are cancelled outright; an item mid-run
@@ -560,9 +662,11 @@ def cancel_job(job_id: str):
     poll GET /api/job/{id} to watch the running items stop."""
     with _jobs_lock:
         found = _jobs.get(job_id)
-    if found is None:
-        return _job_response(404, f"no job {job_id!r} in this sidecar")
-    found.cancel()
+        if found is None:
+            return _job_response(404, f"no job {job_id!r} in this sidecar")
+        # Under the lock: a resume swapping in the successor at this instant
+        # would otherwise leave the cancel on the old object (review minor).
+        found.cancel()
     return found.status()
 
 
@@ -604,6 +708,181 @@ def repack_status(job_id: str, item_id: str):
     a dictionary read and never waits on the worker.
     """
     return pipeline.repack_status(job_id, item_id)
+
+
+# What each page retry has done so far, by (job_id, item_id), for
+# GET /api/pages/retry. In memory, like the jobs: a retry belongs to this
+# process, and its results are on disk and in the page cache either way.
+_retry_runs: dict[tuple[str, str], dict] = {}
+
+
+def _update_item(found, item_id: str, fresh: list[dict]) -> None:
+    """Put retried or typed pages into the job's in-memory item, so the
+    Queue's skipped count and GET /api/job/{id}/item serve the fixed pages."""
+    if found is None or not fresh:
+        return
+    with found._lock:
+        item = next((i for i in found.items if i.item_id == item_id), None)
+        if item is None:
+            return
+        pages = list(item.record.get("pages", []))
+        by_page = {p.get("page"): n for n, p in enumerate(pages)}
+        for rec in fresh:
+            n = by_page.get(rec.get("page"))
+            if n is None:
+                continue
+            if "regions" in rec:
+                pages[n] = rec  # translated now: the whole fresh record
+            else:
+                pages[n] = dict(pages[n], skipped=rec.get("skipped"))  # still skipped, new reason
+        item.record = dict(item.record, pages=pages)
+        item.pages_skipped = [job._skip_entry(p) for p in pages if p.get("skipped")]
+
+
+def _schedule_item_repack(job_id, item_id, dest_dir, lang, ordinal):
+    """Rebuild the item's archive after a fix, unless it has none."""
+    placed = cache.get_placement(job_id, item_id, ordinal) or {}
+    src = placed.get("src_path")
+    if src and not pipeline._is_images(placed):
+        return pipeline.schedule_repack(job_id, item_id, dest_dir, lang)
+    return None
+
+
+def _run_retry(req: RetryRequest, client, key, found) -> None:
+    st = _retry_runs[key]
+    fresh: list[dict] = []
+    outcome, error, kind = "done", "", ""
+    try:
+        cache.mark_running(req.job_id)
+        try:
+            if req.mode != "text_only":
+                reason = _probed(client)
+                if getattr(client, "probe_error_kind", "") == "account":
+                    raise ProviderError(0, reason, kind="account")
+            for ordinal in req.ordinals:
+                fresh.append(pipeline.retry_page(req.job_id, req.item_id, ordinal, req.dest_dir,
+                                                 client, req.lang, req.mode))
+                with _jobs_lock:
+                    st["done"], st["pages"] = len(fresh), list(fresh)
+        finally:
+            cache.clear_running(req.job_id)
+        fixed = [p for p in fresh if "regions" in p]
+        if fixed:
+            st["repack"] = _schedule_item_repack(req.job_id, req.item_id, req.dest_dir,
+                                                 req.lang, fixed[0]["page"])
+    except ProviderError as e:
+        # Only an ACCOUNT failure gets here (retry_page returns the others as
+        # still-skipped records): stop at once, nothing more is written.
+        outcome, error, kind = "failed", f"HTTP {e.status}: {e.body[:400]}", e.kind
+    except CacheMiss as e:
+        outcome, error, kind = "failed", e.reason, e.kind
+    except Exception as e:  # noqa: BLE001 -- the status carries it; the thread has nowhere else
+        import traceback  # noqa: PLC0415
+
+        traceback.print_exc()
+        outcome, error, kind = "failed", f"{type(e).__name__}: {e}", "internal"
+    finally:
+        _update_item(found, req.item_id, fresh)
+        with _jobs_lock:
+            st.update(status=outcome, error=error, kind=kind, done=len(fresh), pages=list(fresh))
+            _retries.discard(key)
+
+
+@app.post("/api/pages/retry")
+def retry_pages(req: RetryRequest):
+    """Plan 2.1. Answers at once; poll GET /api/pages/retry for the pages."""
+    if req.settings is None:
+        return _job_response(400, "a retry needs the model settings")
+    if req.mode == "model" and not (req.model or "").strip():
+        return _job_response(422, "mode 'model' needs the other model's id")
+    if not req.ordinals:
+        return _job_response(422, "no pages to retry")
+    try:
+        model = req.model.strip() if req.mode == "model" and req.model else req.settings.model
+        client = LLMClient(req.settings.base_url, req.settings.api_key, model)
+    except SettingsError as e:
+        return _bad_settings_response(e)
+    key = (req.job_id, req.item_id)
+    with _jobs_lock:
+        found = _jobs.get(req.job_id)
+        if found is not None and not found.done:
+            return _job_response(409, f"job {req.job_id!r} is still running")
+        if found is not None and found.paused:
+            return _job_response(409, f"job {req.job_id!r} is paused: resume or cancel it first")
+        if key in _retries:
+            return _job_response(409, f"a retry of {req.item_id!r} is already running")
+        _retries.add(key)
+        # Finished runs of jobs this sidecar no longer holds are dropped: a
+        # run keeps its fresh page records, and nothing would ever read them.
+        for old in [k for k, st in _retry_runs.items()
+                    if st["status"] != "running" and k[0] not in _jobs]:
+            del _retry_runs[old]
+        _retry_runs[key] = {"status": "running", "mode": req.mode, "model": model,
+                            "total": len(req.ordinals), "done": 0, "pages": [],
+                            "error": "", "kind": "", "repack": None}
+        snapshot = dict(_retry_runs[key])
+    threading.Thread(target=_run_retry, args=(req, client, key, found),
+                     name=f"retry-{req.item_id}"[:40], daemon=True).start()
+    return snapshot
+
+
+@app.get("/api/pages/retry")
+def retry_status(job_id: str, item_id: str):
+    with _jobs_lock:
+        st = _retry_runs.get((job_id, item_id))
+        if st is None:
+            return _job_response(404, f"no retry of {item_id!r} in job {job_id!r}")
+        return dict(st, pages=list(st["pages"]))
+
+
+@app.post("/api/pages/manual")
+def manual_page(req: ManualRequest):
+    """Plan 2.2: every bubble of a skipped page, typed; one render, no model."""
+    key = (req.job_id, req.item_id)
+    with _jobs_lock:
+        found = _jobs.get(req.job_id)
+        if found is not None and not found.done:
+            return _job_response(409, f"job {req.job_id!r} is still running")
+        if found is not None and found.paused:
+            return _job_response(409, f"job {req.job_id!r} is paused: resume or cancel it first")
+        if key in _retries:
+            return _job_response(409, f"a retry of {req.item_id!r} is running")
+        # Held like a retry, so a resume or a new job under this id waits
+        # for it rather than swapping the job out mid-write (review M5).
+        _retries.add(key)
+    try:
+        record = pipeline.manual_page(req.job_id, req.item_id, req.ordinal, req.texts,
+                                      req.dest_dir, req.lang)
+        _update_item(found, req.item_id, [record])
+    except CacheMiss as e:
+        return _cache_miss_response(e)
+    finally:
+        with _jobs_lock:
+            _retries.discard(key)
+    record["repack"] = _schedule_item_repack(req.job_id, req.item_id, req.dest_dir, req.lang,
+                                             req.ordinal)
+    record["archive_stale"] = record["repack"] is not None
+    return record
+
+
+@app.get("/api/job/{job_id}/item/{item_id}")
+def job_item(job_id: str, item_id: str):
+    """One item's page records, so the Editor can open any item of a job
+    (plan 2.3). Empty `pages` until the item has finished."""
+    with _jobs_lock:
+        found = _jobs.get(job_id)
+    if found is None:
+        return _job_response(404, f"no job {job_id!r} in this sidecar")
+    with found._lock:
+        item = next((i for i in found.items if i.item_id == item_id), None)
+        if item is None:
+            return _job_response(404, f"no item {item_id!r} in job {job_id!r}")
+        record = dict(item.record)
+        pages = list(record.get("pages", []))
+        status, kind = item.status, item.kind
+    return {"job_id": job_id, "item_id": item_id, "kind": kind, "status": status,
+            "pages": pages, "cache_warning": record.get("cache_warning"),
+            "lang": found.lang, "dest_dir": found.dest_dir}
 
 
 @app.get("/api/cache")

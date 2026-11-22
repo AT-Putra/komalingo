@@ -380,8 +380,9 @@ def main():
                 f"[retry] a page that stalls twice fails after exactly 2 requests with the "
                 f"timeout as the reason: {stub.chat_requests} requests, err={err}")
         c.check("vol1.cbz, page 3 (003.png)" in log and "retry 1 of 1 failed too" in log
-                and "the item fails" in log,
-                f"[retry] and the log says the retry failed too and the item fails: {log.strip()!r}")
+                and "giving up on this page" in log,
+                f"[retry] and the log says the retry failed too and the page is given up "
+                f"(skipped, since the skip-pages plan): {log.strip()!r}")
 
         with StubProvider(status=401, delay=0) as stub:
             regions_, err, log = translate_with(stub)

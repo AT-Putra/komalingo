@@ -37,7 +37,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from . import atomic, pipeline, safety
-from .containers import archive, pdf
+from .containers import archive, folder, pdf
 from .containers.read_cbz import _natural_key
 
 # How many items run at once. One more than llm.MAX_CONCURRENT, and that is
@@ -56,6 +56,8 @@ CANCELLED_REASON = "cancelled before start"
 # lend one: module-level so two lockless callers are still serialised,
 # rather than a throwaway Lock() per call that serialises nothing.
 _WARN_LOCK = threading.Lock()
+# Item.note_page's lock: a page counter bumped from several page threads.
+_NOTE_LOCK = threading.Lock()
 
 # The item-level progress contract, the way STAGES is the page-level one.
 # check_archives asserts against these names rather than counting events: a
@@ -64,6 +66,10 @@ _WARN_LOCK = threading.Lock()
 ITEM_STAGES = ("item_start", "item_done")
 
 OK, SKIPPED, FAILED, CANCELLED = "ok", "skipped", "failed", "cancelled"
+# The job paused under this item -- an account failure, or pages failing in
+# a row -- and it stopped at a page boundary with its delivered pages kept.
+# The job's resume runs it again; finished pages are cache hits.
+PAUSED = "paused"
 
 # Loose images are items too -- AC-7's folder mixes them with archives -- and
 # Phase 0's run_page already handles one. Listed here so `classify` has one
@@ -93,6 +99,18 @@ class Item:
     output: str = ""
     pages: int = 0
     record: dict = field(default_factory=dict, repr=False)
+    # Live page progress for the Queue's per-row bar. `pages_total` is the
+    # reader's count when it could take one cheaply (None for a compressed
+    # tar); `pages_done` counts delivered pages, skipped ones included.
+    pages_total: int | None = None
+    pages_done: int = 0
+    # Pages delivered as the ORIGINAL because the model refused or failed
+    # them: [{ordinal, member, kind, message}]. Named pages_skipped so it
+    # never reads as the job's item-level `skipped` count.
+    pages_skipped: list = field(default_factory=list)
+    # The image files of an `images` item (a chapter of loose pages), in
+    # page order. `path` is then their folder. Empty for every other kind.
+    members: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         # The public fields by name, not dataclasses.asdict: that deep-copies
@@ -102,7 +120,23 @@ class Item:
             "path": self.path, "item_id": self.item_id, "kind": self.kind,
             "status": self.status, "reason": self.reason, "warning": self.warning,
             "output": self.output, "pages": self.pages,
+            "pages_total": self.pages_total, "pages_done": self.pages_done,
+            "pages_skipped": list(self.pages_skipped),
         }
+
+    def note_page(self, record: dict) -> None:
+        """One delivered page: count it, and list it when it was skipped.
+        Called from up to PAGE_WINDOW page threads at once, so under a lock."""
+        with _NOTE_LOCK:
+            self.pages_done += 1
+            if record.get("skipped"):
+                self.pages_skipped.append(_skip_entry(record))
+
+
+def _skip_entry(record: dict) -> dict:
+    skipped = record.get("skipped") or {}
+    return {"ordinal": record.get("page"), "member": record.get("member"),
+            "kind": skipped.get("kind", ""), "message": skipped.get("message", "")}
 
 
 def classify(path) -> Item:
@@ -129,6 +163,107 @@ def classify(path) -> Item:
                 status=SKIPPED, reason=f"unsupported file type {ext or '(none)'}")
 
 
+def _is_output(path) -> bool:
+    """A page this program wrote: `<name>_translated.<ext>`. Never an input,
+    or a second run over a folder would translate its own output."""
+    return os.path.splitext(os.path.basename(os.fspath(path)))[0].endswith("_translated")
+
+
+def _subfolders(directory) -> list[str]:
+    """The folders directly inside `directory`, natural order, no dotfolders."""
+    try:
+        names = [n for n in os.listdir(atomic.long_path(directory))
+                 if not n.startswith(".")
+                 and os.path.isdir(atomic.long_path(os.path.join(directory, n)))]
+    except OSError:
+        return []
+    return [os.path.join(directory, n) for n in sorted(names, key=_natural_key)]
+
+
+def expand(paths, dest_dir=None) -> list[Item]:
+    """What a list of dropped files and folders becomes, by the folder rule.
+
+    The user's rule (plan 1.1, 2026-11-22):
+      * each archive or PDF is one item;
+      * the loose images directly in a folder are ONE item, an `images`
+        chapter named after the folder;
+      * each subfolder holding images is one item too, one level deep
+        (`series/ch01/*.png`) -- deeper is not walked;
+      * image files added on their own are grouped by their parent folder.
+    Groups that share a folder are MERGED and files de-duplicated before
+    anything is named, so dropping `series/` and also `series/001.png` is one
+    item, not two items with one path between them (R3-M3).
+
+    A subfolder at or under `dest_dir` is not walked, and a `*_translated.*`
+    file is not an input: when the output folder sits inside the input, a
+    second run must not translate the first run's pages. Unsupported files
+    are still listed, as SKIPPED items with their reason, as `scan` did.
+    """
+    dest = os.path.normcase(os.path.abspath(os.fspath(dest_dir))) if dest_dir else None
+
+    def under_dest(directory) -> bool:
+        if dest is None:
+            return False
+        here = os.path.normcase(os.path.abspath(directory))
+        return here == dest or here.startswith(dest + os.sep)
+
+    order: list = []  # Items and group keys, in the order they were met
+    groups: dict[str, list[str]] = {}
+    seen: set[str] = set()
+
+    def add(f, images_only=False):
+        f = os.fspath(f)
+        key = os.path.normcase(os.path.abspath(f))
+        if key in seen:
+            return
+        seen.add(key)
+        if folder.is_image(f):
+            if _is_output(f):
+                return
+            group = os.path.dirname(os.path.abspath(f))
+            if group not in groups:
+                groups[group] = []
+                order.append(group)
+            groups[group].append(f)
+        elif not images_only:
+            order.append(classify(f))
+
+    for p in paths:
+        p = os.fspath(p)
+        if os.path.isdir(atomic.long_path(p)):
+            try:
+                listed = scan(p)
+            except OSError as e:
+                order.append(Item(path=p, item_id=os.path.basename(p) or p, kind="unsupported",
+                                  status=SKIPPED, reason=f"could not read the folder: {e}"))
+                continue
+            for f in listed:
+                add(f)
+            for sub in _subfolders(p):
+                if under_dest(sub):
+                    continue
+                # One unreadable subfolder (System Volume Information on a
+                # dropped drive) must not fail the whole job (review minor).
+                try:
+                    inside = scan(sub)
+                except OSError:
+                    continue
+                for f in inside:
+                    add(f, images_only=True)
+        else:
+            add(p)
+
+    items = []
+    for entry in order:
+        if isinstance(entry, Item):
+            items.append(entry)
+            continue
+        files = sorted(groups[entry], key=lambda f: _natural_key(os.path.basename(f)))
+        items.append(Item(path=entry, item_id=os.path.basename(entry) or "images",
+                          kind=folder.IMAGES, members=files))
+    return items
+
+
 def _discard_output(item: Item, dest_dir) -> None:
     """Remove what a REFUSED item already wrote. Best effort, never raises.
 
@@ -139,7 +274,7 @@ def _discard_output(item: Item, dest_dir) -> None:
     archive the product refused, mixed in with legitimate output. The per-item
     directory is what makes the cleanup safe: there is nothing else in it.
     """
-    if item.kind not in ("archive", "pdf"):
+    if item.kind not in ("archive", "pdf", folder.IMAGES):
         return
     out = pipeline.item_dir(dest_dir, item.item_id)
     try:
@@ -153,7 +288,7 @@ def run_item(item: Item, dest_dir, job_id, client=None,
              source: str = pipeline.DEFAULT_SOURCE,
              warned: set | None = None,
              warned_lock: threading.Lock | None = None,
-             cancel: threading.Event | None = None) -> Item:
+             cancel: "threading.Event | pipeline.Control | None" = None) -> Item:
     """Process one item. Never raises.
 
     `cancel` (Phase 9) is the job's token, handed down to the pipeline, which
@@ -179,23 +314,32 @@ def run_item(item: Item, dest_dir, job_id, client=None,
             return item
 
         if item.kind == "image":
-            record = pipeline.run_page(item.path, dest_dir, 1, client, source, lang, item_id=item.item_id,
-                                       cancel=cancel)
-            item.output = record.get("output", "")
-            item.pages = 1
-            item.record = record
-            item.status = OK
-            return item
+            # A lone image Item built by hand (classify on one file): run it
+            # as the one-page `images` chapter expand() would have made.
+            item.kind, item.members = folder.IMAGES, [item.path]
+            item.path = os.path.dirname(os.path.abspath(item.path))
 
-        # An archive or a PDF: both are "every page through the cache, then
-        # repack", and pipeline.run_item tells them apart by signature.
+        # An archive, a PDF or a chapter of loose images: all three are
+        # "every page through the cache" (plan 1.1), and pipeline.run_item
+        # tells the first two apart by signature and the third by `members`.
+        def on_total(n):
+            item.pages_total = n
+
         record = pipeline.run_item(
             item.path, dest_dir, job_id, item.item_id, client, lang, source,
-            cancel=cancel,
+            cancel=cancel, on_page=item.note_page, on_total=on_total,
+            members=item.members if item.kind == folder.IMAGES else None,
         )
         item.record = record
         item.pages = len(record.get("pages", []))
-        item.output = record.get("archive", "")
+        # Rebuilt from the records, which are in page order: the live list
+        # grew in completion order, and the review panel lists by page.
+        item.pages_skipped = [_skip_entry(p) for p in record.get("pages", []) if p.get("skipped")]
+        # An `images` item has no archive: its output is its directory of
+        # translated pages.
+        item.output = record.get("archive", "") or (
+            atomic.long_path(pipeline.item_dir(dest_dir, item.item_id))
+            if item.kind == folder.IMAGES else "")
         warning = record.get("format_warning")
         if warning:
             seen = warned if warned is not None else set()
@@ -209,6 +353,14 @@ def run_item(item: Item, dest_dir, job_id, client=None,
     # Reason BEFORE status in every branch below: a poll between the two
     # assignments must not see SKIPPED with an empty reason, the state the
     # Item docstring forbids.
+    except pipeline.Paused as e:
+        # Before Cancelled, which it subclasses: the status differs, and a
+        # paused item is one the resume runs again.
+        item.pages = e.pages_done
+        item.reason = (f"paused after {e.pages_done} page{'s' if e.pages_done != 1 else ''}"
+                       if e.pages_done else "paused before its first page")
+        item.status = PAUSED
+        return item
     except pipeline.Cancelled as e:
         item.pages = e.pages_done
         # An item that stopped before its first page landed is, to the user,
@@ -266,7 +418,10 @@ def disambiguate(items: list[Item]) -> list[Item]:
         counts[item.item_id] = counts.get(item.item_id, 0) + 1
     for item in items:
         if counts[item.item_id] > 1:
-            stem, ext = os.path.splitext(item.item_id)
+            # A folder name is not a file name: `Vol.1` has no extension to
+            # keep, and splitting it would name the item `Vol-<digest>.1`.
+            stem, ext = ((item.item_id, "") if item.kind == folder.IMAGES
+                         else os.path.splitext(item.item_id))
             digest = hashlib.sha256(
                 os.path.abspath(item.path).encode("utf-8")).hexdigest()[:8]
             item.item_id = f"{stem}-{digest}{ext}"
@@ -323,14 +478,20 @@ class Job:
     def __init__(self, job_id, paths, dest_dir, client=None,
                  lang: str = pipeline.DEFAULT_LANG,
                  source: str = pipeline.DEFAULT_SOURCE,
-                 workers: int = WORKERS):
+                 workers: int = WORKERS,
+                 items: list[Item] | None = None):
         self.job_id = str(job_id)
         self.dest_dir = os.fspath(dest_dir)
         self.client = client
         self.lang = lang
         self.source = source
         self.workers = max(1, int(workers))
-        self.items = disambiguate([classify(p) for p in paths])
+        # `items` is the resume's path in (see resume()): the predecessor's
+        # Item objects, never re-derived from paths -- disambiguate over a
+        # subset can hand out different ids, and the placements, the output
+        # directories and the Queue rows would all move with them.
+        self._fresh = items is None
+        self.items = disambiguate(expand(paths, dest_dir)) if items is None else items
         self.warned: set[str] = set()
         self._lock = threading.Lock()
         # A deque under the job's own lock, not a queue.Queue: every claim
@@ -338,7 +499,10 @@ class Job:
         # queue would guard nothing.
         self._pending: deque[Item] = deque()
         self._running: set[str] = set()
-        self._cancel = threading.Event()
+        # The job's stop signals: the user's cancel and the job's own pause
+        # (pipeline.Control). Handed to every page in place of a bare Event,
+        # so every boundary that stops for a cancel stops for a pause too.
+        self._control = pipeline.Control()
         # The vision probe runs once per job, on whichever worker starts
         # first; the others block on this lock until it has, so no page
         # goes out before the client knows whether an image can go with it.
@@ -355,25 +519,83 @@ class Job:
             if self._started:
                 return self
             self._started = True
-            self._pending.extend(self.items)
-            if not self.items:
+            # A fresh job runs every item, the classified-out ones included
+            # (they are still reported). A resumed one runs only what the
+            # pause left: its finished items are carried over as they were.
+            todo = self.items if self._fresh else [i for i in self.items if i.status == "pending"]
+            self._pending.extend(todo)
+            if not todo:
                 self._done.set()
                 return self
             self._threads = [
                 threading.Thread(target=self._worker, name=f"job-{self.job_id}-{n}",
                                  daemon=True)
-                for n in range(min(self.workers, len(self.items)))
+                for n in range(min(self.workers, len(todo)))
             ]
         for t in self._threads:
             t.start()
         return self
 
+    def resume(self, client) -> "Job":
+        """The job that picks up where this paused one stopped. Not started.
+
+        A SUCCESSOR rather than a restart of this object: `start()` runs once
+        and nothing here is mutated after the workers left (plan 1.5.5).
+        Same job_id, so the placements stay together and the Queue keeps its
+        rows; a new client, because the user may have fixed the key or
+        changed the model. Finished items are carried over as they are; the
+        paused and never-started ones are queued fresh, once each, with
+        their status, reason and skipped pages reset.
+
+        The pages skipped before the pause are carried in the Control: they
+        are asked again (the model may have changed), but a failure on them
+        does not count toward the streak -- or a scene the model refuses
+        would pause the resumed job again before it reached a new page.
+        """
+        with self._lock:
+            if not self._done.is_set():
+                raise RuntimeError(f"job {self.job_id!r} is still stopping")
+            carried = set(self._control.carried)
+            items = []
+            for old in self.items:
+                if old.status in ("pending", PAUSED):
+                    carried |= {(old.item_id, p["ordinal"]) for p in old.pages_skipped}
+                    items.append(Item(path=old.path, item_id=old.item_id, kind=old.kind,
+                                      members=list(old.members)))
+                else:
+                    items.append(old)
+            warned = set(self.warned)
+        successor = Job(self.job_id, [], self.dest_dir, client, self.lang, self.source,
+                        self.workers, items=items)
+        successor.warned = warned
+        successor._control.carried = carried
+        return successor
+
     def cancel(self) -> None:
-        self._cancel.set()
+        """Cancel the rest. On a job that already PAUSED and settled, the
+        workers are gone, so the items they left are marked here -- a
+        cancelled pause is settled, and nothing waits on it (plan 1.5.6)."""
+        self._control.cancel()
+        with self._lock:
+            settled = self._done.is_set()
+            for item in self.items:
+                # A PAUSED item is settled whether or not the job is: no
+                # worker will run it again, and left paused in a cancelled
+                # job nothing could ever resume it (review minor). A pending
+                # one is the workers' to cancel while they are still running.
+                if item.status == PAUSED or (settled and item.status == "pending"):
+                    item.reason = (CANCELLED_REASON if not item.pages
+                                   else f"cancelled after {item.pages} page"
+                                        f"{'s' if item.pages != 1 else ''}")
+                    item.status = CANCELLED
 
     @property
     def cancelled(self) -> bool:
-        return self._cancel.is_set()
+        return self._control.cancelled
+
+    @property
+    def paused(self) -> bool:
+        return self._control.paused
 
     @property
     def done(self) -> bool:
@@ -398,7 +620,7 @@ class Job:
         Not in start(): POST /api/job answers with the first status snapshot
         immediately, and a probe is a provider round trip.
         """
-        if self.client is None or self._cancel.is_set():
+        if self.client is None or self._control.is_set():
             return
         with self._vision_lock:
             if self._vision_done:
@@ -417,6 +639,12 @@ class Job:
                 # ones nobody predicted -- and the item's own translate will
                 # raise the same error inside a boundary that names it.
                 ok, reason = False, f"vision probe error ({type(e).__name__}: {str(e)[:200]})"[:400]
+            # The provider refused the key, the credit or the model on the
+            # probe: no page would get through, so nothing is sent. The job
+            # pauses before its first page and says why (plan 1.2.6).
+            if not ok and getattr(self.client, "probe_error_kind", "") == "account":
+                self._control.pause(f"The provider refused the account: {reason}")
+                return
         if not ok:
             with self._lock:
                 self.warned.add(reason)
@@ -429,13 +657,16 @@ class Job:
             # nobody's hands, and a sibling draining at that moment would
             # declare the job done with this item still pending.
             with self._lock:
-                if not self._pending:
+                # A paused job claims nothing more: the items left pending
+                # stay pending for the resume, and the workers drain out so
+                # the job settles (done, paused) and wait() returns.
+                if not self._pending or self._control.paused:
                     finished = not self._running
                     break
                 item = self._pending.popleft()
                 self._running.add(item.item_id)
             try:
-                if self._cancel.is_set() and item.status == "pending":
+                if self._control.cancelled and item.status == "pending":
                     item.reason = CANCELLED_REASON
                     item.status = CANCELLED
                     # Still emitted, still reported: a cancelled item is an
@@ -446,7 +677,7 @@ class Job:
                 else:
                     run_item(item, self.dest_dir, self.job_id, self.client,
                              self.lang, self.source, self.warned, self._lock,
-                             cancel=self._cancel)
+                             cancel=self._control)
             except BaseException as e:  # noqa: BLE001 -- see below
                 # run_item's boundary is total for the pipeline, but not for
                 # its own `finally: emit(...)` on a broken stdout, nor for
@@ -484,6 +715,8 @@ class Job:
             "skipped": sum(1 for i in items if i["status"] == SKIPPED),
             "failed": sum(1 for i in items if i["status"] == FAILED),
             "cancelled_items": sum(1 for i in items if i["status"] == CANCELLED),
+            "paused_items": sum(1 for i in items if i["status"] == PAUSED),
+            "pages_skipped": sum(len(i["pages_skipped"]) for i in items),
             # Not yet claimed. An item mid-run still carries status
             # "pending" -- the boundary only writes a terminal status --
             # so it is subtracted here rather than counted twice.
@@ -493,7 +726,11 @@ class Job:
             "pending": max(0, sum(1 for i in items if i["status"] == "pending") - running),
             "running": running,
             "done": self._done.is_set(),
-            "cancelled": self._cancel.is_set(),
+            "cancelled": self._control.cancelled,
+            # Why the job stopped claiming items, in the user's words; the
+            # Queue shows it with Open Settings and Resume (plan 1.5).
+            "paused": self._control.paused,
+            "pause_reason": self._control.pause_reason if self._control.paused else "",
         }
 
 

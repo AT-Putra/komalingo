@@ -35,6 +35,9 @@ import io
 import json
 import os
 import random
+import re
+import socket
+import ssl
 import threading
 import urllib.error
 import urllib.request
@@ -178,26 +181,152 @@ class SettingsError(ValueError):
     """
 
 
-class ProviderError(RuntimeError):
-    """Carries the provider's own words to the UI. See AC-8."""
+# -- failure kinds -------------------------------------------------------------
+#
+# What a failed request MEANS for the run, decided where the error is raised.
+# The pipeline reads only this: an `account` failure pauses the whole job
+# (every page would fail the same way), the other four skip one page and the
+# run goes on. `outage` and `bad_reply` are worth one more try; the others
+# are the same answer the second time.
+#
+#   account    the key, the credit, the model name or the endpoint is wrong
+#   refused    the provider or the model declined this page's content
+#   rejected   this request was refused for something other than content
+#              (an image the provider cannot decode, a body too large)
+#   outage     not now: a timeout, a rate limit, a 5xx
+#   bad_reply  a 200 that is not a usable translation: prose, cut off, empty,
+#              the wrong shape, a proxy's login page
+ACCOUNT, REFUSED, REJECTED, OUTAGE, BAD_REPLY = (
+    "account", "refused", "rejected", "outage", "bad_reply")
+KINDS = (ACCOUNT, REFUSED, REJECTED, OUTAGE, BAD_REPLY)
 
-    def __init__(self, status: int, body: str, url: str = ""):
+# Read ONLY in the provider's error object or a non-JSON error body -- never
+# in a reply's content, which is text the model wrote about the page (a
+# credits page says "Credits"; a line of dialogue can say "Safety first").
+# Words, lower case. Provider wording drifts; every entry has a case in
+# check_skip's [kinds] table, so a change here is a change there.
+_ACCOUNT_WORDS = (
+    "api_key_invalid", "invalid_api_key", "invalid api key", "incorrect api key",
+    "api key not valid", "insufficient_quota", "billing", "credits", "credit balance",
+    "permission_denied", "location is not supported",
+)
+_REFUSAL_WORDS = (
+    "content_policy", "content policy", "content_filter", "content management policy",
+    "responsibleaipolicyviolation", "moderation", "flagged", "safety", "prohibited",
+)
+# finish_reason values that mean the provider withheld the reply.
+_REFUSAL_FINISH = {"content_filter", "safety", "prohibited_content", "recitation",
+                   "blocklist", "spii"}
+# Keys under which a provider echoes the REQUEST back inside its error --
+# OpenRouter's moderation 403 carries the flagged input, which is the user's
+# OCR text. Matching words in it would let a page that says "Credits" turn a
+# refusal into an account problem.
+_ECHO_KEYS = {"flagged_input", "prompt", "messages", "input"}
+
+
+def _scrub(obj):
+    if isinstance(obj, dict):
+        return {k: _scrub(v) for k, v in obj.items() if str(k).lower() not in _ECHO_KEYS}
+    if isinstance(obj, list):
+        return [_scrub(v) for v in obj]
+    return obj
+
+
+def _error_payload(body: str):
+    """(the error object, its text to match), echoes removed.
+
+    The `error` member when the body has one (OpenAI, OpenRouter, Gemini's
+    OpenAI-compatible surface), the whole JSON otherwise, the raw text for a
+    body that is not JSON (a gateway's HTML page).
+    """
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None, body[:4000].lower()
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        data = data[0]  # Gemini's native surface wraps the error in a list
+    obj = data.get("error", data) if isinstance(data, dict) else data
+    obj = _scrub(obj)
+    return obj, json.dumps(obj, ensure_ascii=False).lower()
+
+
+def _moderation_reasons(obj) -> bool:
+    """OpenRouter puts the moderation categories in error.metadata.reasons."""
+    meta = obj.get("metadata") if isinstance(obj, dict) else None
+    return isinstance(meta, dict) and bool(meta.get("reasons"))
+
+
+def error_kind(status: int, body: str) -> str:
+    """The kind of a failed HTTP exchange, from its status and error body.
+
+    Order matters and is the whole design: an account problem first (it
+    would fail every page), then moderation, then what the bare status says.
+    A 429 is a busy minute unless it says insufficient_quota -- Gemini's
+    per-minute limit says "Quota exceeded" and, on some tiers, "check your
+    plan and billing details" too, and pausing a run on a busy minute would
+    be the wrong call.
+    """
+    obj, text = _error_payload(body or "")
+    if status in (401, 402):
+        return ACCOUNT
+    if status == 429:
+        return ACCOUNT if "insufficient_quota" in text else OUTAGE
+    # Structured moderation first: a moderation message that happens to
+    # mention credits ("no credits were used") is still a refusal.
+    if _moderation_reasons(obj):
+        return REFUSED
+    if any(w in text for w in _ACCOUNT_WORDS):
+        return ACCOUNT
+    # "safety" is a moderation word, but `safety_settings` is a request
+    # FIELD -- a 400 rejecting it is a malformed request, and reading it as
+    # a refusal would stamp a refusal marker on every page of the run.
+    moderation_text = re.sub(r"safety_?settings?", "", text)
+    if any(w in moderation_text for w in _REFUSAL_WORDS):
+        return REFUSED
+    if status in (403, 404):
+        return ACCOUNT
+    if status in (0, 408) or status >= 500:
+        return OUTAGE
+    if 400 <= status < 500:
+        return REJECTED
+    # A 2xx whose body is an error object nobody recognised.
+    return BAD_REPLY
+
+
+def _error_object_kind(error) -> str:
+    """The kind of an error object that arrived with status 200 -- inside a
+    stream, or as a body with no choices. Its own `code`, when it is an HTTP
+    status, stands in for the status the transport never sent."""
+    code = error.get("code") if isinstance(error, dict) else None
+    status = int(code) if isinstance(code, (int, str)) and str(code).isdigit() else 200
+    if not 400 <= status <= 599:
+        status = 200
+    return error_kind(status, json.dumps({"error": error}, ensure_ascii=False))
+
+
+class ProviderError(RuntimeError):
+    """Carries the provider's own words to the UI. See AC-8.
+
+    `kind` is one of KINDS and is set where the error is raised; when a
+    caller does not say, it is read from the status and body.
+    """
+
+    def __init__(self, status: int, body: str, url: str = "", kind: str | None = None):
         self.status = status
         self.body = body
         self.url = url
+        self.kind = kind or error_kind(status, body)
         super().__init__(f"HTTP {status}: {body}")
 
     @property
     def transient(self) -> bool:
         """Whether the same request, sent again, has a real chance.
 
-        0 is the transport: a timeout, a reset, a refused connection. 200 is
-        a reply that arrived and was unusable -- cut off mid-JSON, an error
-        event inside a stream, a proxy's login page. 408 and 429 and every
-        5xx are the provider saying "not now". A 401 or a 400 is the REQUEST
-        that is wrong, and a second copy of it is wrong the same way.
+        An outage is "not now" and a bad reply is often one garbled answer
+        (cut off mid-JSON, a proxy page). An account problem, a refusal and a
+        rejected request are the same answer the second time.
         """
-        return self.status in (0, 200, 408, 429) or self.status >= 500
+        return self.kind in (OUTAGE, BAD_REPLY)
 
 
 def _timed_out() -> str:
@@ -227,7 +356,8 @@ def _decode_reply(raw: bytes, content_type: str, status: int, url: str):
     try:
         return json.loads(text)
     except ValueError:
-        raise ProviderError(status, f"reply was not JSON: {text[:400]}", url) from None
+        raise ProviderError(status, f"reply was not JSON: {text[:400]}", url,
+                            kind=BAD_REPLY) from None
 
 
 def _from_event_stream(text: str, status: int, url: str) -> dict:
@@ -238,7 +368,7 @@ def _from_event_stream(text: str, status: int, url: str) -> dict:
     the non-streaming shape. An `error` event is the provider refusing
     mid-stream and is raised in its own words.
     """
-    parts, finish, meta, events = [], None, {}, 0
+    parts, refusals, finish, meta, events = [], [], None, {}, 0
     for line in text.splitlines():
         if not line.startswith("data:"):
             continue  # blank separators, `event:` and `: keep-alive` comments
@@ -248,25 +378,38 @@ def _from_event_stream(text: str, status: int, url: str) -> dict:
         try:
             chunk = json.loads(data)
         except ValueError:
-            raise ProviderError(status, f"stream event was not JSON: {data[:400]}", url) from None
+            raise ProviderError(status, f"stream event was not JSON: {data[:400]}", url,
+                                kind=BAD_REPLY) from None
+        if not isinstance(chunk, dict):
+            raise ProviderError(status, f"stream event was not an object: {data[:400]}", url,
+                                kind=BAD_REPLY)
         events += 1
         if chunk.get("error"):
-            raise ProviderError(status, json.dumps(chunk["error"], ensure_ascii=False), url)
+            raise ProviderError(status, json.dumps(chunk["error"], ensure_ascii=False), url,
+                                kind=_error_object_kind(chunk["error"]))
         meta = meta or {k: chunk[k] for k in ("id", "model") if k in chunk}
         for choice in chunk.get("choices") or []:
-            if choice.get("index", 0) != 0:
+            if not isinstance(choice, dict) or choice.get("index", 0) != 0:
                 continue
-            piece = (choice.get("delta") or choice.get("message") or {}).get("content")
+            body = choice.get("delta") or choice.get("message") or {}
+            if not isinstance(body, dict):
+                continue
+            if isinstance(body.get("refusal"), str):
+                refusals.append(body["refusal"])
+            piece = body.get("content")
             if isinstance(piece, list):
                 piece = "".join(p.get("text", "") for p in piece if isinstance(p, dict))
             if isinstance(piece, str):
                 parts.append(piece)
             finish = choice.get("finish_reason") or finish
     if not events:
-        raise ProviderError(status, f"reply was an empty event stream: {text[:400]}", url)
+        raise ProviderError(status, f"reply was an empty event stream: {text[:400]}", url,
+                            kind=BAD_REPLY)
+    message = {"role": "assistant", "content": "".join(parts)}
+    if "".join(refusals).strip():
+        message["refusal"] = "".join(refusals)  # _parse reads it as a refusal
     return dict(meta, object="chat.completion", choices=[
-        {"index": 0, "message": {"role": "assistant", "content": "".join(parts)},
-         "finish_reason": finish}])
+        {"index": 0, "message": message, "finish_reason": finish}])
 
 
 def image_data_url(data: bytes) -> str:
@@ -307,6 +450,9 @@ class LLMClient:
         # text_only_reason: one says "this model cannot read images", the
         # other says "nobody found out".
         self.probe_error = ""
+        # ACCOUNT when the probe could not run because the provider refused
+        # the key, the credit or the model: the job pauses on it.
+        self.probe_error_kind = ""
 
     # -- transport ---------------------------------------------------------
 
@@ -340,11 +486,17 @@ class LLMClient:
                     # held slot. This is the whole of AC-8: the status
                     # alone tells the user nothing actionable.
                     body = e.read().decode("utf-8", "replace")
-                    raise ProviderError(e.code, body, url) from None
+                    raise ProviderError(e.code, body, url, kind=error_kind(e.code, body)) from None
         except urllib.error.URLError as e:
             if isinstance(e.reason, TimeoutError):
-                raise ProviderError(0, _timed_out(), url) from None
-            raise ProviderError(0, f"{type(e.reason).__name__}: {e.reason}", url) from None
+                raise ProviderError(0, _timed_out(), url, kind=OUTAGE) from None
+            # Nothing is listening there, or the name does not resolve: the
+            # base URL is wrong or the local server is not running, and every
+            # page would fail the same way -- the job pauses on it instead of
+            # skipping page after page.
+            kind = ACCOUNT if isinstance(e.reason, (ConnectionRefusedError, socket.gaierror)) else OUTAGE
+            raise ProviderError(0, f"{type(e.reason).__name__}: {e.reason}", url,
+                                kind=kind) from None
         except TimeoutError:
             # urlopen wraps a timeout it hits while CONNECTING in URLError,
             # caught above. A timeout during r.read() -- headers arrived, then
@@ -355,11 +507,15 @@ class LLMClient:
             # Measured 2026-09-15 on a gateway that sent status 200 and then
             # stopped. The user's provider stalled; that is a 502 in the
             # provider's words, not a bug in the sidecar.
-            raise ProviderError(0, _timed_out(), url) from None
+            raise ProviderError(0, _timed_out(), url, kind=OUTAGE) from None
         except ConnectionError as e:
             # Same seam: a reset or a dropped connection mid-body is an
             # OSError that urllib does not wrap once urlopen has returned.
-            raise ProviderError(0, f"{type(e).__name__}: {e}", url) from None
+            raise ProviderError(0, f"{type(e).__name__}: {e}", url, kind=OUTAGE) from None
+        except ssl.SSLError as e:
+            # An OSError that is not a ConnectionError: a TLS EOF while the
+            # body is read. Uncaught it failed the whole chapter (review M4).
+            raise ProviderError(0, f"{type(e).__name__}: {e}", url, kind=OUTAGE) from None
         except http.client.InvalidURL as e:
             # The two errors this module raises say different things, and a
             # malformed base URL belongs on the ValueError side: nothing is
@@ -379,7 +535,7 @@ class LLMClient:
             # RemoteDisconnected that urllib did not wrap. Status 0 because no
             # HTTP status ever arrived; the class name is the only fact there
             # is, and AC-8 says the caller gets that rather than a synonym.
-            raise ProviderError(0, f"{type(e).__name__}: {e}", url) from None
+            raise ProviderError(0, f"{type(e).__name__}: {e}", url, kind=OUTAGE) from None
 
     async def _call(self, path, payload):
         """The only way out to the provider. _request holds the gate for the
@@ -456,13 +612,44 @@ class LLMClient:
         is treated as "" rather than raising -- a provider that answers with a
         number for one region does not get to fail the page. The string
         "null" is the null -- see is_null_word.
+
+        Every way a 200 can be unusable is a ProviderError with a kind, and
+        nothing here may escape as a KeyError or an IndexError: a body that
+        is only an `error` object (OpenRouter documents one), an empty
+        `choices`, a filtered reply with no `content` (Azure), a `refusal`
+        field. A refusal is read from the STRUCTURED fields only --
+        finish_reason and message.refusal -- never from the content, which
+        is the model's words about the page. A model that refuses in prose
+        with finish_reason=stop is a bad reply here; the pipeline still
+        skips the page, it just gets the one retry a garbled answer gets.
         """
-        choice = reply["choices"][0]
-        raw = choice["message"]["content"]
+        if not isinstance(reply, dict):
+            raise ProviderError(200, f"reply was not a JSON object: {str(reply)[:400]}",
+                                kind=BAD_REPLY)
+        choices = reply.get("choices")
+        if not choices or not isinstance(choices, list):
+            error = reply.get("error")
+            if error is not None:
+                raise ProviderError(200, json.dumps(error, ensure_ascii=False)[:2000],
+                                    kind=_error_object_kind(error))
+            raise ProviderError(200, "reply had no choices: "
+                                f"{json.dumps(reply, ensure_ascii=False)[:400]}", kind=BAD_REPLY)
+        choice: dict = choices[0] if isinstance(choices[0], dict) else {}
+        msg = choice.get("message")
+        message: dict = msg if isinstance(msg, dict) else {}
+        reason = choice.get("finish_reason")
+        raw = message.get("content")
         if isinstance(raw, list):  # some providers return content parts
-            raw = "".join(p.get("text", "") for p in raw)
+            raw = "".join(p.get("text", "") for p in raw if isinstance(p, dict))
         if not isinstance(raw, str):
             raw = "" if raw is None else str(raw)
+        refusal = message.get("refusal")
+        if isinstance(refusal, str) and refusal.strip():
+            raise ProviderError(200, f"the model refused: {refusal[:400]}", kind=REFUSED)
+        if isinstance(reason, str) and reason.lower() in _REFUSAL_FINISH:
+            raise ProviderError(
+                200, f"the provider withheld the reply (finish_reason={reason})"
+                + (f": {raw[:400]}" if raw.strip() else ""), kind=REFUSED)
         # A reply the provider cut off is the common way to get here, and
         # finish_reason says so: "length" is the provider's token cap, and
         # measured 2026-09-15 a gateway returned status 200 with the content
@@ -482,15 +669,31 @@ class LLMClient:
             cut = (" (cut off: finish_reason=length, the provider's token limit)"
                    if reason == "length" else
                    f" (finish_reason={reason})" if reason and reason != "stop" else "")
-            raise ProviderError(200, f"reply was not JSON{cut}: {raw[:400]}") from None
+            raise ProviderError(200, f"reply was not JSON{cut}: {raw[:400]}",
+                                kind=BAD_REPLY) from None
         if not isinstance(parsed, dict):
-            raise ProviderError(200, f"reply was JSON but not an object: {raw[:400]}")
+            raise ProviderError(200, f"reply was JSON but not an object: {raw[:400]}",
+                                kind=BAD_REPLY)
+        translations = parsed.get("translations")
+        if not isinstance(translations, list):
+            # Missing or the wrong type: nothing in it is a translation, and
+            # reading it as "no translations" would paint every bubble empty.
+            raise ProviderError(200, f"reply has no translations list: {raw[:400]}",
+                                kind=BAD_REPLY)
         out = {}
-        for t in parsed.get("translations", []):
+        for t in translations:
+            # One malformed entry does not fail the page: it is skipped, and
+            # its region reads as untranslated like any region left out.
+            if not isinstance(t, dict):
+                continue
+            try:
+                rid = int(t["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
             text = t.get("text", "")
             if is_null_word(text):
                 text = None
-            out[int(t["id"])] = text if text is None or isinstance(text, str) else ""
+            out[rid] = text if text is None or isinstance(text, str) else ""
         return out
 
     async def translate_page(self, regions, page_image: bytes | None = None, *,
@@ -517,6 +720,13 @@ class LLMClient:
         out = {}
         for reply in replies:
             out.update(self._parse(reply))
+        # A well-formed reply that answers NONE of the regions it was asked
+        # about -- {"translations": []}, a JSON-mode refusal -- would paint
+        # every bubble empty and cache the blanks for good (review M1).
+        asked = {r.id for r in regions}
+        if asked and not asked & set(out):
+            raise ProviderError(200, "the reply translated none of the regions it was asked "
+                                     "about", kind=BAD_REPLY)
         return out
 
     async def retranslate_capped(self, items) -> dict:
@@ -597,9 +807,18 @@ class LLMClient:
             ],
         }
         self.probe_error = ""
+        self.probe_error_kind = ""
         try:
             reply = await self._call("/chat/completions", payload)
         except ProviderError as e:
+            if e.kind == ACCOUNT:
+                # Checked BEFORE the image-refused statuses: Gemini answers a
+                # bad key with 400 API_KEY_INVALID, and a 400 used to latch
+                # the job text-only and send every page without its image.
+                # It says nothing about vision. The job pauses on it instead.
+                self.probe_error = f"the provider refused the account (HTTP {e.status}: {e.body[:200]!r})"[:400]
+                self.probe_error_kind = ACCOUNT
+                return False
             if e.status in self._IMAGE_REFUSED:
                 self.text_only = True
                 self.text_only_reason = (
