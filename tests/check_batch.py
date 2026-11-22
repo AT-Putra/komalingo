@@ -78,6 +78,13 @@ FOLDER = [
     ("slip.cbz",       "archives/slip.cbz",            "archive",  job.SKIPPED, safety.PARENT_TRAVERSAL),
     ("notes.txt",      None,                           "unsupported", job.SKIPPED, "unsupported file type .txt"),
 ]
+# What the folder BECOMES. Since the skip-pages plan's folder rule (1.1), the
+# loose images in a folder are ONE chapter item named after the folder --
+# `in`, two pages, in natural order -- and every other file is its own item.
+IMAGES_ITEM = "in"
+ITEMS = {name: (kind, status, want) for name, _f, kind, status, want in FOLDER
+         if kind != "image"}
+ITEMS[IMAGES_ITEM] = ("images", job.OK, sum(1 for row in FOLDER if row[2] == "image"))
 NATURAL_ORDER = ["ch2.png", "ch10.png", "corrupt.cbz", "notes.txt", "scan.pdf",
                  "slip.cbz", "vol1.cbz", "vol2.cb7"]
 DOTFILE = ".DS_Store"
@@ -168,18 +175,22 @@ def check_statuses(c, src, out, stub):
     c.check(snapshots > 0, f"status() was polled mid-run without raising ({snapshots} snapshots)")
 
     items = {i["item_id"]: i for i in status["items"]}
-    c.check(sorted(items) == sorted(n for n, *_ in FOLDER),
-            f"every file in the folder is an item ({sorted(items)})")
+    c.check(sorted(items) == sorted(ITEMS),
+            f"every file in the folder is an item, its loose images one chapter "
+            f"({sorted(items)})")
     c.check(all(i["status"] in (job.OK, job.SKIPPED, job.FAILED) for i in status["items"]),
             "every item has a terminal status -- the job did not abort")
-    for name, _fixture, kind, want_status, want in FOLDER:
+    for name, (kind, want_status, want) in ITEMS.items():
         item = items[name]
         c.check(item["kind"] == kind, f"{name}: kind {item['kind']} == {kind}")
         if want_status == job.OK:
             c.check(item["status"] == job.OK and item["pages"] == want,
                     f"{name}: OK with {want} pages ({item['status']}, {item['pages']}, "
                     f"{item['reason']!r})")
-            c.check(bool(item["output"]) and os.path.isfile(item["output"]),
+            # A chapter of loose pages has no archive: its output is the
+            # folder of translated pages.
+            on_disk = os.path.isdir if kind == "images" else os.path.isfile
+            c.check(bool(item["output"]) and on_disk(item["output"]),
                     f"{name}: output on disk ({item['output']})")
         elif want_status is None:
             c.check(item["status"] in (job.SKIPPED, job.FAILED) and item["reason"],
@@ -189,10 +200,10 @@ def check_statuses(c, src, out, stub):
             c.check(item["status"] == want_status and want in item["reason"],
                     f"{name}: {want_status} with {want!r} in the reason "
                     f"({item['status']}: {item['reason']!r})")
-    ok = sum(1 for _n, _f, _k, s, _w in FOLDER if s == job.OK)
+    ok = sum(1 for _k, st, _w in ITEMS.values() if st == job.OK)
     c.check(status["ok"] == ok, f"ok count {status['ok']} == {ok}")
-    c.check(status["ok"] + status["skipped"] + status["failed"] == len(FOLDER),
-            f"ok + skipped + failed == {len(FOLDER)} "
+    c.check(status["ok"] + status["skipped"] + status["failed"] == len(ITEMS),
+            f"ok + skipped + failed == {len(ITEMS)} "
             f"({status['ok']} + {status['skipped']} + {status['failed']})")
 
     # -- progress -----------------------------------------------------------
@@ -474,9 +485,14 @@ def check_probe_wiring(c, src, out, stub):
     c.check(any("could not run (HTTP 500" in w for w in status["warnings"]),
             f"[probe] and the warning says the probe could not RUN, not that the "
             f"model is text-only ({status['warnings']})")
-    c.check(all(i["status"] == job.FAILED for i in status["items"]),
-            f"[probe] and the item fails with the provider's own error rather "
-            f"than degrading silently ({[(i['status'], i['reason'][:50]) for i in status['items']]})")
+    # Since the skip-pages plan (1.3, 1.5): a 500 on every page skips each
+    # page and, three in a row, PAUSES the job with the reason -- still loud,
+    # still not a silent degrade, and no longer the whole chapter thrown away.
+    c.check(status["paused"] and "in a row" in status["pause_reason"]
+            and all(i["status"] == job.PAUSED for i in status["items"]),
+            f"[probe] and the job pauses after pages fail in a row rather than "
+            f"degrading silently ({status['pause_reason'][:60]!r}, "
+            f"{[(i['status'], i['reason'][:50]) for i in status['items']]})")
 
     # -- the single-file routes probe too -----------------------------------
     # The image goes out on every route; only Job probed. /api/item is the

@@ -149,6 +149,7 @@ PHASE_ORDER = [
     "check_pdf",
     "check_batch",
     "check_cancel",
+    "check_skip",
 ]
 
 # Real-panel fixtures are git-ignored. Their presence is what separates a
