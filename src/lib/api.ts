@@ -158,6 +158,34 @@ export interface PageRecord {
    */
   archive_stale?: boolean;
   repack?: RepackStatus | null;
+  /**
+   * Present when the page was NOT translated: the model refused it or the
+   * provider failed on it, and the original page sits in its slot. `message`
+   * is one plain sentence; `detail` is the provider's own reply, verbatim.
+   */
+  skipped?: PageSkip | null;
+  /** The pair the user chose for this page: another model, no image, or by hand. */
+  choice?: { model: string; mode: "vision" | "model" | "text_only" | "manual" } | null;
+}
+
+/** Why a page was skipped, as the sidecar recorded it. */
+export interface PageSkip {
+  kind: "refused" | "bad_reply" | "outage" | "rejected" | string;
+  message: string;
+  detail: string;
+  status?: number;
+  model?: string;
+  with_image?: boolean;
+  /** Skipped without a request: this model refused the page on an earlier run. */
+  remembered?: boolean;
+}
+
+/** One skipped page of a Queue item. */
+export interface SkippedPage {
+  ordinal: number;
+  member: string | null;
+  kind: string;
+  message: string;
 }
 
 /** Where the archive rebuild after an edit has got to. */
@@ -184,20 +212,30 @@ export interface ItemResult {
    * this is the single-file flow's copy of it.
    */
   vision_warning?: string;
+  /** The run paused (a key, credit or model problem); no pages came back. */
+  paused?: boolean;
+  pause_reason?: string;
 }
 
 /** One row of AC-7's queue: what became of one file in the folder. */
 export interface JobItem {
   path: string;
   item_id: string;
-  kind: "archive" | "pdf" | "image" | "unsupported";
-  status: "pending" | "ok" | "skipped" | "failed" | "cancelled";
+  /** `images` is a chapter of loose page images, named after its folder. */
+  kind: "archive" | "pdf" | "images" | "image" | "unsupported";
+  status: "pending" | "ok" | "skipped" | "failed" | "cancelled" | "paused";
   /** Why it was skipped or failed, in the user's words. Empty when ok. */
   reason: string;
   /** A per-job warning this item raised first (cbr->cbz). */
   warning: string;
   output: string;
   pages: number;
+  /** The reader's page count when it could take one; null for a compressed tar. */
+  pages_total: number | null;
+  /** Pages delivered so far, skipped ones included. */
+  pages_done: number;
+  /** Pages delivered as the original because they could not be translated. */
+  pages_skipped: SkippedPage[];
 }
 
 /** The job's status snapshot, as job.Job.status() returns it. */
@@ -211,10 +249,16 @@ export interface JobStatus {
   failed: number;
   /** AC-13: items stopped by the user at a page boundary, nothing partial left. */
   cancelled_items: number;
+  paused_items: number;
+  /** Skipped pages over every item. */
+  pages_skipped: number;
   pending: number;
   running: number;
   done: boolean;
   cancelled: boolean;
+  /** The job stopped claiming work: an account problem, or pages failing in a row. */
+  paused: boolean;
+  pause_reason: string;
 }
 
 /** The page cache as cache.stats() reports it. */
@@ -338,6 +382,9 @@ export const api = {
     /** Items not yet started are skipped; a running item finishes (Phase 9 stops it). */
     cancel: (jobId: string) =>
       call<JobStatus>(`/api/job/${encodeURIComponent(jobId)}/cancel`, "POST"),
+    /** A paused job goes on under the same id, with the settings as they are now. */
+    resume: (jobId: string, settings?: ProviderSettings) =>
+      call<JobStatus>(`/api/job/${encodeURIComponent(jobId)}/resume`, "POST", { settings }),
   },
 };
 
@@ -395,6 +442,11 @@ export function loadSettings(): ProviderSettings {
   // No defaults. An empty base URL is what "not configured yet" looks like;
   // a default here would be a credential baked into the shipped app.
   return { base_url: "", api_key: "", model: "" };
+}
+
+/** A base URL and a model: what a run needs. The key may stay empty. */
+export function providerConfigured(s: ProviderSettings = loadSettings()): boolean {
+  return s.base_url.trim() !== "" && s.model.trim() !== "";
 }
 
 export function saveSettings(s: ProviderSettings): void {

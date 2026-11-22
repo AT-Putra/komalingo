@@ -35,6 +35,8 @@ export default function Translate({
   onForm,
   busy,
   sidecarReady,
+  configured,
+  onOpenSettings,
   onRunItem,
   onRunFolder,
   error,
@@ -46,6 +48,10 @@ export default function Translate({
   onForm: (patch: Partial<TranslateForm>) => void;
   busy: Busy;
   sidecarReady: boolean;
+  /** A base URL and a model are set. Without them nothing may run: the
+   *  sidecar's offline path would type "HELLO" into every bubble. */
+  configured: boolean;
+  onOpenSettings: () => void;
   onRunItem: () => void;
   onRunFolder: () => void;
   error: string;
@@ -55,7 +61,7 @@ export default function Translate({
    *  page count until it returns, so this is the honest counter. */
   pagesDone: number;
 }) {
-  const locked = busy !== "" || !sidecarReady;
+  const locked = busy !== "" || !sidecarReady || !configured;
   const canItem = !locked && form.src.trim() !== "" && form.dest.trim() !== "";
   const canFolder = !locked && form.folder.trim() !== "" && form.dest.trim() !== "";
 
@@ -85,6 +91,15 @@ export default function Translate({
         </div>
       </div>
 
+      {!configured && busy === "" && (
+        <Alert tone="warn" title="Set up a model first">
+          Translating needs an endpoint and a model.{" "}
+          <button type="button" className="btn sm" onClick={onOpenSettings}>
+            <Icon name="sliders" size={14} />
+            Open Settings
+          </button>
+        </Alert>
+      )}
       {error && <Alert tone="error">{error}</Alert>}
       {warnings.map((w) => (
         <Alert key={w} tone="warn">

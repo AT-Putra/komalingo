@@ -17,7 +17,14 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { Alert } from "../components/Alert";
 import { Icon, type IconName } from "../components/Icon";
 import { ProgressBar } from "../components/Progress";
-import { api, describeError, type JobItem, type JobStatus } from "../lib/api";
+import {
+  api,
+  describeError,
+  loadSettings,
+  providerConfigured,
+  type JobItem,
+  type JobStatus,
+} from "../lib/api";
 
 const POLL_MS = 500;
 
@@ -27,7 +34,23 @@ const PILL: Record<JobItem["status"], { icon: IconName; text: string }> = {
   skipped: { icon: "skip-forward", text: "Skipped" },
   failed: { icon: "alert-circle", text: "Failed" },
   cancelled: { icon: "ban", text: "Cancelled" },
+  paused: { icon: "pause", text: "Paused" },
 };
+
+/** "3 pages skipped: 2, 5, 9" -- the pages the review will list. */
+function skippedSummary(item: JobItem): string {
+  const n = item.pages_skipped?.length ?? 0;
+  if (n === 0) return "";
+  const pages = item.pages_skipped.map((p) => p.ordinal).join(", ");
+  return `${n} ${n === 1 ? "page" : "pages"} skipped: ${pages}`;
+}
+
+/** Pages done of the total while the item runs; the final count after. */
+function pagesCell(item: JobItem, running: boolean): string {
+  if (running && item.pages_total) return `${item.pages_done ?? 0} / ${item.pages_total}`;
+  if (running && item.pages_done) return String(item.pages_done);
+  return item.pages ? String(item.pages) : "";
+}
 
 function StatusPill({ status, running }: { status: JobItem["status"]; running: boolean }) {
   if (running) {
@@ -51,14 +74,17 @@ export default function Job({
   jobId,
   initial,
   runningItems,
+  onOpenSettings,
 }: {
   jobId: string;
   initial: JobStatus;
   /** Item ids between an item_start and its item_done, from the event stream. */
   runningItems: Set<string>;
+  onOpenSettings: () => void;
 }) {
   const [status, setStatus] = useState<JobStatus>(initial);
   const [error, setError] = useState("");
+  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     if (status.done) return;
@@ -83,9 +109,33 @@ export default function Job({
     }
   }
 
+  /** Resume with the settings as they are NOW -- the pause was most often a
+   *  key or a model fixed in Settings since. The fresh status is not done,
+   *  so the polling effect above starts again on it. */
+  async function resume() {
+    setResuming(true);
+    setError("");
+    try {
+      const settings = loadSettings();
+      setStatus(await api.job.resume(jobId, providerConfigured(settings) ? settings : undefined));
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setResuming(false);
+    }
+  }
+
   const total = status.items.length;
   const finished = status.ok + status.skipped + status.failed + status.cancelled_items;
-  const state = status.done ? "done" : status.cancelled ? "cancelling" : "running";
+  const state = status.paused
+    ? status.done
+      ? "paused"
+      : "pausing"
+    : status.done
+      ? "done"
+      : status.cancelled
+        ? "cancelling"
+        : "running";
 
   return (
     <div className="view stack">
@@ -107,13 +157,19 @@ export default function Job({
               Cancelling…
             </span>
           )}
+          {(state === "paused" || state === "pausing") && (
+            <span className="pill skipped">
+              <Icon name={state === "paused" ? "pause" : "loader"} size={12} />
+              {state === "paused" ? "Paused" : "Pausing…"}
+            </span>
+          )}
           {state === "done" && (
             <span className="pill ok">
               <Icon name="check" size={12} />
               Done
             </span>
           )}
-          {!status.done && (
+          {(!status.done || state === "paused") && (
             <button className="btn danger sm" onClick={cancel} disabled={status.cancelled}>
               <Icon name="x" size={14} />
               Cancel remaining
@@ -123,6 +179,31 @@ export default function Job({
       </div>
 
       {error && <Alert tone="error">{error}</Alert>}
+      {status.paused && (
+        <Alert tone="warn" title={state === "paused" ? "The run is paused" : "Pausing…"}>
+          {status.pause_reason}
+          {state === "paused" && (
+            <span className="row" style={{ marginTop: 8 }}>
+              {/* Disabled until a model is set: the sidecar answers 400 for a
+                  resume without settings, rather than run the placeholder. */}
+              <button
+                type="button"
+                className="btn primary sm"
+                onClick={resume}
+                disabled={resuming || !providerConfigured()}
+                title={providerConfigured() ? undefined : "Set up a model in Settings first"}
+              >
+                <Icon name={resuming ? "loader" : "play"} size={14} className={resuming ? "spin" : undefined} />
+                {resuming ? "Resuming…" : "Resume"}
+              </button>
+              <button type="button" className="btn sm" onClick={onOpenSettings}>
+                <Icon name="sliders" size={14} />
+                Open Settings
+              </button>
+            </span>
+          )}
+        </Alert>
+      )}
       {status.warnings.map((w) => (
         <Alert key={w} tone="warn">
           {w}
@@ -159,6 +240,12 @@ export default function Job({
             <div className="k">Failed</div>
             <div className="v">{status.failed}</div>
           </div>
+          {status.pages_skipped > 0 && (
+            <div className="stat skipped" style={{ "--i": 4 } as CSSProperties}>
+              <div className="k">Pages skipped</div>
+              <div className="v">{status.pages_skipped}</div>
+            </div>
+          )}
           {status.cancelled_items > 0 && (
             <div className="stat" style={{ "--i": 4 } as CSSProperties}>
               <div className="k">Cancelled</div>
@@ -194,8 +281,12 @@ export default function Job({
                     running={item.status === "pending" && runningItems.has(item.item_id)}
                   />
                 </td>
-                <td className="num">{item.pages || ""}</td>
-                <td className="reason">{item.reason || item.warning}</td>
+                <td className="num">
+                  {pagesCell(item, item.status === "pending" && runningItems.has(item.item_id))}
+                </td>
+                <td className="reason">
+                  {[item.reason || item.warning, skippedSummary(item)].filter(Boolean).join(" · ")}
+                </td>
               </tr>
             ))}
             {status.items.length === 0 && (

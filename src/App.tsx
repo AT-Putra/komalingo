@@ -14,6 +14,7 @@ import {
   onExit,
   onLog,
   onProgress,
+  providerConfigured,
   type ItemResult,
   type JobStatus,
   type PageRecord,
@@ -223,7 +224,19 @@ export default function App() {
     };
   }, []);
 
+  /**
+   * A run with no provider configured is refused here. The sidecar still has
+   * its offline path -- the checks use it -- but from the UI that path wrote
+   * "HELLO" into every bubble of the user's chapter and called it done.
+   */
+  function refuseUnconfigured(): boolean {
+    if (providerConfigured()) return false;
+    setError("No model is set up yet. Open Settings, enter the endpoint and a model, then run again.");
+    return true;
+  }
+
   async function runItem() {
+    if (refuseUnconfigured()) return;
     setBusy("item");
     setError("");
     setPagesDone(0);
@@ -245,6 +258,13 @@ export default function App() {
         lang: form.lang,
         settings: settings.base_url && settings.model ? settings : undefined,
       });
+      if (result.paused) {
+        // The provider refused the key, the credit or the model: no page got
+        // through. The pages that did are cached, so running again resumes.
+        setError(`The run paused: ${result.pause_reason || "the provider refused the account"}. ` +
+          "Fix it in Settings, then run the chapter again; finished pages are not redone.");
+        return;
+      }
       setJob(result);
       setPage(result.pages[0] ?? null);
       setView("spotfix");
@@ -257,6 +277,7 @@ export default function App() {
 
   /** AC-7: every file in the folder, through the queue; the Job view polls. */
   async function runFolder() {
+    if (refuseUnconfigured()) return;
     setBusy("folder");
     setError("");
     setPagesDone(0);
@@ -294,7 +315,14 @@ export default function App() {
     );
   }
 
-  const failedPages = job?.pages.filter((p) => p.fit_summary.fit_failed.length > 0).length ?? 0;
+  // Guarded: this runs outside the per-view ErrorBoundary, so a page record
+  // without a fit summary would blank the whole window rather than one view.
+  const failedPages =
+    job?.pages.filter((p) => (p.fit_summary?.fit_failed?.length ?? 0) > 0).length ?? 0;
+  // A run is live while a request is out or an item is between its start and
+  // done lines. Outside that, the strip says Idle instead of the last stage
+  // it happened to see ("write · page 3 of 3" long after the run ended).
+  const runActive = busy !== "" || runningItems.size > 0;
 
   const NAV: { id: View; label: string; icon: IconName; disabled?: boolean; badge?: ReactNode }[] = [
     { id: "translate", label: "Translate", icon: "languages" },
@@ -384,7 +412,13 @@ export default function App() {
           {view === "settings" ? (
             <Settings />
           ) : view === "job" && batch ? (
-            <Job key={batch.job_id} jobId={batch.job_id} initial={batch} runningItems={runningItems} />
+            <Job
+              key={batch.job_id}
+              jobId={batch.job_id}
+              initial={batch}
+              runningItems={runningItems}
+              onOpenSettings={() => setView("settings")}
+            />
           ) : view === "spotfix" && job && page ? (
             <SpotFix
               job={job.job_id}
@@ -401,6 +435,8 @@ export default function App() {
               onForm={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
               busy={busy}
               sidecarReady={sidecar === "ready"}
+              configured={providerConfigured()}
+              onOpenSettings={() => setView("settings")}
               onRunItem={runItem}
               onRunFolder={runFolder}
               error={error}
@@ -434,7 +470,7 @@ export default function App() {
           </span>
         </div>
         <div className="live" aria-live="polite">
-          {progress && progress.stage !== "item_done" ? (
+          {runActive && progress && progress.stage !== "item_done" ? (
             <>
               <span className="text">
                 <strong>{stageWord(progress.stage)}</strong>
@@ -450,7 +486,7 @@ export default function App() {
                 <ProgressBar label="Current page" value={progress.pct} size="sm" />
               </span>
             </>
-          ) : progress?.stage === "item_done" ? (
+          ) : runActive && progress?.stage === "item_done" ? (
             <span className="text">
               <strong>done</strong> · {progress.item}
             </span>
