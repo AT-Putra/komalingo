@@ -12,7 +12,7 @@
  * Nothing here is a fixture for the checks. tests/ never imports it.
  */
 
-import type { ItemResult, JobStatus, PageRecord, Region } from "../lib/api";
+import type { ItemPages, JobStatus, PageRecord, Region, RetryStatus } from "../lib/api";
 
 type Callback = (e: { event: string; id: number; payload: unknown }) => void;
 
@@ -192,10 +192,13 @@ function skippedPage(item_id: string, n: number): PageRecord {
 }
 
 const jobs = new Map<string, JobStatus>();
+// Every finished item's page records, by `${job}/${item}`.
+const itemPages = new Map<string, PageRecord[]>();
+const retries = new Map<string, RetryStatus>();
 // Items whose page `n` the mock model refuses, and the one item that makes
 // the provider refuse the ACCOUNT -- so the Queue's skipped counts and its
 // pause banner can both be seen in a browser.
-const REFUSED_PAGES: Record<string, number[]> = { v02: [2] };
+const REFUSED_PAGES: Record<string, number[]> = { v02: [2], ch05: [1, 2] };
 const PAUSES_ON = "v04";
 
 async function runJob(job: JobStatus) {
@@ -248,6 +251,14 @@ async function runJob(job: JobStatus) {
       }
     }
     job.running--;
+    itemPages.set(
+      `${job.job_id}/${item.item_id}`,
+      Array.from({ length: item.pages }, (_, k) =>
+        REFUSED_PAGES[item.item_id]?.includes(k + 1)
+          ? skippedPage(item.item_id, k + 1)
+          : fakePage(item.item_id, k + 1),
+      ),
+    );
     if (item.item_id.includes("corrupt")) {
       item.status = "failed";
       item.reason = "zip: central directory not found";
@@ -301,19 +312,91 @@ async function api(path: string, method: string, body: Record<string, unknown> |
       pixels_changed_in_polygon: {},
     };
   }
-  if (path === "/api/item") {
-    const job_id = String(body?.job_id);
-    const item_id = "chapter-01";
-    emit("sidecar-log", `INFO opening ${body?.src_path}`);
-    await sleep(600);
-    await runPages(item_id, 3, 700);
-    const result: ItemResult = {
-      job_id,
-      item_id,
-      pages: [1, 2, 3].map((n) => (n === 2 ? skippedPage(item_id, n) : fakePage(item_id, n))),
+  const itemRoute = path.match(/^\/api\/job\/([^/]+)\/item\/([^/]+)$/);
+  if (itemRoute) {
+    const jobId = decodeURIComponent(itemRoute[1]);
+    const itemId = decodeURIComponent(itemRoute[2]);
+    const job = jobs.get(jobId);
+    const it = job?.items.find((i) => i.item_id === itemId);
+    if (!job || !it) throw { status: 404, body: '{"error":"no such item"}' };
+    const result: ItemPages = {
+      job_id: jobId,
+      item_id: itemId,
+      kind: it.kind,
+      status: it.status,
+      pages: structuredClone(itemPages.get(`${jobId}/${itemId}`) ?? []),
       cache_warning: null,
+      lang: "en",
+      dest_dir: "C:\\Manga\\translated",
     };
     return result;
+  }
+  if (path === "/api/pages/retry" && method === "POST") {
+    // The mock's model refuses "as-is" again; without the image, or with
+    // another model, the page comes back translated.
+    const key = `${String(body?.job_id)}/${String(body?.item_id)}`;
+    const ordinals = (body?.ordinals as number[]) ?? [];
+    const mode = String(body?.mode) as RetryStatus["mode"];
+    const st: RetryStatus = {
+      status: "running", mode, model: String(body?.model ?? "gpt-4o"),
+      total: ordinals.length, done: 0, pages: [], error: "", kind: "", repack: null,
+    };
+    retries.set(key, st);
+    void (async () => {
+      const job = jobs.get(String(body?.job_id));
+      const it = job?.items.find((i) => i.item_id === String(body?.item_id));
+      const pages = itemPages.get(key) ?? [];
+      for (const n of ordinals) {
+        await sleep(700);
+        const at = pages.findIndex((p) => p.page === n);
+        if (mode === "same") {
+          st.pages.push({ page: n, page_hash: `hash-${n}`, item_id: String(body?.item_id), member: null,
+                          skipped: { ...(pages[at]?.skipped ?? skippedPage("x", n).skipped!) } });
+        } else {
+          const fixed = fakePage(String(body?.item_id), n);
+          fixed.choice = { model: mode === "text_only" ? "gpt-4o#text" : st.model, mode };
+          if (at >= 0) pages[at] = fixed;
+          st.pages.push(fixed);
+          if (it && job) {
+            it.pages_skipped = it.pages_skipped.filter((p) => p.ordinal !== n);
+            job.pages_skipped--;
+          }
+        }
+        st.done++;
+      }
+      st.status = "done";
+    })();
+    return structuredClone(st);
+  }
+  if (path.startsWith("/api/pages/retry")) {
+    const q = new URLSearchParams(path.split("?")[1] ?? "");
+    const st = retries.get(`${q.get("job_id")}/${q.get("item_id")}`);
+    if (!st) throw { status: 404, body: '{"error":"no retry"}' };
+    return structuredClone(st);
+  }
+  if (path === "/api/pages/manual" && method === "POST") {
+    await sleep(600);
+    const key = `${String(body?.job_id)}/${String(body?.item_id)}`;
+    const n = Number(body?.ordinal);
+    const texts = (body?.texts ?? {}) as Record<string, string>;
+    const page = fakePage(String(body?.item_id), n);
+    page.regions = page.regions
+      .filter((r) => texts[String(r.id)])
+      .map((r) => ({ ...r, translation: texts[String(r.id)], typeset: texts[String(r.id)],
+                     edited: true, fit_failed: false, fit_compromised: false }));
+    page.fit_summary = { fit_compromised: [], fit_failed: [], retranslated: [] };
+    page.output = pageImage(n, page.regions);
+    page.choice = { model: "#manual", mode: "manual" };
+    const pages = itemPages.get(key) ?? [];
+    const at = pages.findIndex((p) => p.page === n);
+    if (at >= 0) pages[at] = page;
+    const job = jobs.get(String(body?.job_id));
+    const it = job?.items.find((i) => i.item_id === String(body?.item_id));
+    if (it && job && it.pages_skipped.some((p) => p.ordinal === n)) {
+      it.pages_skipped = it.pages_skipped.filter((p) => p.ordinal !== n);
+      job.pages_skipped--;
+    }
+    return page;
   }
   if (path === "/api/rerender") {
     await sleep(700);
@@ -359,10 +442,14 @@ async function api(path: string, method: string, body: Record<string, unknown> |
   }
   if (path === "/api/job" && method === "POST") {
     const job_id = String(body?.job_id);
+    const added = (body?.paths as string[] | undefined) ?? [];
+    const firstName = added.length
+      ? (added[0].split(/[\\/]/).filter(Boolean).pop() ?? "v01")
+      : "v01";
     const job: JobStatus = {
       job_id,
       items: [
-        { path: "v01.cbz", item_id: "v01", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 4, pages_total: null, pages_done: 0, pages_skipped: [] },
+        { path: firstName, item_id: firstName, kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 4, pages_total: null, pages_done: 0, pages_skipped: [] },
         { path: "v02.cbz", item_id: "v02", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 3, pages_total: null, pages_done: 0, pages_skipped: [] },
         { path: "notes.txt", item_id: "notes", kind: "unsupported", status: "pending", reason: "", warning: "", output: "", pages: 0, pages_total: null, pages_done: 0, pages_skipped: [] },
         { path: "ch05", item_id: "ch05", kind: "images", status: "pending", reason: "", warning: "", output: "", pages: 2, pages_total: null, pages_done: 0, pages_skipped: [] },
@@ -440,6 +527,10 @@ async function api(path: string, method: string, body: Record<string, unknown> |
 };
 
 (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+  metadata: {
+    currentWindow: { label: "main" },
+    currentWebview: { windowLabel: "main", label: "main" },
+  },
   transformCallback(cb: Callback) {
     const id = nextId++;
     callbacks.set(id, cb);
@@ -478,7 +569,12 @@ async function api(path: string, method: string, body: Record<string, unknown> |
         return undefined;
       }
       case "plugin:dialog|open": {
-        const o = (args.options ?? {}) as { directory?: boolean };
+        const o = (args.options ?? {}) as { directory?: boolean; multiple?: boolean };
+        if (o.multiple) {
+          return o.directory
+            ? ["C:\\Manga\\series\\ch05"]
+            : ["C:\\Manga\\series\\v01.cbz", "C:\\Manga\\series\\v02.cbz"];
+        }
         return o.directory ? "C:\\Manga\\series" : "C:\\Manga\\chapter-01.cbz";
       }
       // @tauri-apps/api/path: Settings resolves the bundled sample page and

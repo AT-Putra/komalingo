@@ -748,6 +748,21 @@ def _schedule_item_repack(job_id, item_id, dest_dir, lang, ordinal):
     return None
 
 
+def _still_skipped(found, item_id: str, ordinals: list[int]) -> list[int]:
+    """The ordinals the job's record still lists as skipped. A retry of a
+    page fixed since -- a second click while the first retry finished
+    unseen -- would ask the model again and could overwrite the user's choice
+    or mark a translated page skipped (review). Without the job, all of them."""
+    if found is None:
+        return list(ordinals)
+    with found._lock:
+        item = next((i for i in found.items if i.item_id == item_id), None)
+        if item is None:
+            return list(ordinals)
+        skipped = {p.get("page") for p in item.record.get("pages", []) if p.get("skipped")}
+    return [o for o in ordinals if o in skipped]
+
+
 def _run_retry(req: RetryRequest, client, key, found) -> None:
     st = _retry_runs[key]
     fresh: list[dict] = []
@@ -759,7 +774,7 @@ def _run_retry(req: RetryRequest, client, key, found) -> None:
                 reason = _probed(client)
                 if getattr(client, "probe_error_kind", "") == "account":
                     raise ProviderError(0, reason, kind="account")
-            for ordinal in req.ordinals:
+            for ordinal in _still_skipped(found, req.item_id, req.ordinals):
                 fresh.append(pipeline.retry_page(req.job_id, req.item_id, ordinal, req.dest_dir,
                                                  client, req.lang, req.mode))
                 with _jobs_lock:

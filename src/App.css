@@ -1609,3 +1609,270 @@ td.id {
     display: none;
   }
 }
+
+/* ---------- Phase 3: chapters in, pages that need attention ---------- */
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-6) var(--s-4);
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  text-align: center;
+  transition:
+    border-color var(--dur) var(--ease-out),
+    background-color var(--dur) var(--ease-out);
+}
+.dropzone p {
+  margin: 0;
+}
+.dropzone strong {
+  color: var(--fg);
+}
+.dropzone.over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.input-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.input-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--border);
+}
+.input-list li:last-child {
+  border-bottom: 0;
+}
+.input-list .name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.input-list .where {
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.input-list .kind {
+  font-size: 0.8rem;
+}
+
+.card-head .icon-tile.warn {
+  color: var(--warn-text);
+  background: var(--warn-soft);
+}
+
+.pill.paused {
+  color: var(--warn-text);
+  background: var(--warn-soft);
+  border-color: transparent;
+}
+
+.item-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.item-name svg {
+  color: var(--fg-faint);
+  flex: none;
+}
+td.pages-cell {
+  min-width: 110px;
+}
+td.pages-cell .progress {
+  margin: 6px 0 4px;
+}
+td.pages-cell .num {
+  display: block;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.skip-note {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  color: var(--warn-text);
+}
+td.actions {
+  text-align: right;
+  white-space: nowrap;
+}
+td.actions .btn + .btn {
+  margin-left: var(--s-2);
+}
+
+.attention {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: 0.9rem;
+  color: var(--fg-muted);
+  cursor: pointer;
+  min-height: 32px;
+}
+.attention input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.attention-page {
+  display: grid;
+  grid-template-columns: auto 72px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.attention-page > input {
+  margin-top: 4px;
+}
+.attention-page .thumb {
+  width: 72px;
+  height: 100px;
+  object-fit: cover;
+  object-position: top;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--muted);
+}
+.attention-page .title {
+  font-weight: 600;
+}
+.attention-page .msg {
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+  margin-top: 2px;
+}
+.attention-page details {
+  margin-top: var(--s-2);
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+}
+.attention-page summary {
+  cursor: pointer;
+}
+.attention-page.ok {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+.attention-page.ok .msg {
+  color: var(--ok-text);
+}
+.attention-page.still .msg {
+  color: var(--warn-text);
+}
+.attention-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.attention.compact .attention-actions {
+  justify-content: flex-start;
+}
+.attention.compact .attention-actions .spacer {
+  display: none;
+}
+.attention-picker .control {
+  display: flex;
+  gap: var(--s-2);
+}
+.attention-picker .combobox {
+  flex: 1;
+}
+.attention-outcome {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.attention-outcome.ok {
+  color: var(--ok-text);
+}
+.attention-outcome.still {
+  color: var(--warn-text);
+}
+
+.view-head .item-switch {
+  min-width: 220px;
+}
+
+.manual-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  max-height: 52vh;
+  overflow-y: auto;
+}
+.manual-list li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-2);
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+}
+.manual-list li.focused {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.manual-list .label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+.source-text.inline {
+  padding: 2px var(--s-2);
+  font-weight: 400;
+}
+.chip svg {
+  margin-left: 2px;
+  color: var(--warn-text);
+}
+.attention .hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--fg-faint);
+}
+.attention-picker .combobox {
+  min-width: 0;
+}
+/* The Editor's column is narrow: the field takes the full width, the
+   button goes under it. */
+.attention.compact .attention-picker .control {
+  flex-direction: column;
+  align-items: stretch;
+}

@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { BrandMark } from "./components/BrandMark";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Icon, type IconName } from "./components/Icon";
 import { ProgressBar } from "./components/Progress";
-import Job from "./routes/Job";
+import Job, { type BatchMeta } from "./routes/Job";
 import Settings from "./routes/Settings";
 import SpotFix from "./routes/SpotFix";
-import Translate, { type Busy, type TranslateForm } from "./routes/Translate";
+import Translate, { basename, type TranslateForm } from "./routes/Translate";
+import { mergeRetried } from "./components/NeedsAttention";
 import {
   api,
   describeError,
@@ -15,10 +16,11 @@ import {
   onLog,
   onProgress,
   providerConfigured,
-  type ItemResult,
+  type ItemPages,
   type JobStatus,
   type PageRecord,
   type Progress,
+  type StillSkipped,
 } from "./lib/api";
 import "./App.css";
 
@@ -114,19 +116,24 @@ export default function App() {
   const exitCode = useRef<number | null | undefined>(undefined);
 
   const [form, setForm] = useState<TranslateForm>({
-    src: "",
-    folder: "",
+    paths: [],
     dest: "",
     source: "ja",
     lang: "en",
   });
-  const [busy, setBusy] = useState<Busy>("");
-  const [pagesDone, setPagesDone] = useState(0);
+  const [busy, setBusy] = useState(false);
   const [runningItems, setRunningItems] = useState<Set<string>>(new Set());
 
+  // The queue's latest status (the Queue view polls and reports it here, so
+  // the Editor's item switcher sees the same items), and what the run was
+  // started with: its title, its languages, its output folder.
   const [batch, setBatch] = useState<JobStatus | null>(null);
-  const [job, setJob] = useState<ItemResult | null>(null);
+  const [batchMeta, setBatchMeta] = useState<BatchMeta | null>(null);
+  // The item open in the Editor, its pages, and the page on screen.
+  // `manualPage` opens that page in hand-translation mode.
+  const [editor, setEditor] = useState<ItemPages | null>(null);
   const [page, setPage] = useState<PageRecord | null>(null);
+  const [manualPage, setManualPage] = useState<number | null>(null);
 
   // The CSS keys every light token on data-theme="light"; "system" is
   // resolved here so the stylesheet never has to know about the OS.
@@ -152,7 +159,6 @@ export default function App() {
     const subs = [
       onProgress((p) => {
         setProgress(frontPage(inFlight.current, p));
-        if (p.stage === "write") setPagesDone((n) => n + 1);
         if (p.stage === "item_start" || p.stage === "item_done") {
           setRunningItems((prev) => {
             const next = new Set(prev);
@@ -235,94 +241,134 @@ export default function App() {
     return true;
   }
 
-  async function runItem() {
+  /** Appends paths not already in the list (case-insensitively, as Windows
+   *  compares them), against the CURRENT list: a drop lands after renders. */
+  const addPaths = useCallback((paths: string[]) => {
+    setForm((prev) => {
+      const seen = new Set(prev.paths.map((x) => x.toLowerCase()));
+      const fresh = paths.filter((x) => {
+        const k = x.toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      return fresh.length ? { ...prev, paths: [...prev.paths, ...fresh] } : prev;
+    });
+  }, []);
+
+  /** Plan 3.1: every run goes through the queue, one file or fifty. */
+  async function runJob() {
     if (refuseUnconfigured()) return;
-    setBusy("item");
+    setBusy(true);
     setError("");
-    setPagesDone(0);
     setProgress(null);
     inFlight.current.clear();
     try {
-      // Before the run, not after: the editor opens on the first page the
-      // moment the result lands, and the canvas must already be allowed in.
+      // Before the run: the Editor loads pages from the output folder through
+      // the asset protocol, and only folders allowed here can be read.
       await api.allowOutputDir(form.dest);
       const settings = loadSettings();
-      const result = await api.item({
-        src_path: form.src,
-        dest_dir: form.dest,
-        // The job id is minted here and kept, because it is the delete scope
-        // and the address every later spot-fix uses. A server-minted id the UI
-        // only learns from a response it might not receive is an orphan.
-        job_id: `job-${Date.now()}`,
-        source: form.source,
-        lang: form.lang,
-        settings: settings.base_url && settings.model ? settings : undefined,
-      });
-      if (result.paused) {
-        // The provider refused the key, the credit or the model: no page got
-        // through. The pages that did are cached, so running again resumes.
-        setError(`The run paused: ${result.pause_reason || "the provider refused the account"}. ` +
-          "Fix it in Settings, then run the chapter again; finished pages are not redone.");
-        return;
-      }
-      setJob(result);
-      setPage(result.pages[0] ?? null);
-      setView("spotfix");
-    } catch (e) {
-      setError(describeError(e));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  /** AC-7: every file in the folder, through the queue; the Job view polls. */
-  async function runFolder() {
-    if (refuseUnconfigured()) return;
-    setBusy("folder");
-    setError("");
-    setPagesDone(0);
-    setProgress(null);
-    inFlight.current.clear();
-    try {
-      const settings = loadSettings();
       const status = await api.job.start({
+        // Minted here and kept: it is the address every later edit, retry
+        // and resume uses, and a server-minted id the UI only learns from a
+        // response it might not receive is an orphan.
         job_id: `job-${Date.now()}`,
-        dir: form.folder,
+        paths: form.paths,
         dest_dir: form.dest,
         source: form.source,
         lang: form.lang,
-        settings: settings.base_url && settings.model ? settings : undefined,
+        settings,
       });
+      const n = form.paths.length;
       setBatch(status);
+      setBatchMeta({
+        title: n === 1 ? basename(form.paths[0]) : `${basename(form.paths[0])} and ${n - 1} more`,
+        started: Date.now(),
+        source: form.source,
+        lang: form.lang,
+        dest: form.dest,
+      });
       setView("job");
     } catch (e) {
       setError(describeError(e));
     } finally {
-      setBusy("");
+      setBusy(false);
     }
   }
 
-  /** Replace one page in the job with the server's fresh record after an edit. */
+  // The latest openItem call: an earlier reply arriving after a later one
+  // (arrow keys on the chapter switcher) must not open the earlier choice.
+  const openSeq = useRef(0);
+
+  /** Open one item of the queue in the Editor. Throws for the caller to show. */
+  async function openItem(itemId: string, ordinal?: number, manual = false) {
+    if (!batch) return;
+    const seq = ++openSeq.current;
+    const item = await api.job.item(batch.job_id, itemId);
+    if (seq !== openSeq.current) return;
+    if (item.pages.length === 0) {
+      throw new Error(`${itemId} has no pages to open yet.`);
+    }
+    setEditor(item);
+    setPage(item.pages.find((p) => p.page === ordinal) ?? item.pages[0]);
+    setManualPage(manual && ordinal !== undefined ? ordinal : null);
+    setView("spotfix");
+  }
+
+  /** The queue's counts after a fix in the Editor: the Queue view and the
+   *  chapter switcher read them, and the Queue only polls while it runs. */
+  async function refreshBatch() {
+    if (!batch) return;
+    try {
+      setBatch(await api.job.status(batch.job_id));
+    } catch {
+      // The Queue view reports a sidecar that stopped answering.
+    }
+  }
+
+  /** Replace one page of the open item with the server's fresh record. */
   function updatePage(fresh: PageRecord) {
-    setPage(fresh);
-    setJob((prev) =>
-      prev
-        ? {
-            ...prev,
-            pages: prev.pages.map((p) => (p.page === fresh.page ? fresh : p)),
-          }
+    if (!fresh.skipped) void refreshBatch();
+    // A reply that lands after the user moved on -- another page, another
+    // chapter -- updates its own record and drags nobody back (review).
+    setPage((prev) =>
+      prev && prev.item_id === fresh.item_id && prev.page === fresh.page ? fresh : prev,
+    );
+    setEditor((prev) =>
+      prev && prev.item_id === fresh.item_id
+        ? { ...prev, pages: prev.pages.map((p) => (p.page === fresh.page ? fresh : p)) }
         : prev,
     );
   }
 
+  /** Pages a retry brought back: fixed ones replace their records. */
+  function retriedPages(results: (PageRecord | StillSkipped)[]) {
+    void refreshBatch();
+    const mine = (id: string) => results.filter((r) => r.item_id === id);
+    setEditor((prev) =>
+      prev ? { ...prev, pages: mergeRetried(prev.pages, mine(prev.item_id)) } : prev,
+    );
+    setPage((prev) => (prev ? (mergeRetried([prev], mine(prev.item_id))[0] ?? prev) : prev));
+  }
+
+  // While the job runs and the Queue view is not the one polling, keep its
+  // status fresh here: the Editor's switcher lists items as they finish, and
+  // its retry and hand actions know when the sidecar would refuse them.
+  useEffect(() => {
+    if (!batch || batch.done || view === "job") return;
+    const t = setInterval(() => void refreshBatch(), 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch?.job_id, batch?.done, view]);
+
   // Guarded: this runs outside the per-view ErrorBoundary, so a page record
   // without a fit summary would blank the whole window rather than one view.
   const failedPages =
-    job?.pages.filter((p) => (p.fit_summary?.fit_failed?.length ?? 0) > 0).length ?? 0;
+    editor?.pages.filter((p) => (p.fit_summary?.fit_failed?.length ?? 0) > 0).length ?? 0;
   // A run is live while a request is out or an item is between its start and
   // done lines. Outside that, the strip says Idle instead of the last stage
   // it happened to see ("write · page 3 of 3" long after the run ended).
-  const runActive = busy !== "" || runningItems.size > 0;
+  const runActive = busy || runningItems.size > 0;
 
   const NAV: { id: View; label: string; icon: IconName; disabled?: boolean; badge?: ReactNode }[] = [
     { id: "translate", label: "Translate", icon: "languages" },
@@ -337,15 +383,11 @@ export default function App() {
       id: "spotfix",
       label: "Editor",
       icon: "pencil",
-      disabled: !job,
+      disabled: !editor,
       badge: failedPages > 0 ? <span className="badge alert">{failedPages}</span> : undefined,
     },
     { id: "settings", label: "Settings", icon: "sliders" },
   ];
-
-  const warnings = [job?.cache_warning, job?.vision_warning].filter(
-    (w): w is string => typeof w === "string" && w !== "",
-  );
 
   return (
     <div className="shell">
@@ -368,7 +410,7 @@ export default function App() {
               onClick={() => setView(n.id)}
               disabled={n.disabled}
               aria-current={view === n.id ? "page" : undefined}
-              title={n.disabled ? `${n.label} appears after a run` : undefined}
+              title={n.disabled ? `${n.label} opens once something is translated` : undefined}
             >
               <Icon name={n.icon} />
               <span className="label">{n.label}</span>
@@ -411,38 +453,51 @@ export default function App() {
         <ErrorBoundary scope="This view" resetKey={view}>
           {view === "settings" ? (
             <Settings />
-          ) : view === "job" && batch ? (
+          ) : view === "job" && batch && batchMeta ? (
             <Job
               key={batch.job_id}
               jobId={batch.job_id}
               initial={batch}
+              meta={batchMeta}
               runningItems={runningItems}
+              onStatus={setBatch}
+              onOpenItem={openItem}
               onOpenSettings={() => setView("settings")}
             />
-          ) : view === "spotfix" && job && page ? (
+          ) : view === "spotfix" && editor && page ? (
             <SpotFix
-              job={job.job_id}
+              key={`${editor.job_id}/${editor.item_id}`}
+              item={editor}
+              items={batch?.items ?? []}
+              onSwitchItem={(id) => openItem(id)}
               page={page}
-              pages={job.pages}
-              onSelectPage={setPage}
-              destDir={form.dest}
-              lang={form.lang}
+              onSelectPage={(p) => {
+                setPage(p);
+                setManualPage(null);
+              }}
               onPage={updatePage}
+              onRetried={retriedPages}
+              manualPage={manualPage}
+              onManualPage={setManualPage}
+              blocked={
+                batch && !batch.done
+                  ? "The run is still going: retry and hand translation open when it finishes."
+                  : batch?.paused
+                    ? "The run is paused: resume or cancel it in the Queue first."
+                    : ""
+              }
             />
           ) : (
             <Translate
               form={form}
               onForm={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+              onAddPaths={addPaths}
               busy={busy}
               sidecarReady={sidecar === "ready"}
               configured={providerConfigured()}
               onOpenSettings={() => setView("settings")}
-              onRunItem={runItem}
-              onRunFolder={runFolder}
+              onRun={runJob}
               error={error}
-              warnings={warnings}
-              progress={progress}
-              pagesDone={pagesDone}
             />
           )}
         </ErrorBoundary>

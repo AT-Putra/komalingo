@@ -1,63 +1,76 @@
 /**
- * AC-7: the queue view. One row per item, its status and its reason.
+ * The queue (plan Phase 3.2): one row per chapter, its pages as they land,
+ * and when the run is done, the pages it could not translate with the ways
+ * to try them again.
  *
  * Polled, not pushed. The sidecar's stdout carries item_start / item_done
- * for the progress bar, but the per-item REASON -- why notes.txt was skipped,
- * which rule refused slip.cbz -- lives in the job's status snapshot, and a
- * snapshot every half second is cheaper to get right than reconstructing
- * the table from a stream of events. Polling stops when the job says done.
+ * for the status strip, but each item's page counts, its skipped pages and
+ * its reasons live in the job's status snapshot, and a snapshot every half
+ * second is cheaper to get right than rebuilding the table from a stream of
+ * events. Polling stops when the job says done, and starts again after a
+ * resume because the resumed status is not done.
  *
- * The job's warnings are shown once, above the table, because that is the
- * scope AC-6 gives the cbr->cbz warning: once per job, not once per row.
+ * The job's warnings are shown once, above the table: once per job is the
+ * scope AC-6 gives the cbr->cbz warning.
  *
  * Status is never colour alone: every pill carries an icon and the word.
  */
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Alert } from "../components/Alert";
 import { Icon, type IconName } from "../components/Icon";
+import { mergeRetried, NeedsAttention } from "../components/NeedsAttention";
 import { ProgressBar } from "../components/Progress";
 import {
   api,
   describeError,
+  displayPath,
   loadSettings,
   providerConfigured,
+  SOURCES,
+  TARGETS,
   type JobItem,
   type JobStatus,
+  type PageRecord,
+  type Source,
+  type StillSkipped,
+  type Target,
 } from "../lib/api";
 
 const POLL_MS = 500;
 
+/** What a run was started with, kept by App beside the job's status. */
+export interface BatchMeta {
+  title: string;
+  started: number;
+  source: Source;
+  lang: Target;
+  dest: string;
+}
+
 const PILL: Record<JobItem["status"], { icon: IconName; text: string }> = {
-  pending: { icon: "clock", text: "Pending" },
+  pending: { icon: "clock", text: "Waiting" },
   ok: { icon: "check", text: "Done" },
-  skipped: { icon: "skip-forward", text: "Skipped" },
+  skipped: { icon: "skip-forward", text: "Not a chapter" },
   failed: { icon: "alert-circle", text: "Failed" },
   cancelled: { icon: "ban", text: "Cancelled" },
   paused: { icon: "pause", text: "Paused" },
 };
 
-/** "3 pages skipped: 2, 5, 9" -- the pages the review will list. */
-function skippedSummary(item: JobItem): string {
-  const n = item.pages_skipped?.length ?? 0;
-  if (n === 0) return "";
-  const pages = item.pages_skipped.map((p) => p.ordinal).join(", ");
-  return `${n} ${n === 1 ? "page" : "pages"} skipped: ${pages}`;
-}
-
-/** Pages done of the total while the item runs; the final count after. */
-function pagesCell(item: JobItem, running: boolean): string {
-  if (running && item.pages_total) return `${item.pages_done ?? 0} / ${item.pages_total}`;
-  if (running && item.pages_done) return String(item.pages_done);
-  return item.pages ? String(item.pages) : "";
-}
+const KIND_ICON: Record<JobItem["kind"], IconName> = {
+  archive: "book",
+  pdf: "file",
+  images: "image",
+  image: "image",
+  unsupported: "file",
+};
 
 function StatusPill({ status, running }: { status: JobItem["status"]; running: boolean }) {
   if (running) {
     return (
       <span className="pill running">
         <Icon name="loader" size={12} />
-        Running
+        Translating
       </span>
     );
   }
@@ -70,28 +83,61 @@ function StatusPill({ status, running }: { status: JobItem["status"]; running: b
   );
 }
 
+function label<T extends string>(list: { value: T; label: string }[], v: T): string {
+  return list.find((x) => x.value === v)?.label ?? v;
+}
+
 export default function Job({
   jobId,
   initial,
+  meta,
   runningItems,
+  onStatus,
+  onOpenItem,
   onOpenSettings,
 }: {
   jobId: string;
   initial: JobStatus;
+  meta: BatchMeta;
   /** Item ids between an item_start and its item_done, from the event stream. */
   runningItems: Set<string>;
+  /** Every fresh snapshot, so the Editor's item switcher sees the same items. */
+  onStatus: (s: JobStatus) => void;
+  /** Open an item in the Editor; rejects with a reason to show here. */
+  onOpenItem: (itemId: string, ordinal?: number, manual?: boolean) => Promise<void>;
   onOpenSettings: () => void;
 }) {
   const [status, setStatus] = useState<JobStatus>(initial);
   const [error, setError] = useState("");
   const [resuming, setResuming] = useState(false);
+  // The skipped page RECORDS of each finished item that has some, for the
+  // review panels: thumbnails, the provider's words, the retry results.
+  const [skippedPages, setSkippedPages] = useState<Record<string, PageRecord[]>>({});
+  // Items whose last skipped page a retry just fixed: their panel closes,
+  // and this says so where it stood, with the way into the Editor.
+  const [cleared, setCleared] = useState<string[]>([]);
+  // Read by `retried`, which runs after an await: the state it closed over
+  // can be older than the panel's latest merge.
+  const skippedRef = useRef(skippedPages);
+  skippedRef.current = skippedPages;
+  // Focus goes to the newest "every page is translated" notice: the panel the
+  // user was working in has just closed under them.
+  const clearedFocus = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (cleared.length) clearedFocus.current?.focus();
+  }, [cleared.length]);
+
+  function take(fresh: JobStatus) {
+    setStatus(fresh);
+    onStatus(fresh);
+  }
 
   useEffect(() => {
     if (status.done) return;
     const timer = setInterval(async () => {
       try {
         const fresh = await api.job.status(jobId);
-        setStatus(fresh);
+        take(fresh);
         if (fresh.done) clearInterval(timer);
       } catch (e) {
         setError(describeError(e));
@@ -99,25 +145,50 @@ export default function Job({
       }
     }, POLL_MS);
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, status.done]);
+
+  // Load the records of skipped pages once their item has finished.
+  const reviewable = status.done && !status.paused;
+  const withSkips = status.items.filter((i) => i.status === "ok" && i.pages_skipped.length > 0);
+  const wanted = withSkips.map((i) => `${i.item_id}:${i.pages_skipped.length}`).join("|");
+  useEffect(() => {
+    if (!reviewable) return;
+    let live = true;
+    (async () => {
+      const next: Record<string, PageRecord[]> = {};
+      for (const item of withSkips) {
+        try {
+          const got = await api.job.item(jobId, item.item_id);
+          next[item.item_id] = got.pages.filter((p) => p.skipped);
+        } catch (e) {
+          if (live) setError(describeError(e));
+        }
+      }
+      if (live) setSkippedPages(next);
+    })();
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, reviewable, wanted]);
 
   async function cancel() {
     try {
-      setStatus(await api.job.cancel(jobId));
+      take(await api.job.cancel(jobId));
     } catch (e) {
       setError(describeError(e));
     }
   }
 
   /** Resume with the settings as they are NOW -- the pause was most often a
-   *  key or a model fixed in Settings since. The fresh status is not done,
-   *  so the polling effect above starts again on it. */
+   *  key or a model fixed in Settings since. */
   async function resume() {
     setResuming(true);
     setError("");
     try {
       const settings = loadSettings();
-      setStatus(await api.job.resume(jobId, providerConfigured(settings) ? settings : undefined));
+      take(await api.job.resume(jobId, providerConfigured(settings) ? settings : undefined));
     } catch (e) {
       setError(describeError(e));
     } finally {
@@ -125,8 +196,37 @@ export default function Job({
     }
   }
 
+  async function open(itemId: string, ordinal?: number, manual = false) {
+    setError("");
+    try {
+      await onOpenItem(itemId, ordinal, manual);
+    } catch (e) {
+      setError(describeError(e));
+    }
+  }
+
+  /** After a retry: the fixed pages leave the panel, and the counts refresh. */
+  async function retried(itemId: string, results: (PageRecord | StillSkipped)[]) {
+    const left = mergeRetried(skippedRef.current[itemId] ?? [], results).filter((p) => p.skipped);
+    setSkippedPages((prev) => ({ ...prev, [itemId]: left }));
+    if (left.length === 0) setCleared((prev) => (prev.includes(itemId) ? prev : [...prev, itemId]));
+    try {
+      take(await api.job.status(jobId));
+    } catch (e) {
+      setError(describeError(e));
+    }
+  }
+
   const total = status.items.length;
-  const finished = status.ok + status.skipped + status.failed + status.cancelled_items;
+  const finished =
+    status.ok + status.skipped + status.failed + status.cancelled_items + status.paused_items;
+  const counted = status.items.filter((i) => i.pages_total);
+  const pagesTotal = counted.reduce((n, i) => n + (i.pages_total ?? 0), 0);
+  const pagesDone = counted.reduce((n, i) => n + Math.min(i.pages_done, i.pages_total ?? 0), 0);
+  const translated = status.items.reduce(
+    (n, i) => n + Math.max(0, (i.status === "ok" ? i.pages : i.pages_done) - i.pages_skipped.length),
+    0,
+  );
   const state = status.paused
     ? status.done
       ? "paused"
@@ -136,13 +236,20 @@ export default function Job({
       : status.cancelled
         ? "cancelling"
         : "running";
+  const started = new Date(meta.started).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
   return (
     <div className="view stack">
       <div className="view-head">
         <div>
-          <h1>Queue</h1>
-          <p className="sub mono">{status.job_id}</p>
+          <h1>{meta.title}</h1>
+          <p className="sub">
+            {label(SOURCES, meta.source)} → {label(TARGETS, meta.lang)} · started {started} ·{" "}
+            <span className="mono">{displayPath(meta.dest)}</span>
+          </p>
         </div>
         <div className="row">
           {state === "running" && (
@@ -212,14 +319,15 @@ export default function Job({
 
       <section className="card stack">
         <ProgressBar
-          label="Items finished"
-          value={finished}
-          max={total}
+          label={pagesTotal ? "Pages finished" : "Chapters finished"}
+          value={pagesTotal ? pagesDone : finished}
+          max={pagesTotal || total}
+          indeterminate={!status.done && pagesTotal === 0 && finished === 0}
           showValue
         />
         <div className="stats stagger">
           <div className="stat" style={{ "--i": 0 } as CSSProperties}>
-            <div className="k">Finished</div>
+            <div className="k">Chapters</div>
             <div className="v">
               {finished}
               <span className="faint" style={{ fontSize: "0.9rem" }}>
@@ -229,29 +337,17 @@ export default function Job({
             </div>
           </div>
           <div className="stat ok" style={{ "--i": 1 } as CSSProperties}>
-            <div className="k">OK</div>
-            <div className="v">{status.ok}</div>
+            <div className="k">Pages translated</div>
+            <div className="v">{translated}</div>
           </div>
           <div className="stat skipped" style={{ "--i": 2 } as CSSProperties}>
-            <div className="k">Skipped</div>
-            <div className="v">{status.skipped}</div>
+            <div className="k">Pages not translated</div>
+            <div className="v">{status.pages_skipped}</div>
           </div>
           <div className="stat failed" style={{ "--i": 3 } as CSSProperties}>
             <div className="k">Failed</div>
             <div className="v">{status.failed}</div>
           </div>
-          {status.pages_skipped > 0 && (
-            <div className="stat skipped" style={{ "--i": 4 } as CSSProperties}>
-              <div className="k">Pages skipped</div>
-              <div className="v">{status.pages_skipped}</div>
-            </div>
-          )}
-          {status.cancelled_items > 0 && (
-            <div className="stat" style={{ "--i": 4 } as CSSProperties}>
-              <div className="k">Cancelled</div>
-              <div className="v">{status.cancelled_items}</div>
-            </div>
-          )}
         </div>
       </section>
 
@@ -259,46 +355,135 @@ export default function Job({
         <table>
           <thead>
             <tr>
-              <th>Item</th>
-              <th>Kind</th>
+              <th>Chapter</th>
+              <th>Pages</th>
               <th>Status</th>
-              <th className="num">Pages</th>
-              <th>Reason</th>
+              <th>Notes</th>
+              <th aria-label="Actions" />
             </tr>
           </thead>
           <tbody className="stagger">
-            {status.items.map((item, i) => (
-              <tr
-                key={item.item_id}
-                className={item.status}
-                style={{ "--i": i } as CSSProperties}
-              >
-                <td className="id">{item.item_id}</td>
-                <td className="muted">{item.kind}</td>
-                <td>
-                  <StatusPill
-                    status={item.status}
-                    running={item.status === "pending" && runningItems.has(item.item_id)}
-                  />
-                </td>
-                <td className="num">
-                  {pagesCell(item, item.status === "pending" && runningItems.has(item.item_id))}
-                </td>
-                <td className="reason">
-                  {[item.reason || item.warning, skippedSummary(item)].filter(Boolean).join(" · ")}
-                </td>
-              </tr>
-            ))}
+            {status.items.map((item, i) => {
+              const running = item.status === "pending" && runningItems.has(item.item_id);
+              const skippedN = item.pages_skipped.length;
+              return (
+                <tr key={item.item_id} className={item.status} style={{ "--i": i } as CSSProperties}>
+                  <td className="id">
+                    <span className="item-name">
+                      <Icon name={KIND_ICON[item.kind] ?? "file"} size={14} />
+                      {item.item_id}
+                    </span>
+                  </td>
+                  <td className="pages-cell">
+                    {running && item.pages_total ? (
+                      <ProgressBar
+                        label={`${item.item_id} pages`}
+                        value={item.pages_done}
+                        max={item.pages_total}
+                        size="sm"
+                      />
+                    ) : null}
+                    <span className="num">
+                      {running
+                        ? item.pages_total
+                          ? `${item.pages_done} / ${item.pages_total}`
+                          : `${item.pages_done}`
+                        : item.pages || ""}
+                    </span>
+                  </td>
+                  <td>
+                    <StatusPill status={item.status} running={running} />
+                  </td>
+                  <td className="reason">
+                    {item.reason || item.warning}
+                    {skippedN > 0 && (
+                      <span className="skip-note">
+                        <Icon name="skip-forward" size={12} />
+                        {skippedN} not translated: page {item.pages_skipped.map((p) => p.ordinal).join(", ")}
+                      </span>
+                    )}
+                  </td>
+                  <td className="actions">
+                    {item.status === "ok" && skippedN > 0 && reviewable && (
+                      <button
+                        type="button"
+                        className="btn sm"
+                        onClick={() => {
+                          const panel = document.getElementById(`attention-${item.item_id}`);
+                          panel?.scrollIntoView({ block: "start" });
+                          panel?.querySelector<HTMLElement>("h2")?.focus();
+                        }}
+                      >
+                        <Icon name="alert-triangle" size={14} />
+                        Review
+                      </button>
+                    )}
+                    {item.status === "ok" && (
+                      <button type="button" className="btn sm" onClick={() => open(item.item_id)}>
+                        <Icon name="pencil" size={14} />
+                        Open
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
             {status.items.length === 0 && (
               <tr>
                 <td colSpan={5} className="faint" style={{ textAlign: "center" }}>
-                  Nothing in the folder the queue could take.
+                  Nothing in what was added could be translated.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+
+      {status.pages_skipped > 0 && status.paused && (
+        <p className="faint small">
+          Resume or cancel the run to retry the pages that were not translated.
+        </p>
+      )}
+      {cleared.map((id, n) => (
+        <Alert key={`cleared-${id}`} tone="success" title={`${id}: every page is translated now`}>
+          <span className="row" style={{ marginTop: 6 }}>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => open(id)}
+              ref={n === cleared.length - 1 ? clearedFocus : undefined}
+            >
+              <Icon name="pencil" size={14} />
+              Open in the Editor
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => setCleared((prev) => prev.filter((x) => x !== id))}
+            >
+              Dismiss
+            </button>
+          </span>
+        </Alert>
+      ))}
+      {reviewable &&
+        withSkips.map((item) => {
+          const pages = skippedPages[item.item_id];
+          if (!pages || pages.length === 0) return null;
+          return (
+            <NeedsAttention
+              key={item.item_id}
+              jobId={jobId}
+              itemId={item.item_id}
+              itemName={withSkips.length > 1 ? item.item_id : undefined}
+              pages={pages}
+              lang={meta.lang}
+              destDir={meta.dest}
+              onRetried={(results) => retried(item.item_id, results)}
+              onTranslateMyself={(ordinal) => open(item.item_id, ordinal, true)}
+            />
+          );
+        })}
     </div>
   );
 }
