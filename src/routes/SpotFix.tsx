@@ -261,7 +261,7 @@ export default function SpotFix({
               {tight} tight
             </span>
           )}
-          {failed === 0 && tight === 0 && (
+          {failed === 0 && tight === 0 && !page.skipped && (
             <span className="pill ok">
               <Icon name="check" size={12} />
               Every bubble fits
@@ -290,8 +290,8 @@ export default function SpotFix({
 
       <nav className="page-strip" aria-label="Pages">
         {pages.map((p) => {
-          const f = p.fit_summary.fit_failed.length;
-          const c = p.fit_summary.fit_compromised.length;
+          const f = p.fit_summary?.fit_failed?.length ?? 0;
+          const c = p.fit_summary?.fit_compromised?.length ?? 0;
           return (
             <button
               key={p.page}
@@ -299,15 +299,46 @@ export default function SpotFix({
               className="chip"
               onClick={() => onSelectPage(p)}
               aria-current={p.page === page.page ? "true" : undefined}
-              aria-label={`Page ${p.page}${f ? `, ${f} did not fit` : c ? `, ${c} tight` : ""}`}
+              aria-label={`Page ${p.page}${p.skipped ? ", not translated" : f ? `, ${f} did not fit` : c ? `, ${c} tight` : ""}`}
             >
               {p.page}
-              {f > 0 ? <span className="mark" /> : c > 0 ? <span className="mark warn" /> : null}
+              {p.skipped ? (
+                <Icon name="skip-forward" size={11} />
+              ) : f > 0 ? (
+                <span className="mark" />
+              ) : c > 0 ? (
+                <span className="mark warn" />
+              ) : null}
             </button>
           );
         })}
       </nav>
 
+      {page.skipped && (
+        <Alert tone="warn" title="This page was not translated">
+          {page.skipped.message} The original page is in its slot, so the chapter stays in
+          order.
+          {page.skipped.remembered &&
+            " This model refused it on an earlier run, so it was not asked again."}
+          {page.skipped.detail && (
+            <details style={{ marginTop: 6 }}>
+              <summary>Details from the provider</summary>
+              <code className="alert-path">{page.skipped.detail}</code>
+            </details>
+          )}
+        </Alert>
+      )}
+      {page.choice && (
+        <Alert tone="info">
+          {page.choice.mode === "manual"
+            ? "You translated this page by hand."
+            : page.choice.mode === "text_only"
+              ? `Translated without the page image (${page.choice.model.replace(/#text$/, "")}). Check that no artwork was erased as text.`
+              : page.choice.mode === "vision"
+                ? `Retried with ${page.choice.model} after it was skipped.`
+                : `Translated with ${page.choice.model}, which you picked for this page.`}
+        </Alert>
+      )}
       {page.cache_warning && <Alert tone="warn">{page.cache_warning}</Alert>}
       {page.edit_on_other_model && (
         <Alert tone="info">
@@ -399,9 +430,11 @@ export default function SpotFix({
               ))}
               {ordered.length === 0 && (
                 <li className="empty">
-                  {skipped.length
-                    ? "Nothing on this page was translated."
-                    : "No text was detected on this page."}
+                  {page.skipped
+                    ? `Not translated: ${page.dismissed?.length ?? 0} bubbles are left as drawn.`
+                    : skipped.length
+                      ? "Nothing on this page was translated."
+                      : "No text was detected on this page."}
                 </li>
               )}
             </ol>

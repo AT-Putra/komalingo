@@ -168,10 +168,40 @@ async function runPages(item: string, pages: number, perStage: number) {
   }
 }
 
+/** A page the model refused: the original in its slot, nothing translated. */
+function skippedPage(item_id: string, n: number): PageRecord {
+  const base = fakePage(item_id, n);
+  return {
+    ...base,
+    output: pageImage(n, []),
+    detections: 0,
+    regions: [],
+    dismissed: base.regions.map((r) => ({
+      id: r.id, polygon: r.polygon, text: r.text, reason: "the page was skipped", editable: false,
+    })),
+    fit_summary: { fit_compromised: [], fit_failed: [], retranslated: [] },
+    skipped: {
+      kind: "refused",
+      message: "The model refused to translate this page.",
+      detail: '{"code":403,"message":"Your chosen model requires moderation and your input was flagged","metadata":{"reasons":["violence"]}}',
+      status: 403,
+      model: "gpt-4o",
+      with_image: true,
+    },
+  };
+}
+
 const jobs = new Map<string, JobStatus>();
+// Items whose page `n` the mock model refuses, and the one item that makes
+// the provider refuse the ACCOUNT -- so the Queue's skipped counts and its
+// pause banner can both be seen in a browser.
+const REFUSED_PAGES: Record<string, number[]> = { v02: [2] };
+const PAUSES_ON = "v04";
 
 async function runJob(job: JobStatus) {
   for (const item of job.items) {
+    // A resumed job runs only what the pause left, as the sidecar's does.
+    if (item.status !== "pending") continue;
     if (job.cancelled) {
       if (item.status === "pending") {
         item.status = "cancelled";
@@ -189,10 +219,34 @@ async function runJob(job: JobStatus) {
       emit("sidecar-progress", { stage: "item_done", item: item.item_id, page: 0, pct: 100 });
       continue;
     }
+    if (job.paused) continue; // a paused job claims nothing more
     job.pending--;
     job.running++;
+    item.pages_total = item.pages;
     emit("sidecar-progress", { stage: "item_start", item: item.item_id, page: 0, pct: 0 });
-    await runPages(item.item_id, item.pages, 120);
+    if (item.item_id === PAUSES_ON && !resumed.has(job.job_id)) {
+      await runPages(item.item_id, 1, 120);
+      job.running--;
+      item.status = "paused";
+      item.reason = "paused before its first page";
+      job.paused = true;
+      job.paused_items++;
+      job.pause_reason =
+        'The provider refused the account (HTTP 401): {"error":{"message":"Incorrect API key provided"}}';
+      emit("sidecar-progress", { stage: "item_done", item: item.item_id, page: 0, pct: 100 });
+      continue;
+    }
+    for (let p = 1; p <= item.pages; p++) {
+      await runPages(item.item_id, 1, 120);
+      item.pages_done = p;
+      if (REFUSED_PAGES[item.item_id]?.includes(p)) {
+        item.pages_skipped.push({
+          ordinal: p, member: `${String(p).padStart(3, "0")}.png`, kind: "refused",
+          message: "The model refused to translate this page.",
+        });
+        job.pages_skipped++;
+      }
+    }
     job.running--;
     if (item.item_id.includes("corrupt")) {
       item.status = "failed";
@@ -206,6 +260,9 @@ async function runJob(job: JobStatus) {
   }
   job.done = true;
 }
+
+// Jobs resumed once: the mock's "fixed key" lets the paused item through.
+const resumed = new Set<string>();
 
 // The page cache the Settings card reads; a clear empties it for the session.
 let mockCache = { bytes: 851_968_000, pages: 214, edited_pages: 3 };
@@ -253,7 +310,7 @@ async function api(path: string, method: string, body: Record<string, unknown> |
     const result: ItemResult = {
       job_id,
       item_id,
-      pages: [1, 2, 3].map((n) => fakePage(item_id, n)),
+      pages: [1, 2, 3].map((n) => (n === 2 ? skippedPage(item_id, n) : fakePage(item_id, n))),
       cache_warning: null,
     };
     return result;
@@ -305,31 +362,68 @@ async function api(path: string, method: string, body: Record<string, unknown> |
     const job: JobStatus = {
       job_id,
       items: [
-        { path: "v01.cbz", item_id: "v01", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 4 },
-        { path: "v02.cbz", item_id: "v02", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 3 },
-        { path: "notes.txt", item_id: "notes", kind: "unsupported", status: "pending", reason: "", warning: "", output: "", pages: 0 },
-        { path: "extra.pdf", item_id: "extra", kind: "pdf", status: "pending", reason: "", warning: "", output: "", pages: 2 },
-        { path: "corrupt.cbz", item_id: "corrupt", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 1 },
+        { path: "v01.cbz", item_id: "v01", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 4, pages_total: null, pages_done: 0, pages_skipped: [] },
+        { path: "v02.cbz", item_id: "v02", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 3, pages_total: null, pages_done: 0, pages_skipped: [] },
+        { path: "notes.txt", item_id: "notes", kind: "unsupported", status: "pending", reason: "", warning: "", output: "", pages: 0, pages_total: null, pages_done: 0, pages_skipped: [] },
+        { path: "ch05", item_id: "ch05", kind: "images", status: "pending", reason: "", warning: "", output: "", pages: 2, pages_total: null, pages_done: 0, pages_skipped: [] },
+        { path: "extra.pdf", item_id: "extra", kind: "pdf", status: "pending", reason: "", warning: "", output: "", pages: 2, pages_total: null, pages_done: 0, pages_skipped: [] },
+        { path: "v04.cbz", item_id: "v04", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 2, pages_total: null, pages_done: 0, pages_skipped: [] },
+        { path: "corrupt.cbz", item_id: "corrupt", kind: "archive", status: "pending", reason: "", warning: "", output: "", pages: 1, pages_total: null, pages_done: 0, pages_skipped: [] },
       ],
       warnings: ["v03.cbr was read as a .cbz; RAR archives are not written back."],
       ok: 0,
       skipped: 0,
       failed: 0,
       cancelled_items: 0,
-      pending: 5,
+      paused_items: 0,
+      pages_skipped: 0,
+      pending: 7,
       running: 0,
       done: false,
       cancelled: false,
+      paused: false,
+      pause_reason: "",
     };
     jobs.set(job_id, job);
     void runJob(job);
     return structuredClone(job);
   }
-  const m = path.match(/^\/api\/job\/([^/]+)(\/cancel)?$/);
+  const m = path.match(/^\/api\/job\/([^/]+)(\/cancel|\/resume)?$/);
   if (m) {
     const job = jobs.get(decodeURIComponent(m[1]));
     if (!job) throw { status: 404, body: "no such job" };
-    if (m[2]) job.cancelled = true;
+    if (m[2] === "/cancel") {
+      job.cancelled = true;
+      if (job.paused && job.done) {
+        // Cancel settles a paused job: what it left is cancelled.
+        for (const it of job.items) {
+          if (it.status === "pending" || it.status === "paused") {
+            if (it.status === "paused") job.paused_items--;
+            else job.pending--;
+            it.status = "cancelled";
+            job.cancelled_items++;
+          }
+        }
+        job.paused = false;
+        job.pause_reason = "";
+      }
+    }
+    if (m[2] === "/resume") {
+      if (!job.paused || !job.done) throw { status: 409, body: '{"error":"not paused"}' };
+      resumed.add(job.job_id);
+      for (const it of job.items) {
+        if (it.status === "paused") {
+          it.status = "pending";
+          it.reason = "";
+          job.paused_items--;
+          job.pending++;
+        }
+      }
+      job.paused = false;
+      job.pause_reason = "";
+      job.done = false;
+      void runJob(job);
+    }
     return structuredClone(job);
   }
   throw { status: 404, body: `mock: no route for ${method} ${path}` };
