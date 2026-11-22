@@ -1626,8 +1626,12 @@ def _skip_page(h, img, regions, fmt, source, ordinal, item_id, member, out_dir, 
         "inpaint_calls": 0,
         "fit_summary": {k: list(v) for k, v in EMPTY_FIT.items()},
         "regions": [],
+        # A region OCR already set aside keeps ITS reason ("punctuation
+        # only"), so the Editor's hand mode leaves it out (review).
         "dismissed": [{"id": r["id"], "polygon": r["polygon"], "text": r.get("text"),
-                       "reason": SKIPPED_REASON, "editable": False} for r in detected],
+                       "reason": (r.get("dismiss_reason") or SKIPPED_REASON)
+                       if r.get("not_text") else SKIPPED_REASON,
+                       "editable": False} for r in detected],
         "skipped": skipped,
     }
     if src_fmt == pdf.PDF:

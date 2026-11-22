@@ -786,6 +786,16 @@ def retries(c: Checks, tmp: str, stub) -> None:
             f"page 1 as skipped ({st['status']}, "
             f"{[p['ordinal'] for p in keyjob.items[0].pages_skipped]})")
 
+    # Retrying a page that is already fixed asks nobody (review).
+    before = stub.chat_requests
+    _quiet(sidecar_main.retry_pages, sidecar_main.RetryRequest(
+        job_id="retry-key", item_id=k_item, ordinals=[3], dest_dir=out, mode="same",
+        settings=settings))
+    st = _wait_retry(sidecar_main, "retry-key", k_item)
+    c.check(st["status"] == "done" and st["done"] == 0 and stub.chat_requests == before,
+            f"[retry] a second retry of a page fixed since asks nobody "
+            f"({st['done']} retried, {stub.chat_requests - before} request(s))")
+
     # 409 while the job runs.
     class Running:
         done, paused = False, False

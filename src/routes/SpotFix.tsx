@@ -21,19 +21,25 @@
  */
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { Alert } from "../components/Alert";
 import { Icon } from "../components/Icon";
+import { NeedsAttention } from "../components/NeedsAttention";
 import {
   api,
   describeError,
   loadSettings,
   type DismissedRegion,
+  type ItemPages,
+  type JobItem,
   type PageRecord,
   type Region,
   type RepackStatus,
-  type Target,
+  type StillSkipped,
 } from "../lib/api";
+import { pageUrl } from "../lib/pageUrl";
+
+/** OCR's own set-aside: nothing a translation could change. */
+const PUNCTUATION = "punctuation only";
 
 /** Even-odd ray casting, in page coordinates. */
 /** Where the English is: the room when the typesetter found one, else the block. */
@@ -61,26 +67,41 @@ function severity(r: Region): number {
 }
 
 export default function SpotFix({
-  job,
+  item,
+  items,
+  onSwitchItem,
   page,
-  pages,
   onSelectPage,
-  destDir,
-  lang,
   onPage,
+  onRetried,
+  manualPage,
+  onManualPage,
+  blocked,
 }: {
-  job: string;
+  /** The open item: its pages, and the JOB's language and output folder --
+   *  a re-render under another language is a cache miss by design (the
+   *  mixed-language guard), so it must be the job's, never the form's. */
+  item: ItemPages;
+  /** The queue's items, for the switcher. */
+  items: JobItem[];
+  onSwitchItem: (itemId: string) => Promise<void>;
   page: PageRecord;
-  /** Every page of the item, for the strip. Flags come from each record. */
-  pages: PageRecord[];
   onSelectPage: (p: PageRecord) => void;
-  destDir: string;
-  /** The job's target language. A re-render under another one is a cache
-   *  miss by design (the mixed-language guard), so it must be the job's. */
-  lang: Target;
   /** Called with the server's fresh record after every successful re-render. */
   onPage: (p: PageRecord) => void;
+  /** Pages a retry brought back, fixed or still not translated. */
+  onRetried: (pages: (PageRecord | StillSkipped)[]) => void;
+  /** The page open in hand-translation mode, if any. */
+  manualPage: number | null;
+  onManualPage: (ordinal: number | null) => void;
+  /** Why the sidecar would refuse a retry or a hand render right now. */
+  blocked: string;
 }) {
+  const job = item.job_id;
+  const pages = item.pages;
+  const destDir = item.dest_dir;
+  const lang = item.lang;
+  const manual = page.skipped != null && manualPage === page.page;
   const canvas = useRef<HTMLCanvasElement>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
@@ -106,6 +127,15 @@ export default function SpotFix({
   const skipped = useMemo(
     () => (page.dismissed ?? []).filter((d) => d.editable),
     [page.dismissed],
+  );
+  // What gets a dashed outline: the model's nulls on a translated page, and
+  // on a page that was not translated, every region OCR read as text.
+  const outlined = useMemo(
+    () =>
+      page.skipped
+        ? (page.dismissed ?? []).filter((d) => d.reason !== PUNCTUATION)
+        : skipped,
+    [page.skipped, page.dismissed, skipped],
   );
 
   // The delivered page, redrawn whenever the server hands back a new one. The
@@ -137,7 +167,7 @@ export default function SpotFix({
       // Skipped regions dashed, so the user can find what the model left
       // untranslated without it reading as a problem the typesetter had.
       ctx.setLineDash([10, 6]);
-      for (const d of skipped) {
+      for (const d of outlined) {
         ctx.beginPath();
         d.polygon.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
         ctx.closePath();
@@ -149,9 +179,8 @@ export default function SpotFix({
     };
     // No cache-buster on a data: URL: a query string would corrupt it, and an
     // inline image cannot be stale anyway.
-    const src = pageSrc(page.output);
-    img.src = src.startsWith("data:") ? src : `${src}?v=${Date.now()}`;
-  }, [page, selected, skipped]);
+    img.src = pageUrl(page.output, Date.now());
+  }, [page, selected, outlined]);
 
   function pick(e: React.MouseEvent<HTMLCanvasElement>) {
     const el = canvas.current;
@@ -163,8 +192,15 @@ export default function SpotFix({
     const y = ((e.clientY - box.top) * el.height) / box.height;
     const hit = page.regions.find((r) => inPolygon(x, y, laidInto(r)));
     if (hit) return select(hit);
-    const miss = skipped.find((d) => inPolygon(x, y, d.polygon));
-    if (miss) select(miss);
+    const miss = outlined.find((d) => inPolygon(x, y, d.polygon));
+    if (!miss) return;
+    if (manual) {
+      // In hand mode a click on the page goes to that bubble's field.
+      setSelected(miss.id);
+      document.getElementById(`manual-${miss.id}`)?.focus();
+      return;
+    }
+    if (!page.skipped) select(miss);
   }
 
   /** A skipped region starts from an empty draft: it has no translation. */
@@ -234,6 +270,7 @@ export default function SpotFix({
     }
   }
 
+  const openable = items.filter((i) => i.status === "ok");
   const current = ordered.find((r) => r.id === selected) ?? null;
   const currentSkipped = current ? null : (skipped.find((d) => d.id === selected) ?? null);
   const failed = page.fit_summary.fit_failed.length;
@@ -248,6 +285,28 @@ export default function SpotFix({
             Click a bubble on the page, or pick it from the list, then rewrite it.
           </p>
         </div>
+        {openable.length > 1 && (
+          <div className="field item-switch">
+            <label className="label" htmlFor="item-switch">
+              Chapter
+            </label>
+            <select
+              id="item-switch"
+              value={item.item_id}
+              onChange={(e) => {
+                setError("");
+                onSwitchItem(e.target.value).catch((err) => setError(describeError(err)));
+              }}
+            >
+              {openable.map((i) => (
+                <option key={i.item_id} value={i.item_id}>
+                  {i.item_id}
+                  {i.pages_skipped.length ? ` (${i.pages_skipped.length} not translated)` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="row">
           {failed > 0 && (
             <span className="pill failed">
@@ -384,6 +443,7 @@ export default function SpotFix({
         </div>
 
         <div className="stack">
+          {!page.skipped && (
           <section className="card">
             <div className="card-head">
               <span className="icon-tile">
@@ -461,7 +521,7 @@ export default function SpotFix({
                             skipped
                           </span>
                         </span>
-                        {d.text && <span className="text" lang="ja">{d.text}</span>}
+                        {d.text && <span className="text" lang={page.source ?? "ja"}>{d.text}</span>}
                       </button>
                     </li>
                   ))}
@@ -469,8 +529,39 @@ export default function SpotFix({
               </>
             )}
           </section>
+          )}
 
-          {current ? (
+          {page.skipped ? (
+            manual ? (
+              <ManualPanel
+                key={`manual-${page.page}`}
+                item={item}
+                page={page}
+                focus={selected}
+                onFocus={setSelected}
+                onDone={(fresh) => {
+                  setSelected(null);
+                  onManualPage(null);
+                  onPage(fresh);
+                }}
+                onCancel={() => onManualPage(null)}
+                blocked={blocked}
+              />
+            ) : (
+              <NeedsAttention
+                key={`attention-${page.page}`}
+                compact
+                jobId={job}
+                itemId={item.item_id}
+                pages={[page]}
+                lang={lang}
+                destDir={destDir}
+                onRetried={onRetried}
+                onTranslateMyself={(n) => onManualPage(n)}
+                blocked={blocked}
+              />
+            )
+          ) : current ? (
             <section className="card stack" key={current.id}>
               <div className="card-head" style={{ marginBottom: 0 }}>
                 <span className="icon-tile">
@@ -527,7 +618,7 @@ export default function SpotFix({
                 </div>
               </div>
               {currentSkipped.text && (
-                <div className="source-text" lang="ja">{currentSkipped.text}</div>
+                <div className="source-text" lang={page.source ?? "ja"}>{currentSkipped.text}</div>
               )}
               <div className="field">
                 <label className="label" htmlFor="spotfix-text">
@@ -576,15 +667,6 @@ export default function SpotFix({
   );
 }
 
-/**
- * A local file path as something the webview will load.
- *
- * Through the asset protocol, which the Rust side opened for this run's
- * output folder (allow_output_dir) before the item was started. The
- * sidecar hands paths back \\?\-prefixed (atomic.long_path); the prefix is
- * for Win32, not for a URL, so it comes off first. A data: URL (the dev
- * mock) passes through untouched.
- */
 /** What a re-render reports when the sidecar cannot rebuild the archive at
  *  all -- a placement from before it recorded the item's input. Rendered
  *  as the failed alert, with its own reason. */
@@ -596,10 +678,120 @@ const UNREPACKABLE: RepackStatus = {
   repacks: 0,
 };
 
-function pageSrc(p: string): string {
-  if (p.startsWith("data:")) return p;
-  const plain = p.startsWith("\\\\?\\UNC\\")
-    ? "\\\\" + p.slice(8)
-    : p.replace(/^\\\\\?\\/, "");
-  return convertFileSrc(plain);
+/**
+ * Hand-translation of a page that was not translated (plan Phase 3.4): every
+ * region OCR read, each with its own field, then ONE render. A field left
+ * empty keeps that bubble as drawn -- the sidecar stores it as a decided
+ * "no text here", so no later run sends the page back to the model that
+ * refused it. Nothing here asks a model.
+ */
+function ManualPanel({
+  item,
+  page,
+  focus,
+  onFocus,
+  onDone,
+  onCancel,
+  blocked,
+}: {
+  item: ItemPages;
+  page: PageRecord;
+  blocked: string;
+  focus: number | null;
+  onFocus: (id: number) => void;
+  onDone: (fresh: PageRecord) => void;
+  onCancel: () => void;
+}) {
+  const regions = (page.dismissed ?? []).filter((d) => d.reason !== PUNCTUATION);
+  const [texts, setTexts] = useState<Record<number, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const filled = regions.filter((r) => (texts[r.id] ?? "").trim()).length;
+
+  async function render() {
+    setBusy(true);
+    setError("");
+    try {
+      const typed: Record<string, string> = {};
+      for (const r of regions) {
+        const t = (texts[r.id] ?? "").trim();
+        if (t) typed[String(r.id)] = t;
+      }
+      onDone(
+        await api.pages.manual({
+          job_id: item.job_id,
+          item_id: item.item_id,
+          ordinal: page.page,
+          dest_dir: item.dest_dir,
+          lang: item.lang,
+          texts: typed,
+        }),
+      );
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card stack manual-panel">
+      <div className="card-head" style={{ marginBottom: 0 }}>
+        <span className="icon-tile">
+          <Icon name="pencil" />
+        </span>
+        <div>
+          <h2>Translate page {page.page} yourself</h2>
+          <p className="sub">Type each bubble. Leave one empty to keep it as drawn.</p>
+        </div>
+      </div>
+      <ol className="manual-list">
+        {regions.map((r) => (
+          <li key={r.id} className={focus === r.id ? "focused" : undefined}>
+            <label className="label" htmlFor={`manual-${r.id}`}>
+              #{r.id}
+              {r.text && (
+                <span className="source-text inline" lang={page.source ?? "ja"}>
+                  {r.text}
+                </span>
+              )}
+            </label>
+            <textarea
+              id={`manual-${r.id}`}
+              rows={2}
+              value={texts[r.id] ?? ""}
+              onFocus={() => onFocus(r.id)}
+              onChange={(e) => setTexts((prev) => ({ ...prev, [r.id]: e.target.value }))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !blocked) {
+                  e.preventDefault();
+                  void render();
+                }
+              }}
+              disabled={busy}
+            />
+          </li>
+        ))}
+        {regions.length === 0 && <li className="empty">No text was detected on this page.</li>}
+      </ol>
+      {error && <Alert tone="error">{error}</Alert>}
+      {blocked && <p className="hint">{blocked}</p>}
+      <div className="row end">
+        <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>
+          Back
+        </button>
+        {/* With nothing typed, the page is accepted as drawn: every bubble
+            stays, and it stops counting as not translated. */}
+        <button type="button" className="btn primary" onClick={render} disabled={busy || !!blocked}>
+          {busy ? <Icon name="loader" className="spin" /> : <Icon name="refresh" />}
+          {busy
+            ? "Rendering…"
+            : filled
+              ? `Render page (${filled} of ${regions.length})`
+              : "Keep the page as drawn"}
+        </button>
+      </div>
+      <p className="hint">Ctrl+Enter renders.</p>
+    </section>
+  );
 }

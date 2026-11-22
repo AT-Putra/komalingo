@@ -164,6 +164,8 @@ export interface PageRecord {
    * is one plain sentence; `detail` is the provider's own reply, verbatim.
    */
   skipped?: PageSkip | null;
+  /** The language the page is written in (ja, zh, ko): its OCR text's lang. */
+  source?: string;
   /** The pair the user chose for this page: another model, no image, or by hand. */
   choice?: { model: string; mode: "vision" | "model" | "text_only" | "manual" } | null;
 }
@@ -200,21 +202,54 @@ export interface RepackStatus {
   repacks: number;
 }
 
-export interface ItemResult {
+/**
+ * One item of a job, as the Editor opens it (GET /api/job/{id}/item/{item}).
+ * `lang` and `dest_dir` are the JOB's: an edit re-renders under the language
+ * the pages were translated to, into the folder they were written to.
+ */
+export interface ItemPages {
   job_id: string;
   item_id: string;
+  kind: JobItem["kind"];
+  status: JobItem["status"];
+  /** Empty until the item has finished. */
   pages: PageRecord[];
   cache_warning: string | null;
-  /**
-   * Non-empty when the vision probe found the model text-only (every page
-   * was translated without its image) or could not run (the reason says
-   * which). The batch view carries the same sentence in JobStatus.warnings;
-   * this is the single-file flow's copy of it.
-   */
-  vision_warning?: string;
-  /** The run paused (a key, credit or model problem); no pages came back. */
-  paused?: boolean;
-  pause_reason?: string;
+  lang: Target;
+  dest_dir: string;
+}
+
+/** Plan 2.1: how a skipped page is asked again. */
+export type RetryMode = "same" | "text_only" | "model";
+
+/** A page a retry could not fix: the same shape as a skipped page record. */
+export interface StillSkipped {
+  page: number;
+  page_hash: string;
+  item_id: string;
+  member: string | null;
+  skipped: PageSkip;
+}
+
+/** Where a page retry has got to (GET /api/pages/retry). */
+export interface RetryStatus {
+  status: "running" | "done" | "failed";
+  mode: RetryMode;
+  model: string;
+  total: number;
+  done: number;
+  /** Fixed pages come back as full records (with `regions`); the rest as StillSkipped. */
+  pages: (PageRecord | StillSkipped)[];
+  error: string;
+  /** "account" when the provider refused the key or the model: nothing was written. */
+  kind: string;
+  repack: RepackStatus | null;
+}
+
+/** True when a retried page came back translated: it carries no `skipped`.
+ *  (A skipped page RECORD has `regions: []` too, so `regions` would not do.) */
+export function isFixed(p: PageRecord | StillSkipped): p is PageRecord {
+  return !p.skipped;
 }
 
 /** One row of AC-7's queue: what became of one file in the folder. */
@@ -325,18 +360,6 @@ export const api = {
     settings?: ProviderSettings;
   }) => call<TranslateResult>("/api/translate", "POST", req),
 
-  /** Every page of one CBZ, through the page cache. */
-  item: (req: {
-    src_path: string;
-    dest_dir: string;
-    job_id: string;
-    item_id?: string;
-    lang?: Target;
-    /** The language the pages are written in: which OCR reads them. Phase 4. */
-    source?: Source;
-    settings?: ProviderSettings;
-  }) => call<ItemResult>("/api/item", "POST", req),
-
   /**
    * AC-10: one region's text changes, that page alone is re-drawn.
    *
@@ -385,6 +408,40 @@ export const api = {
     /** A paused job goes on under the same id, with the settings as they are now. */
     resume: (jobId: string, settings?: ProviderSettings) =>
       call<JobStatus>(`/api/job/${encodeURIComponent(jobId)}/resume`, "POST", { settings }),
+    /** One item's page records, for the Editor. */
+    item: (jobId: string, itemId: string) =>
+      call<ItemPages>(
+        `/api/job/${encodeURIComponent(jobId)}/item/${encodeURIComponent(itemId)}`,
+      ),
+  },
+
+  /** Plan 2: the workarounds for pages that were not translated. */
+  pages: {
+    /** Ask skipped pages again. Answers at once; poll `retryStatus`. */
+    retry: (req: {
+      job_id: string;
+      item_id: string;
+      ordinals: number[];
+      dest_dir: string;
+      lang: Target;
+      mode: RetryMode;
+      /** The other model's id, for mode "model". */
+      model?: string;
+      settings: ProviderSettings;
+    }) => call<RetryStatus>("/api/pages/retry", "POST", req),
+    retryStatus: (jobId: string, itemId: string) =>
+      call<RetryStatus>(
+        `/api/pages/retry?job_id=${encodeURIComponent(jobId)}&item_id=${encodeURIComponent(itemId)}`,
+      ),
+    /** Every bubble of one page, typed by the user. Blank or absent = left as drawn. */
+    manual: (req: {
+      job_id: string;
+      item_id: string;
+      ordinal: number;
+      dest_dir: string;
+      lang: Target;
+      texts: Record<string, string>;
+    }) => call<PageRecord>("/api/pages/manual", "POST", req),
   },
 };
 
