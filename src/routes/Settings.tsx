@@ -13,8 +13,8 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { appLocalDataDir, join, resolveResource } from "@tauri-apps/api/path";
 import { Alert } from "../components/Alert";
+import { ErrorAlert } from "../components/ErrorAlert";
 import { Icon } from "../components/Icon";
 import { ModelCombobox, type ModelComboboxHandle } from "../components/ModelCombobox";
 import {
@@ -27,6 +27,7 @@ import {
   type ModelInfo,
   type ProviderSettings,
 } from "../lib/api";
+import { samplePaths } from "../lib/sample";
 
 const BYTES = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 
@@ -43,23 +44,6 @@ function formatBytes(n: number): string {
 }
 
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
-
-/**
- * Where the sample run reads from and writes to. Both ABSOLUTE.
- *
- * The sidecar resolves a relative path against its own working directory,
- * which under Tauri is wherever the app was launched from -- not the repo, and
- * not anywhere the user can see. The first version sent "fixtures/sample.png"
- * and "out/test", and the sidecar answered with a FileNotFoundError inside the
- * 500 envelope. The page is bundled as a resource (tauri.conf.json
- * bundle.resources) so it exists in a built app as well as under `tauri dev`;
- * the output goes under the app's own data folder, where a test run cannot
- * land in a directory the user did not choose.
- */
-async function samplePaths(): Promise<{ src: string; dest: string }> {
-  const [src, data] = await Promise.all([resolveResource("sample.png"), appLocalDataDir()]);
-  return { src, dest: await join(data, "test") };
-}
 
 /** Which card a message belongs under. */
 type Where = "provider" | "test" | "cache";
@@ -219,7 +203,7 @@ export default function Settings() {
     return (
       <>
         {/* The provider's own status and body, unedited. See AC-8. */}
-        {error?.where === where && <Alert tone="error">{error.text}</Alert>}
+        {error?.where === where && <ErrorAlert error={error.text} />}
         {note?.where === where && (
           <Alert tone={note.tone}>
             {note.text}

@@ -1876,3 +1876,132 @@ td.actions .btn + .btn {
   flex-direction: column;
   align-items: stretch;
 }
+
+/* ---------- Phase 4: the Editor's view tools ---------- */
+
+.canvas-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+.canvas-tools .zoom-level {
+  min-width: 44px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+}
+.canvas-tools .btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.canvas-scroll {
+  overflow: auto;
+  max-height: max(340px, calc(100vh - 400px));
+  border-radius: var(--r-sm);
+}
+.canvas-frame .canvas-scroll canvas {
+  height: auto;
+}
+.page-strip {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: var(--s-1);
+}
+.chip.thumb-chip {
+  flex-direction: column;
+  flex: none;
+  gap: 2px;
+  padding: 3px 3px 2px;
+  border-radius: var(--r-md);
+  min-height: 0;
+}
+.chip.thumb-chip img {
+  display: block;
+  height: 56px;
+  width: 40px;
+  object-fit: cover;
+  object-position: top;
+  border-radius: 4px;
+  background: var(--muted);
+}
+.chip .chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.2;
+}
+
+/* ---------- Phase 4: finish, errors, first-run setup ---------- */
+
+.card.summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.card.summary h2 {
+  margin: 0;
+}
+.card.summary .icon-tile {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-md);
+  color: var(--ok-text);
+  background: var(--accent-soft);
+  flex: none;
+}
+.card.summary .icon-tile.warn {
+  color: var(--warn-text);
+  background: var(--warn-soft);
+}
+.alert .alert-details {
+  margin-top: var(--s-2);
+  font-size: 0.85rem;
+}
+.alert .alert-details summary {
+  cursor: pointer;
+}
+.alert .alert-details pre {
+  margin: var(--s-2) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow: auto;
+}
+.setup-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+.setup-steps > li {
+  display: flex;
+  gap: var(--s-3);
+  align-items: flex-start;
+}
+.setup-steps .step-no {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-top: 22px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--ok-text);
+  font-weight: 600;
+  font-size: 0.85rem;
+  flex: none;
+}
+.setup-steps .stack-sm {
+  flex: 1;
+}
+
+.setup .hint {
+  font-size: 0.8rem;
+  color: var(--fg-faint);
+}

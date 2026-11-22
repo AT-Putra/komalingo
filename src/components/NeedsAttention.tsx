@@ -22,6 +22,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { Alert } from "./Alert";
+import { ErrorAlert } from "./ErrorAlert";
 import { Icon } from "./Icon";
 import { ModelCombobox, type ModelComboboxHandle } from "./ModelCombobox";
 import { ProgressBar } from "./Progress";
@@ -452,7 +453,7 @@ export function NeedsAttention({
         />
       )}
       {fixedNote && <Alert tone="success">{fixedNote}</Alert>}
-      {error && <Alert tone="error">{error}</Alert>}
+      <ErrorAlert error={error} />
     </section>
   );
 }

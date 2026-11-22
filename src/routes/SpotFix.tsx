@@ -22,6 +22,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Alert } from "../components/Alert";
+import { ErrorAlert } from "../components/ErrorAlert";
 import { Icon } from "../components/Icon";
 import { NeedsAttention } from "../components/NeedsAttention";
 import {
@@ -40,6 +41,37 @@ import { pageUrl } from "../lib/pageUrl";
 
 /** OCR's own set-aside: nothing a translation could change. */
 const PUNCTUATION = "punctuation only";
+
+/** The zoom steps, as a share of the frame's width; "fit" shows the whole page. */
+const ZOOMS = [0.5, 0.75, 1, 1.5, 2];
+type Zoom = "fit" | number;
+
+/** A CSS colour token, read at draw time so the canvas follows the theme. */
+function token(name: string, fallback: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+/** Controls whose own arrow keys move something: a caret, a choice, a value.
+ *  A button does not -- after a click on a page chip, -> must still turn. */
+const OWNS_ARROWS =
+  "input,textarea,select,[role=listbox],[role=option],[role=combobox],[role=slider],[role=radiogroup],[role=radio],[role=tablist],[contenteditable=true]";
+/** ...and Space as well clicks a button, a link or a disclosure. */
+const OWNS_SPACE = `${OWNS_ARROWS},button,a[href],summary`;
+
+/** Taller than this many widths is a strip: Fit fits its width, not its height. */
+const STRIP_RATIO = 3;
+/** Ctrl+wheel delta per zoom step: one notch of a mouse wheel, many trackpad events. */
+const WHEEL_STEP = 100;
+
+/** The decoded images of one page record, so a redraw does not fetch again. */
+interface PageArt {
+  page: PageRecord;
+  out: HTMLImageElement;
+  /** The original, once decoded; null while loading or when there is none. */
+  orig: HTMLImageElement | null;
+  /** The original was listed but did not load (evicted, or not allowed). */
+  origFailed: boolean;
+}
 
 /** Even-odd ray casting, in page coordinates. */
 /** Where the English is: the room when the typesetter found one, else the block. */
@@ -103,8 +135,27 @@ export default function SpotFix({
   const lang = item.lang;
   const manual = page.skipped != null && manualPage === page.page;
   const canvas = useRef<HTMLCanvasElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  const strip = useRef<HTMLElement>(null);
+  // Fit by default: the whole page in view, the way it is read (plan 4.2).
+  const [zoom, setZoom] = useState<Zoom>("fit");
+  // The original page instead of the translated one: pinned by the button,
+  // or held with Space for a quick before/after.
+  const [pinOriginal, setPinOriginal] = useState(false);
+  const [holdOriginal, setHoldOriginal] = useState(false);
+  const [art, setArt] = useState<PageArt | null>(null);
+  // Bumped when the theme changes: the canvas colours are CSS tokens read at
+  // draw time, and nothing else in the draw effect changes with the theme.
+  const [themeTick, setThemeTick] = useState(0);
+  const artNow = art?.page === page ? art : null;
+  const hasOriginal = !!page.original && !artNow?.origFailed;
+  const showOriginal = (pinOriginal || holdOriginal) && hasOriginal;
   const [selected, setSelected] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
+  // Text typed and not yet rendered: turning the page with a key would drop it.
+  const selectedText =
+    selected == null ? "" : (page.regions.find((r) => r.id === selected)?.translation ?? "");
+  const unsaved = selected != null && draft !== selectedText;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [landed, setLanded] = useState(false);
@@ -142,49 +193,208 @@ export default function SpotFix({
   // cache-buster is the point: the re-render writes to the SAME path, so
   // without it the browser shows the pre-edit image and the user concludes
   // nothing happened.
+  //
+  // A new page starts with nothing selected: page N's draft in page N+1's
+  // bubble of the same number is one click from being rendered there. Keyed
+  // on the ordinal, so a re-render's fresh record of this page keeps it.
   useEffect(() => {
-    const el = canvas.current;
-    if (!el) return;
-    const img = new Image();
-    img.onload = () => {
-      el.width = img.naturalWidth;
-      el.height = img.naturalHeight;
-      const ctx = el.getContext("2d");
-      if (!ctx) return;
-      ctx.drawImage(img, 0, 0);
-      for (const r of page.regions) {
-        if (!r.fit_failed && !r.fit_compromised && r.id !== selected) continue;
-        ctx.beginPath();
-        laidInto(r).forEach(([x, y], i) =>
-          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y),
-        );
-        ctx.closePath();
-        ctx.lineWidth = 3;
-        ctx.strokeStyle =
-          r.id === selected ? "#2b7" : r.fit_failed ? "#d33" : "#e90";
-        ctx.stroke();
-      }
-      // Skipped regions dashed, so the user can find what the model left
-      // untranslated without it reading as a problem the typesetter had.
-      ctx.setLineDash([10, 6]);
-      for (const d of outlined) {
-        ctx.beginPath();
-        d.polygon.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
-        ctx.closePath();
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = d.id === selected ? "#2b7" : "#7c8594";
-        ctx.stroke();
-      }
-      ctx.setLineDash([]);
+    setSelected(null);
+    setDraft("");
+    setLanded(false);
+    setError("");
+  }, [page.page]);
+
+  useEffect(() => {
+    const watch = new MutationObserver(() => setThemeTick((n) => n + 1));
+    watch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => watch.disconnect();
+  }, []);
+
+  // Loaded once per record: a new selection or the original toggle redraws
+  // from the decoded images instead of fetching and decoding the page again.
+  useEffect(() => {
+    let live = true;
+    const out = new Image();
+    out.onload = () => {
+      if (!live) return;
+      setArt({ page, out, orig: null, origFailed: false });
+      if (!page.original) return;
+      // After the page itself, so the toggle never delays the page.
+      const orig = new Image();
+      const settle = (patch: Partial<PageArt>) => {
+        if (live) setArt((a) => (a && a.page === page ? { ...a, ...patch } : a));
+      };
+      orig.onload = () => settle({ orig });
+      orig.onerror = () => settle({ origFailed: true });
+      orig.src = pageUrl(page.original);
     };
     // No cache-buster on a data: URL: a query string would corrupt it, and an
     // inline image cannot be stale anyway.
-    img.src = pageUrl(page.output, Date.now());
-  }, [page, selected, outlined]);
+    out.src = pageUrl(page.output, Date.now());
+    return () => {
+      live = false;
+    };
+  }, [page]);
+
+  useEffect(() => {
+    const el = canvas.current;
+    // Until the new record's page decodes, the last one stays on screen.
+    if (!el || !artNow) return;
+    const colour = {
+      selected: token("--accent", "#22c55e"),
+      failed: token("--danger", "#ef4444"),
+      tight: token("--warn", "#f59e0b"),
+      skipped: token("--fg-faint", "#64748b"),
+    };
+    // Resized only when the page's size changes: assigning width reallocates
+    // the backing store, about 96 MB for a 4000 x 6000 page, on every toggle.
+    if (el.width !== artNow.out.naturalWidth) el.width = artNow.out.naturalWidth;
+    if (el.height !== artNow.out.naturalHeight) el.height = artNow.out.naturalHeight;
+    const ctx = el.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, el.width, el.height);
+    ctx.drawImage(artNow.out, 0, 0);
+    if (showOriginal && artNow.orig) {
+      // The original is a smaller JPEG; drawn at the page's own size, so
+      // the canvas keeps its geometry and the toggle does not jump.
+      ctx.drawImage(artNow.orig, 0, 0, el.width, el.height);
+      return;
+    }
+    for (const r of page.regions) {
+      if (!r.fit_failed && !r.fit_compromised && r.id !== selected) continue;
+      ctx.beginPath();
+      laidInto(r).forEach(([x, y], i) =>
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y),
+      );
+      ctx.closePath();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle =
+        r.id === selected ? colour.selected : r.fit_failed ? colour.failed : colour.tight;
+      ctx.stroke();
+    }
+    // Skipped regions dashed, so the user can find what the model left
+    // untranslated without it reading as a problem the typesetter had.
+    ctx.setLineDash([10, 6]);
+    for (const d of outlined) {
+      ctx.beginPath();
+      d.polygon.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+      ctx.closePath();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = d.id === selected ? colour.selected : colour.skipped;
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }, [artNow, page.regions, selected, outlined, showOriginal, themeTick]);
+
+  // Left/Right turn the page; Space held shows the original. Not when the
+  // focused control owns the key, and never a page turn that would drop text
+  // typed and not yet rendered: the hand-translation fields, or a draft.
+  useEffect(() => {
+    function owned(e: KeyboardEvent, by: string) {
+      const el = e.target instanceof Element ? e.target : null;
+      return e.defaultPrevented || !!el?.closest(by) || !!(el as HTMLElement | null)?.isContentEditable;
+    }
+    function down(e: KeyboardEvent) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      if (owned(e, e.key === " " ? OWNS_SPACE : OWNS_ARROWS)) return;
+      const at = pages.findIndex((p) => p.page === page.page);
+      const turn = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+      if (turn !== 0) {
+        if (manual || unsaved) return;
+        const next = pages[at + turn];
+        if (at < 0 || !next) return;
+        e.preventDefault();
+        onSelectPage(next);
+      } else if (e.key === " " && hasOriginal) {
+        e.preventDefault();
+        setHoldOriginal(true);
+      }
+    }
+    function up(e: KeyboardEvent) {
+      if (e.key === " ") setHoldOriginal(false);
+    }
+    // A Space held while the window loses focus never sends its keyup.
+    function release() {
+      setHoldOriginal(false);
+    }
+    function hidden() {
+      if (document.hidden) release();
+    }
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", release);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", release);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+  }, [pages, page, onSelectPage, manual, unsaved, hasOriginal]);
+
+  // Ctrl+wheel zooms. A native listener: React's wheel handler is passive,
+  // and the page would scroll as well as zoom.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    // Accumulated: a trackpad pinch sends dozens of small events, and a step
+    // per event ran straight to the end of the range.
+    let acc = 0;
+    function wheel(e: WheelEvent) {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      acc += e.deltaY;
+      if (Math.abs(acc) < WHEEL_STEP) return;
+      const dir = acc < 0 ? 1 : -1;
+      acc = 0;
+      setZoom((z) => {
+        const now = z === "fit" ? 1 : z;
+        const i = ZOOMS.findIndex((v) => v >= now);
+        const at = i < 0 ? ZOOMS.length - 1 : i;
+        return ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, at + dir))];
+      });
+    }
+    el.addEventListener("wheel", wheel, { passive: false });
+    return () => el.removeEventListener("wheel", wheel);
+  }, []);
+
+  // The current page's chip stays in view as the page changes.
+  // The strip alone scrolls: scrollIntoView would move the window as well.
+  useEffect(() => {
+    const bar = strip.current;
+    const chip = bar?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (!bar || !chip) return;
+    // From the rendered boxes, so it holds whatever the strip's positioning.
+    const left = chip.getBoundingClientRect().left - bar.getBoundingClientRect().left + bar.scrollLeft;
+    if (left < bar.scrollLeft) bar.scrollLeft = left;
+    else if (left + chip.offsetWidth > bar.scrollLeft + bar.clientWidth)
+      bar.scrollLeft = left + chip.offsetWidth - bar.clientWidth;
+  }, [page.page]);
+
+  function stepZoom(dir: 1 | -1) {
+    setZoom((z) => {
+      const now = z === "fit" ? 1 : z;
+      const i = ZOOMS.indexOf(now);
+      return ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, (i < 0 ? 2 : i) + dir))];
+    });
+  }
+  const isStrip =
+    !!artNow && artNow.out.naturalHeight > artNow.out.naturalWidth * STRIP_RATIO;
+  const canvasStyle: CSSProperties =
+    zoom !== "fit"
+      ? { width: `${Math.round(zoom * 100)}%`, maxWidth: "none", maxHeight: "none" }
+      : isStrip
+        ? // Fitting a 720 x 20000 strip's height leaves an 18 px sliver.
+          { width: "100%", maxWidth: "100%", maxHeight: "none" }
+        : { maxHeight: "max(320px, calc(100vh - 420px))", width: "auto", maxWidth: "100%" };
 
   function pick(e: React.MouseEvent<HTMLCanvasElement>) {
     const el = canvas.current;
     if (!el) return;
+    if (showOriginal) return; // nothing to pick on the page as drawn
+    // The new record's page has not decoded: the canvas still shows the last
+    // one, and a hit here would select a bubble the user cannot see.
+    if (!artNow) return;
     const box = el.getBoundingClientRect();
     // Divide the display scale out. el.width is the PAGE width; box.width is
     // however many screen pixels it is currently shown in.
@@ -347,7 +557,7 @@ export default function SpotFix({
         </div>
       </div>
 
-      <nav className="page-strip" aria-label="Pages">
+      <nav className="page-strip" aria-label="Pages" ref={strip}>
         {pages.map((p) => {
           const f = p.fit_summary?.fit_failed?.length ?? 0;
           const c = p.fit_summary?.fit_compromised?.length ?? 0;
@@ -355,19 +565,37 @@ export default function SpotFix({
             <button
               key={p.page}
               type="button"
-              className="chip"
+              className="chip thumb-chip"
               onClick={() => onSelectPage(p)}
               aria-current={p.page === page.page ? "true" : undefined}
               aria-label={`Page ${p.page}${p.skipped ? ", not translated" : f ? `, ${f} did not fit` : c ? `, ${c} tight` : ""}`}
             >
-              {p.page}
-              {p.skipped ? (
-                <Icon name="skip-forward" size={11} />
-              ) : f > 0 ? (
-                <span className="mark" />
-              ) : c > 0 ? (
-                <span className="mark warn" />
-              ) : null}
+              <img
+                key={p.thumb || p.output}
+                src={pageUrl(p.thumb || p.output)}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                onError={(e) => {
+                  // The thumbnail evicted, or its folder not allowed: the
+                  // delivered page is always there. Once, so a missing page
+                  // does not loop.
+                  const img = e.currentTarget;
+                  if (img.dataset.fallback || !p.thumb) return void (img.style.visibility = "hidden");
+                  img.dataset.fallback = "1";
+                  img.src = pageUrl(p.output);
+                }}
+              />
+              <span className="chip-label">
+                {p.page}
+                {p.skipped ? (
+                  <Icon name="skip-forward" size={11} />
+                ) : f > 0 ? (
+                  <span className="mark" />
+                ) : c > 0 ? (
+                  <span className="mark warn" />
+                ) : null}
+              </span>
             </button>
           );
         })}
@@ -405,7 +633,7 @@ export default function SpotFix({
           is not being used here.
         </Alert>
       )}
-      {error && <Alert tone="error">{error}</Alert>}
+      <ErrorAlert error={error} />
       {repack?.status === "failed" && (
         <Alert tone="warn">
           The page was re-rendered, but the archive beside it was not rebuilt:{" "}
@@ -415,28 +643,91 @@ export default function SpotFix({
 
       <div className="editor-grid">
         <div className="canvas-frame">
-          <canvas
-            ref={canvas}
-            onClick={pick}
-            className="page"
-            aria-label={`Page ${page.page}, ${page.member}. Click a bubble to select it.`}
-          />
+          <div className="canvas-tools" role="group" aria-label="Page view">
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => setZoom("fit")}
+              aria-pressed={zoom === "fit"}
+              title="Fit the whole page"
+            >
+              Fit
+            </button>
+            <button type="button" className="btn icon sm" onClick={() => stepZoom(-1)} aria-label="Zoom out">
+              −
+            </button>
+            <span className="zoom-level mono" aria-live="polite">
+              {zoom === "fit" ? "fit" : `${Math.round(zoom * 100)}%`}
+            </span>
+            <button type="button" className="btn icon sm" onClick={() => stepZoom(1)} aria-label="Zoom in">
+              +
+            </button>
+            <span className="spacer" />
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => {
+                // Off clears a stuck hold as well as the pin.
+                if (showOriginal) {
+                  setPinOriginal(false);
+                  setHoldOriginal(false);
+                } else setPinOriginal(true);
+              }}
+              aria-pressed={showOriginal}
+              aria-keyshortcuts="Space"
+              disabled={!hasOriginal}
+              aria-describedby={hasOriginal ? undefined : "no-original"}
+              title={
+                hasOriginal
+                  ? "Show the page as it came in (or hold Space)"
+                  : "No original saved for this page: run the chapter again to get one"
+              }
+            >
+              <Icon name={showOriginal ? "eye-off" : "eye"} size={14} />
+              Original
+            </button>
+          </div>
+          {!hasOriginal && (
+            <span id="no-original" className="sr-only">
+              No original saved for this page: run the chapter again to get one.
+            </span>
+          )}
+          <div className="canvas-scroll" ref={scroller}>
+            <canvas
+              ref={canvas}
+              onClick={pick}
+              className="page"
+              style={canvasStyle}
+              aria-label={
+                showOriginal
+                  ? `Page ${page.page}, ${page.member}, as it came in.`
+                  : `Page ${page.page}, ${page.member}. Click a bubble to select it.`
+              }
+            />
+          </div>
           <div className="legend" aria-hidden>
             <span>
-              <i style={{ background: "#2b7" }} /> selected
+              <i style={{ background: "var(--accent)" }} /> selected
             </span>
             <span>
-              <i style={{ background: "#d33" }} /> did not fit
+              <i style={{ background: "var(--danger)" }} /> did not fit
             </span>
             <span>
-              <i style={{ background: "#e90" }} /> tight
+              <i style={{ background: "var(--warn)" }} /> tight
             </span>
-            {skipped.length > 0 && (
+            {outlined.length > 0 && (
               <span>
-                <i style={{ background: "transparent", outline: "2px dashed #7c8594", outlineOffset: -2 }} />{" "}
-                skipped
+                <i
+                  style={{
+                    background: "transparent",
+                    outline: "2px dashed var(--fg-faint)",
+                    outlineOffset: -2,
+                  }}
+                />{" "}
+                {page.skipped ? "not translated" : "skipped"}
               </span>
             )}
+            <span className="faint">← → pages · Space original</span>
             <span className="spacer" />
             <span className="mono">{page.member}</span>
           </div>
@@ -774,7 +1065,7 @@ function ManualPanel({
         ))}
         {regions.length === 0 && <li className="empty">No text was detected on this page.</li>}
       </ol>
-      {error && <Alert tone="error">{error}</Alert>}
+      <ErrorAlert error={error} />
       {blocked && <p className="hint">{blocked}</p>}
       <div className="row end">
         <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>

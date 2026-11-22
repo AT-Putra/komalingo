@@ -164,6 +164,11 @@ export interface PageRecord {
    * is one plain sentence; `detail` is the provider's own reply, verbatim.
    */
   skipped?: PageSkip | null;
+  /** The page as it came in, a small JPEG in the page cache: the Editor's
+   *  original/translated toggle. Empty when it could not be written. */
+  original?: string;
+  /** A small top crop of the original, for the Editor's page strip. */
+  thumb?: string;
   /** The language the page is written in (ja, zh, ko): its OCR text's lang. */
   source?: string;
   /** The pair the user chose for this page: another model, no image, or by hand. */
@@ -328,7 +333,8 @@ export const api = {
   start: () => invoke<number>("start_sidecar"),
   stop: () => invoke<void>("stop_sidecar"),
 
-  health: () => call<{ status: string; pid: number }>("/api/health"),
+  /** cache_root is absent from a sidecar built before it was added. */
+  health: () => call<{ status: string; pid: number; cache_root?: string }>("/api/health"),
 
   /** Let the editor's canvas load pages from this folder (asset protocol). */
   allowOutputDir: (path: string) => invoke<void>("allow_output_dir", { path }),

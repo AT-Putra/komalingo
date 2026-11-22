@@ -19,6 +19,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -1582,6 +1583,104 @@ def _keep_stored(regions, h, lang, model, refused: bool) -> None:
 
 
 EMPTY_FIT = {"fit_compromised": [], "fit_failed": [], "retranslated": []}
+
+# The Editor's original/translated toggle (plan Phase 4.2). Written into the
+# page's cache directory while the page is in hand, so the cap counts it,
+# eviction takes it and Clear removes it with the page -- no second store, no
+# route, and no re-read of a member from the archive.
+ORIGINAL_PREVIEW = "original.jpg"
+# The preview's short edge is kept at this or more: the Editor shows the page
+# about a frame wide, and the original is drawn at the translated page's size.
+# Reducing by the LONG edge made a 720 x 20000 strip 56 px wide.
+PREVIEW_SHORT_EDGE = 1000
+# ...and its area at this or less, so a wide strip is not a 30-megapixel JPEG
+# for the webview to decode. Above a 720 x 20000 strip (14.4 MP), which must
+# keep its width.
+PREVIEW_MAX_AREA = 16_000_000
+# The page strip's chip shows the top of the page, 40 x 56 CSS px: the thumb
+# is that crop, at twice the size for a high-density screen.
+THUMBNAIL = "thumb.jpg"
+THUMB_LONG_EDGE = 160
+THUMB_ASPECT = 1.4
+
+
+def _preview_factor(w: int, h: int) -> int:
+    """The integer reduce factor for a w x h page's original preview: the
+    short edge stays at PREVIEW_SHORT_EDGE or more, unless the area bound needs
+    more."""
+    by_edge = max(1, min(w, h) // PREVIEW_SHORT_EDGE)
+    # The smallest f with w*h / f^2 <= PREVIEW_MAX_AREA: ceil(sqrt(n)) is
+    # isqrt(n - 1) + 1.
+    n = -(-(w * h) // PREVIEW_MAX_AREA)
+    return max(by_edge, math.isqrt(n - 1) + 1)
+
+
+def _write_jpeg(h: str, name: str, make) -> str:
+    """One preview file beside the page's cache record. Its path, or "" when
+    it could not be written: a preview is a convenience, never a reason for a
+    page to fail. Written once per page; a cache hit finds it there."""
+    path = os.path.join(cache.page_dir(h), name)
+    long = atomic.long_path(path)
+    try:
+        if os.path.exists(long):
+            return long
+        buf = io.BytesIO()
+        make().save(buf, "JPEG", quality=85, optimize=True)
+        with atomic.atomic_write(path) as fh:
+            fh.write(buf.getvalue())
+        return long
+    # Any failure, not only the disk's: a mode Pillow cannot convert or an
+    # allocation that fails is still no reason to fail the page.
+    except Exception as e:  # noqa: BLE001
+        _log(f"preview: page {h[:12]}: {name} not written ({type(e).__name__}: {e})")
+        return ""
+
+
+def _write_previews(h: str, img: Image.Image) -> tuple[str, str]:
+    """The page as it came in, for the Editor's original toggle, and the top
+    of it, small, for the page strip: (original, thumb) paths, "" for either
+    one that could not be written.
+
+    Image.reduce, not a resample: an integer box-downscale is a fraction of
+    the memory and time of LANCZOS on a 4000 px scan, and four pages are in
+    flight at once under AC-12's bound. Grayscale stays grayscale -- JPEG
+    takes L as it is, and widening a 4000 x 6000 page to RGB first is 72 MB
+    for nothing. The thumb reduces a box of the page, so the crop is never
+    copied out at full size.
+    """
+    w, ht = img.size
+    # Converted only when a file is missing: a cache hit finds both written.
+    held: list[Image.Image] = []
+
+    def base() -> Image.Image:
+        if not held:
+            held.append(img if img.mode in ("L", "RGB") else img.convert("RGB"))
+        return held[0]
+
+    def original() -> Image.Image:
+        f = _preview_factor(w, ht)
+        return base().reduce(f) if f > 1 else base()
+
+    def thumb() -> Image.Image:
+        # A spread's right-hand page: the first one read right to left, and
+        # not the gutter a centred crop of the whole spread would show.
+        left = w // 2 if w > ht else 0
+        box = (left, 0, w, min(ht, max(1, round((w - left) * THUMB_ASPECT))))
+        f = -(-max(box[2] - box[0], box[3]) // THUMB_LONG_EDGE)
+        return base().reduce(max(1, f), box=box)
+
+    return _write_jpeg(h, ORIGINAL_PREVIEW, original), _write_jpeg(h, THUMBNAIL, thumb)
+
+
+def _preview_paths(h: str) -> tuple[str, str]:
+    """The (original, thumb) already written for a page, "" for a missing one.
+    A spot-fix re-render answers with these: it never has the page as it came
+    in decoded, and the Editor swaps its record in whole."""
+    found = []
+    for name in (ORIGINAL_PREVIEW, THUMBNAIL):
+        long = atomic.long_path(os.path.join(cache.page_dir(h), name))
+        found.append(long if os.path.exists(long) else "")
+    return found[0], found[1]
 SKIPPED_REASON = "the page was skipped"
 
 
@@ -1636,6 +1735,7 @@ def _skip_page(h, img, regions, fmt, source, ordinal, item_id, member, out_dir, 
     }
     if src_fmt == pdf.PDF:
         record["pdf_extract"] = img.info.get("pdf_extract")
+    record["original"], record["thumb"] = _write_previews(h, img)
     return record
 
 
@@ -1675,6 +1775,7 @@ def _finish_page(h, img, regions, detected, dismissed, fmt, source, ordinal, ite
         "regions": regions,
         "dismissed": dismissed,
     }
+    record["original"], record["thumb"] = _write_previews(h, img)
     if src_fmt == pdf.PDF:
         # Which path the page took, so check_pdf can assert the
         # render fallback was NOT taken without re-reading the PDF.
@@ -2278,6 +2379,7 @@ def _rerender_locked(placed, job_id, item_id, ordinal, region_id, text, dest_dir
         archive_stale=not _is_images(placed),
         repack=None,
     )
+    record["original"], record["thumb"] = _preview_paths(h)
     _persist(h, record, detected, complete, bool(record.get("redetect_failed")))
     record["cache_warning"] = cache.enforce_cap(job_id)
     # A placement written before src_path existed has no archive to rebuild
