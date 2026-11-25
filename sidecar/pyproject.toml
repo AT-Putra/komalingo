@@ -26,7 +26,8 @@ dependencies = [
     # and /Info across, img2pdf rebuilds without re-encoding a single page.
     # PyMuPDF is AGPL and is not an option (spec, hard constraint 2).
     "pypdfium2>=5,<6",
-    "pypdf>=6,<7",
+    # 7.1 made add_outline_item keyword-only; containers/pdf.py calls it so.
+    "pypdf>=7.1,<8",
     "img2pdf>=0.6,<0.7",
 ]
 

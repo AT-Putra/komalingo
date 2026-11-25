@@ -439,7 +439,9 @@ def copy_outline(reader: PdfReader, writer: PdfWriter) -> int:
         del parents[depth + 1:]
         while len(parents) <= depth:
             parents.append(parents[-1])
-        item = writer.add_outline_item(title, idx, parent=parents[depth])
+        # Keyword-only since pypdf 7.1: a positional call is a TypeError.
+        item = writer.add_outline_item(title=title, page_number=idx,
+                                       parent=parents[depth])
         parents.append(item)
         n += 1
     return n
@@ -454,7 +456,7 @@ def _copy_info(info, writer: PdfWriter) -> None:
     TEXT string '/False' (review). pypdf's public `metadata` getter returns
     a copy, so the names are written onto the writer's own dictionary, which
     is the one `write` serialises; the attribute is private and the pin
-    (`pypdf>=6,<7`) is what makes relying on it acceptable.
+    (`pypdf>=7.1,<8`) is what makes relying on it acceptable.
     """
     writer.add_metadata({str(k): v for k, v in info.items()
                          if isinstance(v, str) and not isinstance(v, NameObject)})

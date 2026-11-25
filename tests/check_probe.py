@@ -127,9 +127,10 @@ def main():
         data = json.loads(body)
         models = data.get("data", [])
         ids = [m.get("id") for m in models]
-        combos = [m.get("id") for m in models if m.get("owned_by") == "combo"]
+        # No combo assert here: whether a gateway exposes owned_by="combo"
+        # models is the user's gateway config, not the app's behaviour. That
+        # combos are listed unfiltered is pinned offline in check_provider.
         c.check(MODEL in ids, f"MT_MODEL={MODEL!r} is selectable (found {len(ids)} models)")
-        c.check(combos, f"at least one combo model (found {len(combos)})")
     except Exception as e:
         c.check(False, f"unparseable /models: {e}")
 

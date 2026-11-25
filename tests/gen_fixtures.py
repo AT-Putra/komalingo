@@ -1137,7 +1137,8 @@ def gen_pdf():
 
     def add(items, parent):
         for title, page, children in items:
-            node = writer.add_outline_item(title, page, parent=parent)
+            node = writer.add_outline_item(title=title, page_number=page,
+                                           parent=parent)
             add(children, node)
 
     add(PDF_OUTLINE, None)
